@@ -1,0 +1,1 @@
+CFLAGS-libaxil-nd-o := -fPIC

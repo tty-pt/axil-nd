@@ -1,0 +1,87 @@
+{
+  "name": "@tty-pt/libaxil-nd",
+  "version": "0.1.0",
+  "description": "NeverDark MUCK engine as an axil module",
+  "main": "cjs/index.js",
+  "browser": "htdocs/index.js",
+  "module": "esm/index.js",
+  "entry": {
+    "main": "./index.js"
+  },
+  "template": "index.html",
+  "library": "ttyNd",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "types": "./types/index.d.ts",
+      "default": "./cjs/index.js"
+    },
+    "./style.css": "./htdocs/style.css"
+  },
+  "external": {
+    "@tty-pt/sub": "global ttySub",
+    "@popperjs/core": "global Popper",
+    "@xterm/addon-fit": "global FitAddon",
+    "@xterm/addon-web-links": "global WebLinksAddon",
+    "@xterm/xterm": "global Terminal"
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "bin": {
+    "axil": "./axil-cli.js"
+  },
+  "scripts": {
+    "build": "scripts build",
+    "postinstall": "make"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tty-pt/axil-nd.git"
+  },
+  "author": "quirinpa",
+  "license": "BSD-2-Clause",
+  "bugs": {
+    "url": "https://github.com/tty-pt/axil-nd/issues"
+  },
+  "homepage": "https://tty.pt",
+  "devDependencies": {
+    "@tty-pt/scripts": "^0.8.0",
+    "@tty-pt/sub": "^0.x.x",
+    "@popperjs/core": "^2.11.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "lodash": "^4.17.21"
+  },
+  "peerDependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "lodash": "^4.17.21"
+  },
+  "keywords": [
+    "axil",
+    "muck",
+    "MUD",
+    "muse",
+    "NeverDark",
+    "TinyMUCK",
+    "FuzzBall",
+    "WebSocket",
+    "game"
+  ],
+  "serve": [
+    "art"
+  ],
+  "files": [
+    "htdocs",
+    ".index",
+    "cjs",
+    "esm",
+    "src/*.c",
+    "index.js",
+    "include",
+    "Makefile"
+  ]
+}

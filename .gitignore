@@ -1,0 +1,12 @@
+*.o
+*.d
+*.so
+/man
+/htdocs
+/types
+/cjs
+/esm
+/node_modules
+/sessions
+/var
+/game/*.db
