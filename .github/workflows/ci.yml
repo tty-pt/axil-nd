@@ -10,7 +10,7 @@ jobs:
     uses: tty-pt/ci/.github/workflows/all-in-one.yml@main
     with:
       name: axil-nd
-      deps: "axil,libcorm,libxylem"
+      deps: "axil,libcorm,libxylem,libislet,libqsys,axil-tty"
       publish_to: "deb,apk,rpm,brew,openbsd"
     secrets:
       HOST: ${{ secrets.OPENBSD_HOST }}

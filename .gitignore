@@ -1,6 +1,8 @@
 *.o
 *.d
 *.so
+/test
+/mods.load
 /man
 /htdocs
 /types
@@ -8,5 +10,7 @@
 /esm
 /node_modules
 /sessions
+/docs
 /var
-/game/*.db
+/.pi
+/objects-set.mk

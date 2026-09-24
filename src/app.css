@@ -1,0 +1,422 @@
+/* Tailwind entry for the NeverDark browser client.
+ *
+ * Preflight is deliberately NOT imported. `styles.css:104` already sets
+ * `body { font-family: monospace; margin: 0; font-size: 10pt }`, and the
+ * original site never had a CSS reset. Importing preflight would swap the
+ * font stack, margins and line-height that the terminal UI is tuned around.
+ *
+ * Only the utilities layer is generated; see CSS.md for the class mapping
+ * (`f` -> `flex`, `fic` -> `items-center`, ...) and for the classes that are
+ * deliberately left unmigrated.
+ *
+ * `styles.css` is the game's own sheet (byte-identical to `tty.pt:~/nd/styles.css`)
+ * and is already correct. It is not self-contained, though: it *consumes* 38
+ * `:root` custom properties and defines none of them. Those lived in the site
+ * shell's own stylesheet, which the original `/nd` page never linked -- the
+ * page was a fragment with an empty `<head>`, injected into a shell that had
+ * already loaded `basics.css` and `vim.css`. See STYLE-AUDIT.md.
+ */
+
+@layer theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+
+/* Automatic source detection is off, and the two files the client is actually
+ * rendered from are named instead. Left on, Tailwind v4 walks the whole repo
+ * and treats anything it finds as a class list: the markdown, the man pages,
+ * the C sources, the build output under cjs/ and esm/. The production bundle
+ * was therefore a function of the tree rather than of the client -- `table`,
+ * `container`, `collapse` and `truncate` all reached it from `src/world.c` and
+ * `man/get.10`, and this repo's own prose leaked `opacity-50` and `flex-wrap`.
+ * tools/verify-css.mjs fails the build if any of that comes back. */
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+
+@source "../index.html";
+@source "../index.js";
+
+/* The palette. Ported verbatim from `tty.pt:/var/www/htdocs/basics.css:2-44`,
+ * which is where the site's `:root` block actually lived. Without it every
+ * `cf0`-`cf15` / `c0`-`c15` class in styles.css resolves to an empty custom
+ * property, so all game text renders monochrome and
+ * `styles.css:314`'s `color-mix(in srgb, var(--cb), ...)` is dropped as
+ * invalid, leaving the biome art untinted. */
+:root {
+	color-scheme: light dark;
+
+	--cb: #f9f9f9;
+	--cf: #3c403c;
+	--cc: #c2B3FF;
+	--cd0: #2c2c2c;
+	--cd1: #7b3045;
+	--cd2: #304d39;
+	--cd3: #6e663d;
+	--cd4: #55658b;
+	--cd5: #6e5f8a;
+	--cd6: #364c4e;
+	--cd7: #676279;
+	--cd8: #8f8799;
+	--cd9: #af447d;
+	--cd10: #42a86e;
+	--cd11: #98a926;
+	--cd12: #6a90af;
+	--cd13: #877cb3;
+	--cd14: #11a291;
+	--cd15: #d1d1d1;
+
+	--cdb: #3c403c;
+	--cdf: #c1c3da;
+	--cdc: #9589c5;
+	--c0: #2c2c2c;
+	--c1: #bd4a6a;
+	--c2: #3a5e46;
+	--c3: #a3975a;
+	--c4: #7389bd;
+	--c5: #8a77ac;
+	--c6: #415c5f;
+	--c7: #8b85a5;
+	--c8: #b4aac1;
+	--c9: #bd4a87;
+	--c10: #53d38a;
+	--c11: #b8cd2e;
+	--c12: #739cbd;
+	--c13: #9589c5;
+	--c14: #16d0ba;
+	--c15: #f5f5f5;
+}
+
+/* NeverDark-specific rules: biome background on #main, the ID-level layout
+ * (#holder / #right-panel / #cb / #directions), the .cf0-.cf15 palette and
+ * the .terminal-mode toggle. Kept unlayered so it still wins over the
+ * utilities layer, exactly as it did as a plain linked stylesheet. */
+@import "../styles.css";
+
+/* ---------------------------------------------------------------------------
+ * Everything below is ported verbatim from `basics.css` and `vim.css`, and is
+ * deliberately *unlayered* so it beats both `@layer utilities` and the
+ * game sheet above. Geometry that has an exact utility equivalent was migrated
+ * to Tailwind in the markup instead; what remains here is the part that
+ * cannot be a utility.
+ * ------------------------------------------------------------------------- */
+
+/* fonts: NOT PORTED {{{
+ * `basics.css:48-62` declares "Noto Sans Mono" from two `.ttf` files and
+ * `basics.css:76-79` is the only rule that would have used it:
+ *
+ *     pre, b > { font-family: monospace;
+ *                font-family: "Noto Sans Mono", ... !important }
+ *
+ * `b >` is a parse error -- a combinator needs a selector on both sides -- and
+ * a selector list is invalidated as a whole by one bad member, so the browser
+ * drops the entire rule. Verified in the port's own browser, where the rule is
+ * absent from the CSSOM while `b > *` and a plain `pre` inserted beside it
+ * both survive. The original therefore never applied the family, and a face
+ * with no consumer is never fetched: with the declaration in place both faces
+ * sit at `status: "unloaded"` and the page issues zero `.ttf` requests.
+ *
+ * What the original rendered in is the game sheet's own stack, `'Lucida
+ * Console', Monaco, monospace` at 10pt (`styles.css:104-112`), which is live
+ * here and measured at 13.33px. The two files are still on tty.pt
+ * (`/var/www/htdocs/NotoSansMono-{Regular,Bold}.ttf`, cksum 1899790739 405892
+ * and 2398335800 405596) if the family is ever wanted for real -- but that
+ * needs the selector fixed first, and 811KB of TrueType for a face nothing
+ * renders in is not worth carrying. This is option (c) of HANDOFF-GAPS task 4,
+ * reached by measurement rather than by preference. }}} */
+
+/* the page frame {{{
+ * `basics.css:64-75` and `:310-314` (its dark half), minus the two font
+ * declarations -- see below. That block is the site's, and the page's own
+ * sheet is the game's, so what the original actually rendered with is the
+ * game's `body` font, not this one; porting the font here would flip the whole
+ * client to 'Segoe UI' at 0.9em and undo the 10pt the terminal is tuned
+ * around (`styles.css:104-112`, and the reason preflight stays off). The six
+ * declarations that survive are the ones the game sheet does not set at all,
+ * so they took effect in the original and are reproduced exactly.
+ *
+ * Measurable effect, and it is the frame the original had: `padding: 8px` on
+ * `body` with `box-sizing: border-box` leaves an 8px band of `var(--cb)`
+ * (#f9f9f9) around `#main` in day mode and `var(--cdb)` (#3c403c) at night --
+ * the dark half is `basics.css:310-314`, so the frame is not a white border on
+ * a dark page. `#main`'s own background is the biome art (`styles.css:1-3`),
+ * which is what ends up inset.
+ *
+ * `#holder` carries its own `padding: 8px` (`styles.css:264`), so the game
+ * itself is inset a further 8px: 16px from the window edge, as in the
+ * original. */
+body {
+	color: var(--cf);
+	background-color: var(--cb);
+	caret-color: var(--cc);
+	padding: 8px;
+	box-sizing: border-box;
+	min-height: 100vh;
+}
+
+#main { min-height: 100%; }
+
+/* }}} */
+
+/* colours {{{
+ * `basics.css:82-84`. `styles.css:42-57` defines `.c0` and `.c2`-`.c15` itself,
+ * but `.c1` is *commented out* there (styles.css:43) and in its dark-mode twin
+ * (styles.css:78) -- so the one class it has to come from here is the one the
+ * game sheet declines to define. The consumer is the HP bar:
+ * `index.html:36` is `<nd-bar type="hp" x="c1">`, and `Bar.render` puts `x`
+ * straight into the fill div's class list (index.js:596) and into the
+ * `opacity-50` overlay (index.js:597), so both layers need it.
+ *
+ * Measured before this rule: the MP bar's interior read rgb(114,136,188)
+ * (= `--c4`, styles.css:46, live) while the HP bar's read rgb(52,60,71) = the
+ * panel showing through. The original had both bars filled.
+ *
+ * `basics.css:82-83` also carries `.cf` and `.cb`; neither has a consumer on
+ * this page (`.cf15` comes from styles.css:40 and `#cb` is an id), so they are
+ * left out rather than shipped dead. */
+.c1 { background-color: var(--c1) !important; }
+
+/* `basics.css:267`. `nd-item` sets `className` to exactly this on the selected
+ * room item (index.js:845), and nothing else in the port defines it, so
+ * clicking an item in the contents list highlighted nothing. */
+.ctb { background-color: rgba(0, 0, 0, 0.5); }
+
+/* }}} */
+
+/* `basics.css:109-115`. `#directions` is the only <label> on the page
+ * (index.html:12), and `align-items: stretch !important` is the whole point:
+ * `!important` outranks specificity, so it beat the game sheet's
+ * `#directions { align-items: end }` (styles.css:294) and each of the three
+ * arrow rows stretched the pad's full width with the arrows at the left. In the
+ * port, with nothing here, the rows shrink-wrapped and the arrows sat right.
+ *
+ * `display: flex` and `flex-direction: column` are ported for fidelity even
+ * though they lose to `#directions` (styles.css:295-296) either way. */
+label {
+	font-size: 0.8em;
+	display: flex;
+	align-items: stretch !important;
+	flex-direction: column;
+}
+
+label > input { display: block; }
+
+/* buttons {{{
+ * `basics.css:155-188`. `nd-button` is a custom element, not a `<button>`, so
+ * nothing in the utility set gives it a background, a border, a shadow, a
+ * cursor, or the button box. This is the whole reason buttons are invisible. */
+button, .btn {
+	font-size: inherit;
+	padding: 8px;
+	border: none;
+	box-sizing: content-box;
+	text-decoration: none;
+}
+
+button:not(:disabled), .btn:not(:disabled) { cursor: pointer; }
+button:not(.transparent), .btn:not(.transparent) {
+	background-color: whitesmoke;
+	border: solid thin gainsboro;
+	transition: filter .2s;
+	color: var(--cf) !important;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1);
+}
+
+button:not(.transparent):hover, .btn:not(.transparent):hover {
+	filter: brightness(1.07);
+}
+
+button > a, .btn > a, a.btn {
+	display: block;
+	text-decoration: none;
+}
+
+button:hover, .btn:hover, .card:hover {
+	box-shadow: 0 2px 2px rgba(0, 0, 0, 0.15);
+}
+
+button.round {
+	font-size: 17px;
+	box-sizing: content-box;
+}
+
+/* }}} */
+
+/* The button box.
+ *
+ * `.round` was never just a radius. The two sheets gave it
+ *   basics.css:295-302   width: 1em; height: 1em; display: inline-flex;
+ *                        align-items: center; justify-content: center;
+ *   vim.css:2            display: inline-block; box-sizing: border-box;
+ *                        vertical-align: middle; text-align: center;
+ * so an un-sized `nd-button` -- every direction arrow and action button -- was
+ * a fixed circle sized from its *own* font size, and `rounded-full` keeps the
+ * radius while silently dropping the box. That is why the arrows and the
+ * emoji buttons came out at different sizes.
+ *
+ * On `box-sizing`: `vim.css:2` says border-box and `basics.css:159` says
+ * content-box for `.btn`, and the two cannot both apply. `vim.css:17-19`
+ * settles it -- `.p8.round.ts17 { width: calc(17px + 2 * 8px) }` puts the 8px
+ * padding *outside* 17px, and only reads correctly under border-box. So
+ * border-box won in the original and the arrow/action buttons were 33x33, not
+ * the 17x17 an `1em` box suggests.
+ *
+ * The test is the `square` attribute, not a class: `Button.render` branches on
+ * `getAttribute('square')`, and `Equipment` is the only thing that sets it --
+ * to the 24px slots, which take `.box-24` and are unaffected by this rule. */
+nd-button.btn:not([square]) {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	vertical-align: middle;
+	text-align: center;
+	box-sizing: border-box;
+	width: 1em;
+	height: 1em;
+}
+
+/* `vim.css:17-19` enumerated the padding to add back outside the 1em, once per
+ * padding utility. `p2`, `p4` and `p8` all existed; only `pad="8"` is ever set,
+ * so the one case that can occur is written out rather than derived. */
+nd-button.btn.txt-17:not([square]) {
+	width: calc(1em + 2 * 8px);
+	height: calc(1em + 2 * 8px);
+}
+
+/* The three sizes `Button.render` used to build by string concatenation.
+ * They were Tailwind arbitrary-value classes interpolated from the `pad`,
+ * `text-size` and `size` attributes, so the scanner could not see them; a
+ * comment listing them was the only thing keeping them in the bundle, and it
+ * pinned the 8px size -- a value nothing ever sets -- while missing the 24px
+ * one that `Equipment` does set. Plain rules cannot be tree-shaken, so the
+ * mapping is now explicit and total: see `BUTTON_CLASS` in index.js.
+ *
+ * Do not spell an arbitrary-value utility in a comment in this file. Tailwind
+ * scans this file too, so a padding utility written out to explain something is
+ * a candidate and will be emitted. `tools/verify-css.mjs` fails the build if
+ * any class in the bundle is not in index.html, index.js or here.
+ *
+ * None of these three names is a Tailwind namespace, deliberately. `size-24`
+ * *is* one -- it means 6rem -- and shadowing a built-in utility from an
+ * unlayered rule works right up until the day it does not. */
+.pad-8 { padding: 8px; }
+.txt-17 { font-size: 17px; line-height: 17px; }
+.box-24 { width: 24px; height: 24px; }
+
+/* terminal {{{
+ *
+ * The terminal is `@xterm/xterm`, driven by `@tty-pt/axil-tty`, and it needs
+ * three separate fixes to look the way the original did.
+ *
+ * 1. The background. `styles.css:279-281` says
+ *      .xterm-viewport { background-color: rgba(0, 0, 0, 0.5) !important }
+ *    and it is still live and still correct -- in xterm 5.5, the version
+ *    `@tty-pt/ndc` pinned, `.xterm-viewport` *was* the element that carried
+ *    the theme background, so the whole translucent look came from that one
+ *    rule. xterm 6.0 added `.xterm-scrollable-element` and moved the theme
+ *    background onto it, written as an inline `background-color` from its
+ *    `onChangeColors` handler. It is opaque, it fills the same box, and it
+ *    paints *after* the viewport, so the 50% black was simply being covered:
+ *    the terminal had gone solid black. Nothing in `styles.css` knows that
+ *    element exists, so it is neutralised here and the tint goes back to
+ *    coming from the game sheet. `!important` is required to beat an inline
+ *    style, and is what `styles.css` itself uses in five places.
+ *
+ * 2. The default foreground, and 3. the palette. xterm's DOM renderer injects
+ *    its own <style> into the screen element holding `.xterm-rows { color }`
+ *    and one rule per ANSI index, scoped under `.xterm-dom-renderer-owner-N`
+ *    -- specificity (0,2,0), and inside <body>, so after these <link>s. Any
+ *    plain `.xterm-fg-N` rule loses to it, which is why the palette in
+ *    `htdocs/index.css` (built from `axil-tty.css` by `scripts build`) has
+ *    never had any effect. These carry `!important` for the same reason.
+ *
+ * The values are that file's, kept verbatim, and they are also what
+ * `tty.pt:~/nd/htdocs/index.css` shipped from `@tty-pt/ndc@0.14.0-beta.3` --
+ * the original palette, unchanged, under the newer class names. `--term-fg`
+ * and `--term-bg` are declared by that same built file, so they are used
+ * where they exist and fall back to the same literals when it is absent.
+ *
+ * Slot numbering. The source CSS numbers the eight dark colours 1-8 and the
+ * seven bright ones 9-15, and it is missing slot 0. Mapping those indices
+ * straight onto ANSI slots makes red `#112616`, green `#7f2b27` and yellow
+ * `#2f7e25` -- every hue off by one. Shifting the dark group down a slot
+ * instead lines all fifteen up: black `#112616`, red `#7f2b27`, green
+ * `#2f7e25`, yellow `#717f24`, blue `#2f6a7f`, magenta `#47587f`, cyan
+ * `#327f77`, white `#647d75`, brightRed `#e08009`, brightGreen `#18e000`,
+ * brightYellow `#bde000`, brightBlue `#00aae0`, brightMagenta `#0058e0`,
+ * brightCyan `#00e0c4`, brightWhite `#73fa91`. `brightBlack` is the one slot
+ * the source never declares and is left alone.
+ *
+ * Background rules come before foreground rules on purpose, and their
+ * `background-color` also needs `!important`: xterm injects one
+ * `.xterm-bg-N { background-color: … }` per slot from the stock theme, same
+ * sheet and specificity as the foreground classes. Upstream writes
+ * `.xterm-bg-N { color: … }` -- the wrong property, a long-standing bug in
+ * both sheets -- so each background rule here re-declares `color` to win it,
+ * and ordering them first means a span carrying both classes still takes its
+ * foreground from the `.xterm-fg-N` rule below.
+ *
+ * `ANSI_FG_WHITE` is what the game paints room exits and prompt furniture
+ * with (`src/view.c:34,59,93,254`), so the `white` slot is load-bearing for
+ * how a room reads, not just decoration. */
+.xterm .xterm-scrollable-element { background-color: transparent !important; }
+
+.xterm .xterm-rows { color: var(--term-fg, #93ada5) !important; }
+.xterm .xterm-rows .xterm-dim {
+	color: color-mix(in srgb, var(--term-fg, #93ada5) 50%, transparent) !important;
+}
+.xterm-cursor { color: #73fa91 !important; }
+
+.xterm-bg-0 { background-color: #112616 !important; color: #93ada5; }
+.xterm-bg-1 { background-color: #7f2b27 !important; color: #93ada5; }
+.xterm-bg-2 { background-color: #2f7e25 !important; color: #93ada5; }
+.xterm-bg-3 { background-color: #717f24 !important; color: #93ada5; }
+.xterm-bg-4 { background-color: #2f6a7f !important; color: #93ada5; }
+.xterm-bg-5 { background-color: #47587f !important; color: #93ada5; }
+.xterm-bg-6 { background-color: #327f77 !important; color: #93ada5; }
+.xterm-bg-7 { background-color: #647d75 !important; color: #93ada5; }
+.xterm-bg-9 { background-color: #e08009 !important; color: #93ada5; }
+.xterm-bg-10 { background-color: #18e000 !important; color: #93ada5; }
+.xterm-bg-11 { background-color: #bde000 !important; color: #93ada5; }
+.xterm-bg-12 { background-color: #00aae0 !important; color: #93ada5; }
+.xterm-bg-13 { background-color: #0058e0 !important; color: #93ada5; }
+.xterm-bg-14 { background-color: #00e0c4 !important; color: #93ada5; }
+.xterm-bg-15 { background-color: #73fa91 !important; color: #93ada5; }
+
+.xterm-fg-0 { color: #112616 !important; }
+.xterm-fg-1 { color: #7f2b27 !important; }
+.xterm-fg-2 { color: #2f7e25 !important; }
+.xterm-fg-3 { color: #717f24 !important; }
+.xterm-fg-4 { color: #2f6a7f !important; }
+.xterm-fg-5 { color: #47587f !important; }
+.xterm-fg-6 { color: #327f77 !important; }
+.xterm-fg-7 { color: #647d75 !important; }
+.xterm-fg-9 { color: #e08009 !important; }
+.xterm-fg-10 { color: #18e000 !important; }
+.xterm-fg-11 { color: #bde000 !important; }
+.xterm-fg-12 { color: #00aae0 !important; }
+.xterm-fg-13 { color: #0058e0 !important; }
+.xterm-fg-14 { color: #00e0c4 !important; }
+.xterm-fg-15 { color: #73fa91 !important; }
+
+/* }}} */
+
+/* dark theme {{{
+ * `basics.css:317` for `.c1`, and `basics.css:322-326` for the buttons; the
+ * light halves are above. Without the `.c1` half the HP bar would stay
+ * `--c1` (#bd4a6a) on a dark page. Without the button half every button would
+ * keep a white background on a dark page. */
+@media (prefers-color-scheme: dark) {
+	body {
+		color: var(--cdf);
+		background-color: var(--cdb);
+		caret-color: var(--cdc);
+	}
+
+	.c1 { background-color: var(--cd1) !important; }
+
+	button:not(.transparent), .btn:not(.transparent) {
+		background-color: var(--cd0);
+		color: var(--cdf) !important;
+		border: none;
+	}
+}
+
+/* }}} */
