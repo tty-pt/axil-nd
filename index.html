@@ -1,0 +1,102 @@
+<div id="main">
+<div id="title">NeverDark</div>
+
+<div id="holder" class="flex gap-x-[8px] w-full h-full box-border relative" style="padding-top: 0">
+	<pre id="term" class="grow overflow"></pre>
+
+	<textarea id="hid" aria-hidden="true"></textarea>
+
+	<div id="right-panel" class="flex flex-col gap-x-[8px] gap-y-[8px]">
+		<div id="cb" class="flex flex-row gap-x-[8px] grow items-center w-full">
+			<nd-notarget class="flex flex-col gap-y-[16px] items-center">
+				<label id="directions" onclick="event.stopPropagation()">
+					<div>
+						<nd-button hid></nd-button>
+						<nd-button onclick="sendCmd('k');">&uarr;</nd-button>
+						<nd-button onclick="sendCmd('K');">&nearr;</nd-button>
+					</div>
+					<div>
+						<nd-button onclick="sendCmd('h');">&larr;</nd-button>
+						<nd-button hid></nd-button>
+						<nd-button onclick="sendCmd('l');">&rarr;</nd-button>
+					</div>
+					<div>
+						<nd-button hid></nd-button>
+						<nd-button onclick="sendCmd('j');">&darr;</nd-button>
+						<nd-button onclick="sendCmd('J');">&searr;</nd-button>
+					</div>
+				</label>
+				<nd-map></nd-map>
+			</nd-notarget>
+			<nd-look-at></nd-look-at>
+			<nd-contents id="contents" class="flex-col gap-y-0 flex grow overflow icec"></nd-contents>
+		</div>
+		<div class="flex flex-col gap-[8px]">
+			<div class="grow flex flex-col gap-y-[8px]">
+				<nd-bar type="hp" x="c1"></nd-bar>
+				<nd-bar type="mp" x="c4"></nd-bar>
+			</div>
+			<div id="g-actions" class="flex gap-x-[8px]">
+				<nd-button onclick="modal_open('stats')">📋</nd-button>
+				<nd-button onclick="modal_open('equipment')">👕</nd-button>
+				<nd-button onclick="sendCmd('inventory')">📦</nd-button>
+				<nd-button onclick="sendCmd('look')">👁</nd-button>
+			</div>
+		</div>
+	</div>
+</div>
+<div class="modal absolute h-full flex flex-col gap-y-0 pr-[8px] items-center justify-center overflow-hidden hidden" onclick="modal_close()">
+	<div id="equipment" class="hidden">
+		<div>
+			<div></div>
+			<div></div>
+			<nd-equipment location="head"></nd-equipment>
+			<div></div>
+			<div></div>
+		</div>
+		<div>
+			<nd-equipment location="right-hand"></nd-equipment>
+			<nd-equipment></nd-equipment>
+			<nd-equipment location="neck"></nd-equipment>
+			<nd-equipment location="back"></nd-equipment>
+			<nd-equipment></nd-equipment>
+		</div>
+		<div>
+			<nd-equipment location="right-finger"></nd-equipment>
+			<div></div>
+			<nd-equipment location="chest"></nd-equipment>
+			<div></div>
+			<nd-equipment location="lfinger"></nd-equipment>
+		</div>
+		<div>
+			<div></div>
+			<div></div>
+			<nd-equipment location="pants"></nd-equipment>
+			<div></div>
+			<div></div>
+		</div>
+	</div>
+	<div id="stats" class="hidden">
+		<div>
+			<nd-stat name="str"></nd-stat>
+			<nd-stat name="con"></nd-stat>
+			<nd-stat name="dex"></nd-stat>
+			<nd-stat name="int"></nd-stat>
+			<nd-stat name="wiz"></nd-stat>
+			<nd-stat name="cha"></nd-stat>
+		</div>
+		<div>
+			<nd-stat name="dodge"></nd-stat>
+			<nd-stat name="dmg"></nd-stat>
+			<nd-stat name="mdmg"></nd-stat>
+			<nd-stat name="def"></nd-stat>
+			<nd-stat name="mdef"></nd-stat>
+		</div>
+	</div>
+</div>
+</div>
+
+<link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@6.0.0/css/xterm.css">
+<link rel="stylesheet" href="/nd/index.css">
+<link rel="stylesheet" href="/nd/app.css">
+<script defer src="/nd/index.js"></script>
