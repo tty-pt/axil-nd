@@ -195,11 +195,50 @@ shared_fin(unsigned cur)
 	corm_fin(cur);
 }
 
+/* Module value-type registry. nd_len_reg("equipper", 40) registers that the
+ * value type named "equipper" is 40 bytes; hd_mod_open() consults this when a
+ * module opens a table with that value kind, so corm stores full structs
+ * instead of truncating to CM_U32 (4 bytes). Without this, every module table
+ * holding a struct silently lost all but the first 4 bytes on put, and nd_get
+ * copied 4 bytes into the caller's (larger) buffer, leaving stack garbage --
+ * the "stack smashing" crash that killed the all-19 boot.
+ *
+ * Fixed cap: modules register on the order of ten types. Names are not copied;
+ * modules pass string literals. */
+#define MOD_TYPE_MAX 64
+static const char *mod_type_name[MOD_TYPE_MAX];
+static unsigned mod_type_tid[MOD_TYPE_MAX];
+static unsigned mod_type_n;
+
+/* Register a module value type by name. Called by the nd_len_reg XY hook
+ * (nd_api.c) -- NOT by shared_len_reg below, which is the legacy struct-nd
+ * path that modules no longer use. */
+void
+mod_type_register(char *name, unsigned tid)
+{
+	if (mod_type_n >= MOD_TYPE_MAX)
+		return;
+	mod_type_name[mod_type_n] = name;
+	mod_type_tid[mod_type_n] = tid;
+	mod_type_n++;
+}
+
 static void
 shared_len_reg(char *iden, size_t len)
 {
-	(void) iden;
-	corm_reg(len);
+	unsigned tid = corm_reg(len);
+	mod_type_register(iden, tid);
+}
+
+/* Look up a registered value-type ID by name. Returns 0 if not found, in
+ * which case the caller falls back to shared_kind(). */
+static unsigned
+mod_type_lookup(char *name)
+{
+	for (unsigned i = 0; i < mod_type_n; i++)
+		if (!strcmp(mod_type_name[i], name))
+			return mod_type_tid[i];
+	return 0;
 }
 
 static uint32_t
@@ -236,11 +275,25 @@ static unsigned hd_mod_n;
 unsigned
 hd_mod_open(char *type, char *iden, char *anon, unsigned flags)
 {
-	(void) flags;
 	if (hd_mod_n >= HD_MOD_MAX)
 		return 0;
+	/* flags used to be dropped ((void) flags; ... corm_open(..., 0)), which
+	 * silently broke every module table opened with ND_AINDEX (nd-race's
+	 * `nd_open("race", "u", "race", ND_AINDEX)`, whose rows are inserted
+	 * with a NULL key -- that only works on an auto-indexed map) and every
+	 * secondary opened ND_SEC|ND_PGET (nd-race's race_rhd, whose nd_get must
+	 * return the PRIMARY key). The ND_* values are deliberately the corm
+	 * CM_* values (nd/xy-types.h mirrors them), so this is a plain forward.
+	 *
+	 * The value type likewise used to be shared_kind(anon) unconditionally,
+	 * i.e. CM_U32 for every module table, truncating struct values to 4
+	 * bytes. If the module registered a size for this value kind with
+	 * nd_len_reg(), use the registered custom type instead. */
+	unsigned vtype = mod_type_lookup(anon);
+	if (!vtype)
+		vtype = shared_kind(anon);
 	unsigned h = corm_open(world_db(), type, shared_kind(iden),
-		shared_kind(anon), 0xFF, 0);
+		vtype, 0xFF, flags);
 	/* corm_open returns 0 on failure; do not burn a registry slot on it. */
 	if (!h)
 		return 0;

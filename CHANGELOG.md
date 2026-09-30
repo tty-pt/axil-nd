@@ -4,6 +4,20 @@ First playable release. The engine port from TinyMUCK/FuzzBall is complete and
 the release is self-contained: it builds, tests and runs from a fresh clone
 with no external tree.
 
+Changed
+- **The module-facing headers install as `<nd/xy.h>`.** They moved from
+  `include/papi/` to `include/nd/` (`nd-xy.h` → `xy.h`, `nd-xy-types.h` →
+  `xy-types.h`, `nd-hd.h` → `hd.h`, `nd-hooks.h` → `hooks.h`; guards renamed to
+  the basename rule) and the Makefile sets mk's `FOLDER := nd`, so
+  `make install` puts them in `$(PREFIX)/include/nd/`. They previously went to
+  `$(PREFIX)/include/axil-nd/papi/`, a directory no default include path
+  reaches, so every out-of-tree module carried a private `-I` to find a header
+  the house installs in a plain `<ttypt/…>`-style location. A module now writes
+  `#include <nd/xy.h>` and needs no `-I` beyond the one every build already has.
+  No forwarding headers: the seven module repos get one line each. `install-papi`
+  is now `install-mods` and installs only `nd-mod.mk`, which mk's `share` set
+  cannot reach; `make uninstall` now removes it and `include/ttypt/axil-nd.h`.
+
 Added
 - NeverDark engine as an axil module: 16 engine TUs linked into
   `lib/libaxil-nd.so`, with `nd_api.c` forwarding the 52 `XY_IMPL` hooks to the

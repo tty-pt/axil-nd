@@ -18,10 +18,12 @@ libaxil-nd-obj-y := ${ENGINE-obj-y}
 # `ls include/$(FOLDER)` and :104-108 installs each to
 # $(PREFIX)/include/$(FOLDER)/, so FOLDER is the whole mechanism: `nd/` is what
 # makes `#include <nd/xy.h>` resolve from -I$(PREFIX)/include, the one -I that
-# mk/portable.mk and nd-mod.mk's XY_INC already put on every module compile
-# line. It used to be the default `ttypt`, which is why this needed a bespoke
-# install-papi writing to $(PREFIX)/include/axil-nd/papi/ -- a directory on no
-# default include path, so every module carried a private -I for it.
+# mk/portable.mk already puts on every module compile line and the same one that
+# carries <ttypt/xy.h>. It used to be the default `ttypt`, which is why this
+# needed a bespoke install-papi writing to $(PREFIX)/include/axil-nd/papi/ -- a
+# directory on no default include path, so every module carried a private -I for
+# it. Every module is an installed library now (see `mods:` below), so this is
+# the only include path a module needs beyond its own.
 FOLDER := nd
 # FOLDER no longer creates include/ttypt, so the engine's own header has to
 # name its own dir and its own install: install-dirs gets the directory,
@@ -111,10 +113,15 @@ mods/%.so: mods/%/%.c include/nd/xy.h
 # mods` does not require it to be installed first; a missing one is reported by
 # nd_mods_load() and the engine still boots (mods.load says so too).
 
+# A path-named module builds ITSELF: delegate to that directory's own Makefile
+# and ask it for <stem>. This used to hand it the engine's nd-mod.mk with MOD=
+# and ND_INC= set, which is how a bare main.c at the root of a sibling checkout
+# became <stem>.so. nd-mod.mk is deleted now that every module is an installed
+# library, so a path entry has to carry its own rule -- which is the honest
+# contract, and is why nothing in the tracked mods.load uses this form any more.
+# The test fixture in test.sh is the one remaining caller.
 $(foreach m,${slashmods},$(m).$(SO)): FORCE
-	$(MAKE) -f $(CURDIR)/nd-mod.mk MOD=$(notdir $(basename $@)) \
-		ND_INC=$(CURDIR)/include -C $(patsubst %/,%,$(dir $(basename $@))) \
-		$(notdir $@)
+	$(MAKE) -C $(patsubst %/,%,$(dir $(basename $@))) $(notdir $@)
 
 FORCE:
 .PHONY: mods FORCE
@@ -131,25 +138,18 @@ install-data: man
 	done
 .PHONY: install-data
 
-# The one install job mk's rules cannot reach. Its `share` set is
-# `find ./htdocs -type f` (Makefile:7), so it only ever stages files under
-# htdocs/, and nd-mod.mk sits in the repo root: it is what a sibling module
-# repo includes to build against an installed engine (MODS.md §0.4). mk's
-# uninstall does not list install-extra either, so both files this target and
-# install-extra own are removed by hand in uninstall-mods below.
-install-mods:
-	@dst=$(DESTDIR)$(PREFIX)/share/axil-nd; \
-	install -d "$$dst" || exit 1; \
-	install -m 644 nd-mod.mk "$$dst/nd-mod.mk"
-.PHONY: install-mods
+# nd-mod.mk used to be installed here, as the build contract a sibling module
+# repo included to build against an installed engine (MODS.md §0.4). It is
+# deleted: all eight modules are installed libraries now, so none of them
+# includes it, and mk's `share` set is `find ./htdocs -type f` (Makefile:7)
+# anyway, which could never have staged a file in the repo root.
 
-# Prerequisite-only, so it merges with mk/include.mk:139's uninstall rather than
-# overriding its recipe (make warns on a second recipe, not on a second prereq).
+# mk's uninstall does not list install-extra, so the engine's own header has to
+# be removed by hand.
 uninstall: uninstall-mods
 
 uninstall-mods:
-	rm -f $(DESTDIR)$(PREFIX)/share/axil-nd/nd-mod.mk \
-		$(DESTDIR)$(PREFIX)/include/ttypt/axil-nd.h
+	rm -f $(DESTDIR)$(PREFIX)/include/ttypt/axil-nd.h
 .PHONY: uninstall-mods
 
-install: install-data install-mods
+install: install-data

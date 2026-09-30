@@ -41,22 +41,33 @@ trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -r
 # MODS.md §0.4 out-of-tree module fixture.
 #
 # The engine only ever had modules inside its own tree, so nothing has ever
-# exercised the sibling-repo layout that Phase 1 depends on: a separate repo,
-# its own Makefile, built through the shared nd-mod.mk against the nd
-# headers, named in mods.load by its own path. That is the single riskiest new
-# seam in 0.4 -- a path that is silently reshaped to `mods/<n>/<n>` fails with
+# exercised the sibling-repo layout: a separate directory, its own Makefile,
+# built on its own, named in mods.load by its own path. That is the single
+# riskiest seam -- a path that is silently reshaped to `mods/<n>/<n>` fails with
 # no error at all, just a hook that stopped firing.
 #
-# So build one here, in the shape Phase 1 will actually use, rather than
-# trusting that a hand-made probe still works. `MOD ?= $(patsubst axil-nd-%,%)`
-# in nd-mod.mk is what turns the directory name axil-nd-testprobe into the
-# module name testprobe, matching ~/axil-nd-<mod> -> <mod>.
+# So build one here rather than trusting a hand-made probe. The fixture's
+# Makefile is SELF-CONTAINED and used to include the engine's nd-mod.mk, which
+# is deleted now that every real module is an installed library built by
+# mk/include.mk. That is the point: the path form of mods.load no longer has a
+# shared driver, so anything named by path brings its own rule, and `make mods`
+# drives it with exactly that -- `$(MAKE) -C <dir> <stem>`.
+#
+# $(pwd) below is expanded HERE, to the engine root: the fixture is built with
+# -C, so it cannot reach back for the engine's headers itself. ${PREFIX:-/usr}
+# because PREFIX is a build variable, usually unset in the environment test.sh
+# runs in; a missing -I is ignored, so the default costs nothing.
 probe=../axil-nd-testprobe
 rm -rf "$probe"
 mkdir -p "$probe"
 cat > "$probe/Makefile" <<EOF
-PREFIX ?= /usr
-include $(pwd)/nd-mod.mk
+# Deliberately minimal, and deliberately NOT the house library shape: this
+# fixture exists to prove the path form of mods.load loads a module built
+# outside the engine tree, so it should be as close to hand-written as a real
+# one can get. Same rule `make mods` drives it with.
+testprobe.so: testprobe.c
+	\$(CC) -shared -fPIC -I$(pwd)/include -I${PREFIX:-/usr}/include \\
+		-o \$@ \$<
 EOF
 # Deliberately minimal: the ONLY thing this TU knows is nd/xy.h and
 # <ttypt/xy.h>, i.e. what an installed module gets. It includes no uapi header,
@@ -309,8 +320,8 @@ if [ "$probe_mod" -ge 1 ]; then
 	grep -qF "testprobe module installed from '${probe}/testprobe'" "$log" \
 		|| { echo "FAIL: out-of-tree module was not loaded from its mods.load path" >&2; exit 1; }
 	# Proves the whole §0.2/§0.3 contract again from a SECOND, genuinely
-	# out-of-tree TU: a module built only against the installed nd/
-	# through nd-mod.mk, with no access to the engine tree.
+	# out-of-tree TU: a module built by its own Makefile with no access to
+	# the engine tree, against nothing but nd/ and ttypt/ on the include path.
 	grep -qF "testprobe on_enter: HD_OBJ=resolved (ok) hd=tagged" "$log" \
 		|| { echo "FAIL: out-of-tree module could not resolve HD_OBJ / tag a handle" >&2; exit 1; }
 else

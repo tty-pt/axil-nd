@@ -18,7 +18,12 @@
 #include "./skel.h"
 #include "./st.h"
 
-#define ND_AINDEX 32
+/* Kept in lockstep with the module-facing copy in nd/xy-types.h, which is the
+ * one modules actually see. Value = corm's CM_AINDEX: nd_open() forwards its
+ * flags to corm_open(), so this must be the corm bit, not an engine-private
+ * tag. It used to be 32, which was harmless only because hd_mod_open() dropped
+ * the flags entirely. */
+#define ND_AINDEX 1
 
 /* Legacy SIC adapter descriptor. Once shared, then AX, now only read by the
  * residual dlopen path in src/mods.c; MODS.md Phase 3 deletes it with

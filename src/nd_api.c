@@ -83,6 +83,9 @@ unsigned shared_get(unsigned hd, void *value, void *key);
 unsigned hd_resolve(unsigned hd);
 unsigned hd_mod_open(char *type, char *iden, char *anon, unsigned flags);
 void eng_nd_register(char *str, nd_cb_t *cb, unsigned flags);
+/* engine body for the nd_assoc hook (renamed per the PROVIDER POLICY above);
+ * its type comes from nd/xy-types.h, since uapi/io.h is not includable here. */
+void eng_nd_assoc(unsigned hd, unsigned link, nd_assoc_cb_t assoc);
 const char *world_db(void);
 
 /* map-cursor API (real corm bodies honoring the XY signatures) */
@@ -133,8 +136,30 @@ XY_IMPL(int, nd_fin, unsigned, cur)
 
 XY_IMPL(int, nd_len_reg, char *, iden, size_t, len)
 {
-	(void)iden;
-	return (int)corm_reg(len);
+	/* Register the (name, type) mapping so hd_mod_open() opens tables with
+	 * correctly-sized value types (world.c). corm_reg() alone discards the
+	 * name, which used to truncate every struct value to 4 bytes. */
+	extern void mod_type_register(char *name, unsigned tid);
+	unsigned tid = corm_reg(len);
+	mod_type_register(iden, tid);
+	return (int)tid;
+}
+
+/* nd_assoc(hd, link, cb): index the primary table `link` by keys `cb` derives
+ * from each row, writing them into the secondary table `hd`. nd-race's only
+ * use: name -> race_id, via race_rhd (secondary) linked to race_hd (primary).
+ *
+ * Both handles arrive as module-facing values -- nd-race passes two nd_open()
+ * tags -- so both go through hd_resolve(), matching nd_put/nd_get/nd_iter.
+ * The raw corm handles would otherwise be passed straight to corm_assoc(),
+ * indexing whatever table the tag happened to collide with.
+ *
+ * int, not void: XY_IMPL cannot express a void return (sizeof(ftype) and
+ * `ftype result = ...` are both ill-formed for void). nd-race ignores it. */
+XY_IMPL(int, nd_assoc, unsigned, hd, unsigned, link, nd_assoc_cb_p, assoc)
+{
+	eng_nd_assoc(hd_resolve(hd), hd_resolve(link), assoc);
+	return 0;
 }
 
 XY_IMPL(int, nd_register, char *, str, nd_cb_t *, cb, unsigned, flags)

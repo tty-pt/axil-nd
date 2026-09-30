@@ -100,8 +100,14 @@ void shared_assoc(unsigned hd, unsigned link, nd_assoc_cb_t assoc) {
 
 /* §4.4: nd_assoc was declared (io.h) and advertised (nd-xy.h) but defined
  * nowhere, so any module calling it failed to link. It delegates to
- * shared_assoc; both names stay (the shared_* family stays coherent). */
-void nd_assoc(unsigned hd, unsigned link, nd_assoc_cb_t assoc) {
+ * shared_assoc; both names stay (the shared_* family stays coherent).
+ *
+ * Renamed nd_assoc -> eng_nd_assoc: the `nd_assoc` name now belongs to the
+ * XY hook (XY_IMPL in nd_api.c), which emits a real function of that name --
+ * the documented PROVIDER POLICY (see nd_api.c:9-11) that every hook's engine
+ * body carries an `eng_` prefix so the C symbol differs from the hook name.
+ * Only nd-race ever called it and it calls the hook, not this. */
+void eng_nd_assoc(unsigned hd, unsigned link, nd_assoc_cb_t assoc) {
 	shared_assoc(hd, link, assoc);
 }
 

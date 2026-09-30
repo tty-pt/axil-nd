@@ -60,7 +60,8 @@
  *     xy_call / xy_areg / xy.lib;
  *   - `unsigned hds[HD_MAX]` + `sic_adapter_t *adapter` — data hoisting
  *     moved to hooks/regions (J4.5 #1a);
- *   - `nd_assoc` — inline bring here if a module needs it.
+ *   - nd_assoc — NOT skipped: brought in below as an XY_DECL, because
+ *     nd-race is the one module that needs it (decision 6).
  */
 
 #include <stdarg.h>
@@ -153,6 +154,16 @@ XY_DECL(unsigned, nd_iter, unsigned, hd, void *, key);
 XY_DECL(int, nd_next, void *, key, void *, data, unsigned, cur);
 XY_DECL(int, nd_fin, unsigned, cur);
 XY_DECL(int, nd_len_reg, char *, iden, size_t, len);
+/* corm secondary index: keeps `link` (a primary table) indexed by the keys
+ * `assoc` derives from each row. Both handles are module-facing (nd_open
+ * tags or enum hd); the engine resolves them. Hook-ified from the engine's
+ * raw nd_assoc (uapi/io.h:101) for nd-race, which is the only caller.
+ *
+ * Returns int, not the engine's void: XY_IMPL cannot express a void return
+ * (it does `sizeof(ftype)` and `ftype result = ...`, both ill-formed for
+ * void), and nd-race ignores the result. The engine body eng_nd_assoc keeps
+ * the void signature. */
+XY_DECL(int, nd_assoc, unsigned, hd, unsigned, link, nd_assoc_cb_p, assoc);
 
 /* command registration (command layer) */
 typedef void nd_cb_t(int fd, int argc, char *argv[]);

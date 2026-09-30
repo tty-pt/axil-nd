@@ -63,7 +63,7 @@ events, no `SIC_DEF` and no `nd_iter`; `nd-race` was listed at 3.0 K with
 `nd_assoc` and `vtf_register` — it is 1786 B and calls neither (`vtf_register`
 is in `drink`); `nd-fight` was listed at 10.3 K, not 9655 B. `verb_to` and
 `ematch_*` do not exist as named — `ematch_at`/`ematch_mine` are in `shop` and
-are already in `papi/nd-xy.h`.
+are already in `nd/xy.h`.
 
 The generator was rebuilt from the sources rather than patched, and the
 distinction it exposed matters for §7: **`SIC_DEF` does double duty.** A
@@ -200,7 +200,7 @@ why it saw a second `on_enter` and why the engine kept its own `on_new_player`.
 Other facts that shape the plan (verified):
 
 - `enum hd` lives in `uapi/io.h:8`; the handles are in `nd.hds[]`
-  (`world.c:229`). `papi/nd-xy.h:52` deliberately dropped that vtable, and **no
+  (`world.c:229`). `nd/xy.h:52` deliberately dropped that vtable, and **no
   engine TU calls `nd_get`/`nd_put`/`nd_open`/`nd_iter`/`nd_next`/`nd_fin`**
   (they use `corm_*` directly) — only modules do. Re-pointing those hooks at the
   enum is therefore zero-churn for module code.
@@ -211,11 +211,11 @@ Other facts that shape the plan (verified):
   **no firing site in the old engine either** (`git grep` at `1985533`). Dead
   before the port — and sharper still, they are not events in *this* engine
   either: no `XY_DEF`, no `nd_evt_*` wrapper (§6).
-- Engine TUs **cannot** include `papi/nd-hooks.h`: `papi/nd-xy-types.h`
+- Engine TUs **cannot** include `nd/hooks.h`: `nd/xy-types.h`
   redefines `struct icon`/`enum color`/`sic_str_t` that `uapi/*.h` already
   define. Hence the wrapper split in §2.5.
 - `mk`'s install rule covers only `include/${FOLDER}` with `FOLDER ?= ttypt`
-  (`~/mk/include.mk:19-21,104-108`). **`include/papi/*.h` is not installed**, so
+  (`~/mk/include.mk:19-21,104-108`). **`include/nd/*.h` is not installed**, so
   a sibling `~/axil-nd-<name>` repo cannot compile against the module API yet.
 - `mods.load` is **gitignored** (`.gitignore:5`) and `nd_xy.c:152` hardcodes
   `mods/%s/%s`. A sibling-repo layout needs a shipped, tracked list and a
@@ -295,12 +295,12 @@ threw `corm_open`'s result away and `return 0`. So `nd_get(HD_OBJ, …)` read
 **corm table 7**, and any module that saved an `nd_open` handle (nd-class,
 nd-level, nd-attr) got 0 and read and wrote table 0.
 
-- `include/papi/nd-hd.h` (new): `enum hd` moved here out of `uapi/io.h`, plus
+- `include/nd/hd.h` (new): `enum hd` moved here out of `uapi/io.h`, plus
   the module-table tag. Included by *both* `uapi/io.h` and
-  `papi/nd-xy-types.h`, so there is one copy of the enum and modules get it
+  `nd/xy-types.h`, so there is one copy of the enum and modules get it
   without touching a uapi header. The header deliberately contains nothing but
   the enum and inline helpers — no type that `uapi/*.h` also defines — because
-  `papi/nd-xy-types.h` is exactly the header that collides with uapi.
+  `nd/xy-types.h` is exactly the header that collides with uapi.
 - Two namespaces in one `unsigned`:
   - `0 .. HD_MAX-1` — an `enum hd`, resolved engine-side through `nd_hds[]`.
   - `ND_HD_MOD | idx` (`0x80000000 | idx`) — a table a module opened, `idx`
@@ -334,7 +334,7 @@ pattern is present in `/tmp/axil_test.log` (verified), so none is vacuous.
 
 ### 0.3 Module ergonomics — **DONE and verified**
 
-Both are in `papi/nd-xy.h`; the demo exercises both, so a regression fails at
+Both are in `nd/xy.h`; the demo exercises both, so a regression fails at
 build time.
 
 - `nd_printf(player_ref, fmt, …)` — static inline, `vsnprintf` into a 1 KB
@@ -349,7 +349,7 @@ build time.
   `xy.last` (`xy.h:349` / `xy_ctx.last`, `xy.h:524`). It reads the **injected
   context**, not the global `xy_last`, because a module links no libxylem:
   `xy-mod.h` declares `static struct xy_ctx xy` and the host fills it via
-  `get_xy_ptr()`. So `<ttypt/xy-mod.h>` must precede `papi/nd-xy.h` — which
+  `get_xy_ptr()`. So `<ttypt/xy-mod.h>` must precede `nd/xy.h` — which
   is §6's porting rule — and missing it surfaces as `xy` undeclared at the use
   site. It is a macro for the same reason: an inline would fail at *include*
   time even if unused. This is what nd-attr's listener chain needs.
@@ -367,15 +367,19 @@ is indistinguishable from a hook that stopped firing.
 
 **Header install.** `make install` previously installed nothing a module could
 compile against: mk's rule only covers `include/${FOLDER}` and `FOLDER=ttypt`
-(`mk/include.mk:19-21,104-108`). Added `install-papi`:
+(`mk/include.mk:19-21,104-108`). The first fix was a bespoke `install-papi`
+writing the four headers to `$(PREFIX)/include/axil-nd/papi/`, which worked and
+was still wrong: that directory is on no default include path, so every module
+repo carried a private `-I$(PREFIX)/include/axil-nd` purely to reach it, and
+`nd-core`'s conversion had to name it in its own `CFLAGS`. **Superseded by §0.5
+— `FOLDER := nd`.**
 
-- `include/papi/{nd-hd,nd-xy-types,nd-xy,nd-hooks}.h` →
-  `$(PREFIX)/include/axil-nd/papi/`, so a module keeps one `-I` and still
-  writes `#include "papi/nd-xy.h"`.
+- `include/nd/{hd,xy-types,xy,hooks}.h` → `$(PREFIX)/include/nd/`, so a module
+  writes `#include <nd/xy.h>` and needs no path of its own.
 - `nd-mod.mk` → `$(PREFIX)/share/axil-nd/nd-mod.mk`.
 
 Verified with `make install DESTDIR=/tmp/ndinst PREFIX=/usr`: all four headers
-and the `.mk` land, no errors. `nd-hooks.h` ships even though a module must not
+and the `.mk` land, no errors. `hooks.h` ships even though a module must not
 `XY_DECL` from it, because implementing an event needs the canonical signatures.
 
 **Shared build file.** `nd-mod.mk` is one copy of the module build contract, so
@@ -384,7 +388,7 @@ inside it, both forced by failure:
 
 - `ND_INC` is **self-locating**: it inspects the directory `nd-mod.mk` itself
   was loaded from, and uses the sibling `include/` if that is a source tree,
-  else `$(PREFIX)/include/axil-nd`. The first version hardcoded the installed
+  else `$(PREFIX)/include`. The first version hardcoded the installed
   path, which on a dev host with nothing installed is a directory that does not
   exist — every sibling module died with
   `fatal error: papi/nd-xy.h: No such file or directory`. A module cannot guess
@@ -446,7 +450,7 @@ the whole makefile with `target '...' given more than once in the same rule`.
 
 **Suite.** `test.sh` now builds the engine and every module before booting, and
 creates a real out-of-tree fixture (`../axil-nd-testprobe/`, a separate repo
-whose only `include` knowledge is `papi/nd-xy.h` and `<ttypt/xy.h>`), registers
+whose only `include` knowledge is `nd/xy.h` and `<ttypt/xy.h>`), registers
 it in `mods.load` by path, and asserts it loaded from that exact path and
 resolved `HD_OBJ`. The trap restoring `mods.load` is installed *before*
 anything can fail; the first version ran `make mods` first, so a build error
@@ -469,12 +473,64 @@ mod_load_open_handle: _mod_load failed loading
 
 Then restored: `axil-nd ok`, with `mods.load` back to its shipped contents.
 
-**One real header bug found by the fixture.** `papi/nd-xy.h` called
+**One real header bug found by the fixture.** `nd/xy.h` called
 `vsnprintf` without including `<stdio.h>`. The in-tree demo includes stdio
 first and so never showed it; a first out-of-tree module that did not, died
 with `implicit declaration of function 'vsnprintf'`. A self-contained public
 header has to carry its own dependencies. Also fixed a `/*` inside a block
 comment (`uapi/*.h`) in the same header.
+
+### 0.5 `<nd/xy.h>` — installed where a module already has `-I` — **done and verified**
+
+§0.4 shipped the headers, but to `$(PREFIX)/include/axil-nd/papi/`, which no
+default include path reaches. So "installed" cost every module repo a private
+`-I$(PREFIX)/include/axil-nd`, and the cost showed up as a compile failure in
+the one library that had been converted to the house layout:
+`axil-nd-core/src/libnd-core.c` included `<ttypt/nd-xy.h>`, which existed in
+no tree, and the build died with `ttypt/nd-xy.h: No such file or directory`.
+
+The house already answers this. Every other library here installs its public
+header through mk's `FOLDER` (`mk/include.mk:19-21` lists
+`ls include/$(FOLDER)`, `:104-108` installs each to `$(PREFIX)/include/$(FOLDER)/`)
+and every consumer includes it as `<ttypt/…>` — one `-I` that
+`mk/portable.mk:22`/`:67` and `nd-mod.mk`'s `XY_INC` already put on the line.
+So the module-facing headers moved from `include/papi/` to `include/nd/` and the
+Makefile says `FOLDER := nd`:
+
+- `include/papi/nd-xy.h` → `include/nd/xy.h`, `-nd-xy-types.h` → `xy-types.h`,
+  `-nd-hd.h` → `hd.h`, `-nd-hooks.h` → `hooks.h`, guards renamed to the
+  basename rule `nd-core.h:39-40` documents (`ND_XY_H`, not `PAPI_ND_XY_H`).
+  A module writes `#include <nd/xy.h>`.
+- No forwarding headers. A second spelling is a second thing to keep in sync,
+  so each consumer is one line instead:
+  `other`, `level`, `vanilla`, `wts`, `stone`, `biome`, `shop` —
+  `#include "papi/nd-xy.h"` → `#include <nd/xy.h>` (`level/include/level/level.h:11`
+  is a comment saying the same); `nd-core` — `<ttypt/nd-xy.h>` → `<nd/xy.h>` in
+  `src/libnd-core.c`, `"papi/nd-xy-types.h"` → `<nd/xy-types.h>` in
+  `include/ttypt/nd-core.h`, done with this change.
+- `FOLDER := nd` means mk no longer creates `include/ttypt`, so the engine's own
+  `include/ttypt/axil-nd.h` moved to mk's `install-extra` +
+  `install-dirs += include/ttypt`. Both are set *before* the `-include`, because
+  mk reassigns `install-dirs :=` with `:=` immediately after its own `+=`.
+- `install-papi` shrank to its one remaining job — `nd-mod.mk`, which mk's
+  `share` set (`find ./htdocs -type f`) cannot reach — and is now
+  `install-mods`. `uninstall` gained `uninstall-mods` as a prerequisite, since
+  mk's list covers neither `install-extra` nor a custom target.
+- `nd-mod.mk`'s `ND_INC` fallback is `$(PREFIX)/include`, i.e. the same
+  directory as `XY_INC`: one `-I` now carries the game API and the XY headers.
+
+Verified: `make install` lays down `usr/include/nd/{xy,xy-types,hd,hooks}.h`
+and `usr/include/ttypt/axil-nd.h` with no `usr/include/axil-nd` at all; a TU
+compiled with **only** `-I$(PREFIX)/include` — no engine checkout on the path —
+builds and links an `XY_IMPL` module; `~/axil-nd-core` builds with no `-I` of
+its own for the game headers, which it could not do before; `./test.sh`'s
+out-of-tree fixture, which includes `<nd/xy.h>` and nothing but `<ttypt/xy.h>`,
+builds and asserts as before.
+
+One leftover, deliberately not done by the install: a machine that ran the
+§0.4 install still has `$(PREFIX)/include/axil-nd/papi/` on disk, now dead.
+Remove it by hand (`rm -rf $(PREFIX)/include/axil-nd`) — a new install must not
+delete a path it does not own.
 
 
 ---
@@ -520,7 +576,7 @@ says so too.
    It was lost when the engine was split out of the old nd and never restored.
 
    Fixed additively as `ACT_DROP = 8`, in **both** `include/uapi/object.h` and
-   the module-visible copy in `papi/nd-xy-types.h`. The value is not a guess:
+   the module-visible copy in `nd/xy-types.h`. The value is not a guess:
    it is the old engine's own (`/home/quirinpa/nd/include/uapi/object.h:48`), and
    diffing that enum against ours showed `ACT_DROP = 8` was the *only* line
    missing. It is a wire value, not an internal one — `ico.actions` is memcpy'd
@@ -659,7 +715,7 @@ work.
 
 ### Porting rules as applied
 
-- `#include <nd/nd.h>` → `#include <ttypt/xy-mod.h>` + `"papi/nd-xy.h"`. A TU
+- `#include <nd/nd.h>` → `#include <ttypt/xy-mod.h>` + `<nd/xy.h>`. A TU
   that `XY_IMPL`s a hook must not `XY_DECL` the same name, so `nd-level` does
   *not* include its own `include/level/level.h` — that is the whole reason the
   public header is a separate file.
@@ -796,7 +852,7 @@ dependent already, so this wave is the least likely to force a header change.
    cross-module service; no such symbols exist anywhere in `nd-basics`.
 2. **`race` is not a special case either, and the `nd_assoc` analysis answers
    the wrong question.** `nd_assoc(hd, link, cb)` really is absent from
-   `papi/nd-xy.h` — it survives only as a "bring here if a module needs it"
+   `nd/xy.h` — it survives only as a "bring here if a module needs it"
    comment at `nd-xy.h:54`, and the engine body is `shared_assoc`
    (`interface.c:414`). But **no module calls `nd_assoc`**, so whether to add
    the hook is moot. What `race` actually needs is `<nd/attr.h>` and a
@@ -923,7 +979,7 @@ void xy_install(void) {
 
 `index_open` is `XY_DECL`'d in `index.h` under `#ifndef INDEX_IMPL` (so the
 implementing TU can `XY_IMPL` the same name without colliding — the same rule
-§0.1 records for `papi/nd-hooks.h`), and `XY_DECL` expands to a
+§0.1 records for `nd/hooks.h`), and `XY_DECL` expands to a
 `static inline` that dispatches through `xy_call` to *the* implementor.
 
 So `site/mods` never co-implements a hook: it has one owner, callers name it,
@@ -965,7 +1021,7 @@ decorator table.**
   `include/ttypt/nd-core.h`): `core_icon_fn` and
   `XY_DECL(int, core_icon_decorate, ...)`, under `#ifndef CORE_IMPL` so the
   implementing TU can `XY_IMPL` the same name — the same guard
-  `~/site/mods/index/index.h` uses, and the same rule as `papi/nd-hooks.h`.
+  `~/site/mods/index/index.h` uses, and the same rule as `nd/hooks.h`.
 - `nd-core/main.c` is the sole `XY_IMPL` of `on_icon` (since §8.1 it is
   `nd-core/src/libnd-core.c`). It holds
   `core_icon_decorators[16]`, and after building the base icon threads it
@@ -1109,9 +1165,9 @@ look live and never fire.
 Measured, and the answer is mostly "nothing":
 
 - **All 12 `HD_*` handles the 15 modules use already exist** in
-  `papi/nd-hd.h` — 0.2 covers them. (`HD_ENT` appears in an `equip` comment and
+  `nd/hd.h` — 0.2 covers them. (`HD_ENT` appears in an `equip` comment and
   is not in the old engine's `enum hd` either, so it is not a real gap.)
-- Every engine function the 15 call is already exported by `papi/nd-xy.h`:
+- Every engine function the 15 call is already exported by `nd/xy.h`:
   `ematch_at`, `ematch_mine`, `ent_get`, `look_at`, `object_add`, `object_copy`,
   `object_move`, `map_where`, `action_register`, `nd_register`, `fd_player`,
   `nd_iter`/`nd_next`/`nd_fin`, `nd_len_reg`, and `nd_printf` for `nd_writef`.
@@ -1150,8 +1206,8 @@ section is the pattern it set rather than a plan for it.
 
 Engine gaps, all measured:
 
-- `make install` already ships the library, headers, `htdocs/`, `art/`, `man/`,
-  `papi/`, and `nd-mod.mk`. The installed engine still cannot run outside a
+- `make install` already ships the library, headers (`nd/`, §0.5),
+  `htdocs/`, `art/`, `man/`, and `nd-mod.mk`. The installed engine still cannot run outside a
   source checkout because runtime paths are CWD-relative: `mods.load` at
   `src/nd_xy.c:156`, `man/%s.10` at `src/world.c:598`,
   `htdocs/index.html` at `src/libaxil-nd.c:355`, and `/nd/art/...` with no
@@ -1215,10 +1271,11 @@ Module gaps:
 - The public header moved to `include/ttypt/nd-core.h` and is included as
   `<ttypt/nd-core.h>`. `mk/portable.mk:22`/`:67` put `$(pwd)/include` ahead of
   `$(PREFIX)/include`, so one spelling resolves to the checkout in a dev build
-  and to the installed header otherwise. Consumers still need
-  `-I$(PREFIX)/include/axil-nd` for the `papi/` half, which is why nd-core's
-  own `CFLAGS` names both that and `../axil-nd/include` — a missing `-I` is
-  ignored, so the same command works either way.
+  and to the installed header otherwise. **Since §0.5 the `nd/` half needs no
+  extra `-I` either** — it installs into that same `$(PREFIX)/include` — so
+  `#include <nd/xy.h>` and `#include <ttypt/nd-core.h>` both resolve from the
+  `-I$(PREFIX)/include` every build already has, against an installed engine or
+  a checkout beside it.
 
 - Packaging hygiene: every module now has a `README.md`, a BSD-2 `LICENSE`, and
   ignores `*.d`, `*.o`, `*.so`. `shop`'s README is the only one that also
@@ -1254,7 +1311,7 @@ Working tree carries one uncommitted revision, on top of those commits:
 - A `§5.0.x` → `§0.x` reference sweep, 15 occurrences in this repo and 11 more
   across the eight module repos. Phase 0's subsections are `0.1`–`0.4` under
   §5, so every `§5.0.1`-style pointer was dangling — including in shipped
-  headers (`papi/nd-xy.h`, `papi/nd-hd.h`, `uapi/io.h`) and in the tracked
+  headers (`nd/xy.h`, `nd/hd.h`, `uapi/io.h`) and in the tracked
   `mods.load`, `Makefile`, `test.sh`, `nd-mod.mk` and `.gitignore`. The same
   mistake recurred in all 11 module-repo `Makefile`s, which is the argument for
   sweeping it rather than patching it.
@@ -1347,14 +1404,14 @@ Engine tree:
 
 | path | role |
 |---|---|
-| `Makefile` | include-order fix (§2.1), `mods` target + the `FORCE` fix (§6), `install-papi` |
-| `include/papi/nd-xy.h` | module-facing service API: `nd_printf`, `nd_last` |
-| `include/papi/nd-hooks.h` | canonical `XY_DECL` signatures for all 20 events |
-| `include/papi/nd-xy-types.h` | module value types; includes `nd-hd.h`; `ACT_DROP = 8` |
-| `include/papi/nd-hd.h` | `enum hd` + the tagged module-handle API (new in 0.2) |
+| `Makefile` | include-order fix (§2.1), `mods` target + the `FORCE` fix (§6), `FOLDER := nd` + `install-mods` (§0.5) |
+| `include/nd/xy.h` | module-facing service API: `nd_printf`, `nd_last` |
+| `include/nd/hooks.h` | canonical `XY_DECL` signatures for all 20 events |
+| `include/nd/xy-types.h` | module value types; includes `hd.h`; `ACT_DROP = 8` |
+| `include/nd/hd.h` | `enum hd` + the tagged module-handle API (new in 0.2) |
 | `include/papi/nd.h` | legacy `struct nd` vtable — deleted in Phase 3 |
 | `include/uapi/type.h` | `sic_str_t` + the 20 `nd_evt_*` engine fire prototypes |
-| `include/uapi/io.h` | `nd_hds[]`, `hd_resolve()`, `hd_mod_open()`; includes `nd-hd.h` |
+| `include/uapi/io.h` | `nd_hds[]`, `hd_resolve()`, `hd_mod_open()`; includes `nd/hd.h` |
 | `include/uapi/object.h` | `struct icon` + `enum base_actions` (`ACT_DROP = 8`) |
 | `src/nd_events.c` | canonical 20 `XY_DEF`s + the `nd_evt_*` wrappers (the firing sites) |
 | `src/nd_xy.c` | io providers + path-aware `nd_mods_load()` |
