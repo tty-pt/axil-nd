@@ -74,7 +74,7 @@ void eng_mcp_bar(unsigned char iden, unsigned player_ref,
 	unsigned short val, unsigned short max);
 unsigned shared_put(unsigned hd, void *key, void *data);
 unsigned shared_get(unsigned hd, void *value, void *key);
-/* MODS.md §5.0.2 handle resolution: nd_get/nd_put/nd_iter take a module-facing
+/* MODS.md §0.2 handle resolution: nd_get/nd_put/nd_iter take a module-facing
  * handle (an `enum hd`, or an nd_open() tag) and the engine maps it to a corm
  * table. uapi/io.h declares these, but nd_api.c cannot include uapi headers
  * (their struct/enum defs collide with papi/nd-xy-types.h), so they are

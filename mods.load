@@ -15,7 +15,7 @@
 # Lines that name a module which is not built are reported on stderr
 # ("nd_mods_load: module ... failed to load"); the engine still boots.
 demo
-# out-of-tree sibling repo (MODS.md §4/§5.0.4)
+# out-of-tree sibling repo (MODS.md §4/§0.4)
 # Phase 1 vertical slice (MODS.md §6). Each is a separate repo next to the
 # engine, named by path; nd-mod.mk strips the `axil-nd-` prefix to get the
 # module name, so the artifact is <name>.so and the stem is <name>.

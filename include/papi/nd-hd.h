@@ -2,7 +2,7 @@
 #define PAPI_ND_HD_H
 
 /*
- * nd-hd.h — the module-visible table handle namespace (MODS.md §5.0.2).
+ * nd-hd.h — the module-visible table handle namespace (MODS.md §0.2).
  *
  * A game module names engine tables with the `enum hd` below
  * (`nd_get(HD_OBJ, &obj, &ref)`) and names the tables IT opened with

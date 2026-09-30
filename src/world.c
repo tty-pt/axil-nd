@@ -220,7 +220,7 @@ shared_open(char *name, char *kt, char *vt, unsigned flags)
 	return 0;
 }
 
-/* The engine's `enum hd` -> corm table map (MODS.md §5.0.2). Defined here
+/* The engine's `enum hd` -> corm table map (MODS.md §0.2). Defined here
  * because this is where the tables are opened; uapi/io.h declares it and
  * nd_api.c's providers resolve through hd_resolve(). */
 unsigned nd_hds[HD_MAX];

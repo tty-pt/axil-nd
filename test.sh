@@ -38,7 +38,7 @@ cp mods.load "$mods_load_saved"
 trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
-# MODS.md §5.0.4 out-of-tree module fixture.
+# MODS.md §0.4 out-of-tree module fixture.
 #
 # The engine only ever had modules inside its own tree, so nothing has ever
 # exercised the sibling-repo layout that Phase 1 depends on: a separate repo,
@@ -94,7 +94,7 @@ EOF
 # Register it by path for this run only; the trap above restores mods.load.
 printf '%s\n' "$probe/testprobe" >> mods.load
 
-# Build every module named in mods.load before booting (MODS.md §5.0.4). The
+# Build every module named in mods.load before booting (MODS.md §0.4). The
 # engine loads whatever is in that list, so a module that no longer compiles
 # would otherwise be discovered as "the hook silently stopped firing" deep in
 # the suite, which is the exact failure mode Phase 1 makes worse: modules move
@@ -216,7 +216,7 @@ echo "$hex" | grep -qiF "5b64656d6f5d206f6e5f656e74657220" \
 	|| { echo "FAIL: on_enter frame missing" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# MODS.md §5.0.2 handle namespaces. The demo module probes all three and
+# MODS.md §0.2 handle namespaces. The demo module probes all three and
 # WARN()s the result to axil's stderr, which is /tmp/axil_test.log. Each of
 # these was broken before 0.2 and is a crash-or-corruption tripwire, so they
 # assert on the RESULT word, not just on the probe having run:
@@ -238,7 +238,7 @@ grep -qF "resolved (ok)" "$log" \
 grep -qF "NOT RESOLVED (bug)" "$log" \
 	&& { echo "FAIL: HD_OBJ did not reach the object table" >&2; exit 1; }
 
-# MODS.md §5.0.3 module ergonomics. nd_printf and nd_last are the ports of
+# MODS.md §0.3 module ergonomics. nd_printf and nd_last are the ports of
 # nd_writef and sic_last; both are compiled into the demo, so these fail at
 # BUILD time if either regresses, and the first two assert the runtime path.
 # "[demo] nd_printf " on the wire (5b64656d6f5d206e645f7072696e7466) proves
@@ -269,7 +269,7 @@ grep -qF "nd-vanilla: on_new_player teleported" "$log" \
 	|| { echo "FAIL: nd-vanilla's on_new_player did not fire" >&2; exit 1; }
 # nd-level's table must be a TAGGED module handle (0x80000001), never a bare
 # corm handle that could alias HD_*. Asserted on the real value, because
-# §5.0.2's whole point is that the untagged case used to be silently wrong.
+# §0.2's whole point is that the untagged case used to be silently wrong.
 grep -qE "nd-level: xy_install, level_hd = 0x8[0-9a-f]+ \(tagged\)" "$log" \
 	|| { echo "FAIL: nd-level's nd_open did not return a tagged handle" >&2; exit 1; }
 # nd-shop: the icon CHAIN. A decorator must be registered with nd-core (the
@@ -291,7 +291,7 @@ done
 	|| { echo "FAIL: a mods.load entry failed to load" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# MODS.md §5.0.4 out-of-tree build + path-aware loader. `make mods` above is
+# MODS.md §0.4 out-of-tree build + path-aware loader. `make mods` above is
 # the build half; this is the load half.
 #
 # A sibling module repo (~/axil-nd-<mod>) is named in mods.load by its STEM,
@@ -308,7 +308,7 @@ if [ "$probe_mod" -ge 1 ]; then
 		|| { echo "FAIL: make mods did not build the out-of-tree ${probe}" >&2; exit 1; }
 	grep -qF "testprobe module installed from '${probe}/testprobe'" "$log" \
 		|| { echo "FAIL: out-of-tree module was not loaded from its mods.load path" >&2; exit 1; }
-	# Proves the whole §5.0.2/§5.0.3 contract again from a SECOND, genuinely
+	# Proves the whole §0.2/§0.3 contract again from a SECOND, genuinely
 	# out-of-tree TU: a module built only against the installed papi headers
 	# through nd-mod.mk, with no access to the engine tree.
 	grep -qF "testprobe on_enter: HD_OBJ=resolved (ok) hd=tagged" "$log" \

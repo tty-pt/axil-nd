@@ -6,7 +6,7 @@
 #include "azoth.h"
 
 /* `enum hd` moved to papi/nd-hd.h so game modules can name the same tables
- * (MODS.md §5.0.2). It is included rather than pasted so the two copies
+ * (MODS.md §0.2). It is included rather than pasted so the two copies
  * cannot drift. */
 #include "../papi/nd-hd.h"
 

@@ -90,7 +90,7 @@ XY_DECL(int, nd_twrites, unsigned, player_ref, char *, str, size_t, len);
 XY_DECL(int, nd_close, unsigned, player_ref);
 XY_DECL(int, nd_flush, unsigned, player_ref);
 
-/* snprintf'd text to one player (MODS.md §5.0.3).
+/* snprintf'd text to one player (MODS.md §0.3).
  *
  * Every write hook here takes an explicit length because a `va_list` cannot
  * cross the XY boundary (see HOOK SHAPE CONSTRAINT above), so the old modules'
@@ -119,7 +119,7 @@ nd_printf(unsigned player_ref, char *fmt, ...)
 	return n;
 }
 
-/* nd_last(ret) — the sic_last() port (MODS.md §5.0.3).
+/* nd_last(ret) — the sic_last() port (MODS.md §0.3).
  *
  * sic_last() handed a module the return value of the module that ran before
  * it in the current dispatch, which is how nd-attr chains its listener

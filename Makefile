@@ -101,7 +101,7 @@ mods/demo/demo.so: mods/demo/demo.c include/papi/nd-xy.h
 	cd mods && cc -shared -fPIC -I../include -I/usr/include -o demo/demo.so demo/demo.c
 .PHONY: demo
 
-# MODS.md §5.0.4: build every module named in mods.load. Each line is either a
+# MODS.md §0.4: build every module named in mods.load. Each line is either a
 # bare name (built at mods/<n>/<n>.so) or a path (built where it is named), so
 # the one-repo-per-module layout works without copying anything into this
 # tree. `make mods` is the module gate; test.sh runs it before booting axil.
@@ -208,7 +208,7 @@ install-data: man
 	done
 .PHONY: install-data
 
-# MODS.md §5.0.4: the module-facing API has to be installed, or a sibling
+# MODS.md §0.4: the module-facing API has to be installed, or a sibling
 # ~/axil-nd-<name> repo has nothing to compile against. mk's install rule only
 # covers include/${FOLDER} (FOLDER=ttypt, include.mk:19-21,104-108), so papi/
 # is installed here, under its own prefix: modules use

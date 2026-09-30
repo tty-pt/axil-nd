@@ -1,4 +1,4 @@
-# nd-mod.mk — build rules for a standalone axil-nd game module (MODS.md §5.0.4).
+# nd-mod.mk — build rules for a standalone axil-nd game module (MODS.md §0.4).
 #
 # Installed to $(PREFIX)/share/axil-nd/nd-mod.mk. A sibling module repo
 # (~/axil-nd-<name>) includes it and nothing else:

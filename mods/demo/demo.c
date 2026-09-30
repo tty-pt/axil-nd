@@ -50,7 +50,7 @@ xy_install(void)
 		WARN("demo xy_install exercised ent_get/me_get/map_has/ematch/action_register\n");
 	}
 
-	/* MODS.md §5.0.2: the two handle namespaces. */
+	/* MODS.md §0.2: the two handle namespaces. */
 
 	/* nd_open returns a TAGGED handle, and the same handle reads back
 	 * through nd_put/nd_get -- so a module's own table is usable and
@@ -85,7 +85,7 @@ xy_install(void)
 			mod ? "missed (ok)" : "HIT (bug)");
 	}
 
-	/* nd_printf (MODS.md §5.0.3): format and write in one call. */
+	/* nd_printf (MODS.md §0.3): format and write in one call. */
 	{
 		/* player_ref 0 is a placeholder at install time; the real
 		 * check is the visible frame from on_enter below. */
@@ -93,7 +93,7 @@ xy_install(void)
 		WARN("demo nd_printf compiled and dispatched\n");
 	}
 
-	/* nd_last (MODS.md §5.0.3): reads the injected xy context, so if
+	/* nd_last (MODS.md §0.3): reads the injected xy context, so if
 	 * <ttypt/xy-mod.h> were not included first this would not compile.
 	 * A non-hook context has no dispatch in flight, so 0 (nothing ran) is
 	 * the correct answer here -- the point is that the symbol resolves. */
@@ -125,7 +125,7 @@ XY_IMPL(int, on_enter, unsigned, player_ref, unsigned, loc_ref)
 	nd_write(player_ref, buf, strlen(buf));
 	WARN("demo on_enter dispatched for player %u\n", player_ref);
 
-	/* MODS.md §5.0.2, end to end: HD_OBJ must resolve to the engine's
+	/* MODS.md §0.2, end to end: HD_OBJ must resolve to the engine's
 	 * object table. player_ref is a live object ref here, so a real name
 	 * comes back. Pre-0.2 this passed HD_OBJ (== 7) straight to corm_get
 	 * as a table number, which read whatever corm table 7 happened to be

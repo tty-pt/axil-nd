@@ -1,10 +1,14 @@
 # MODS.md — porting the old `~/nd` game modules to libxylem
 
-Status: **Phase 0 complete and verified** (0.1-0.4). **Phase 1 ported, loading
-and green** — `./test.sh` passes end to end. Two engine bugs were found and
-fixed on the way (§6). **Phase 2 planned but not started**: 15 modules
-outstanding, sequenced into three waves with a measured dependency graph (§7).
-All uncommitted, as of 2026-09-29.
+Status: **Phase 0 complete and verified** (0.1-0.4). **Phase 1 complete** — all
+four modules load and are asserted. **Phase 2 Wave 1 complete**, 4 of 4
+(`stone`, `biome`, `wts`, `shop`); 11 outstanding, sequenced into three waves
+from a measured dependency graph (§7). Two engine bugs were found and fixed on
+the way (§6), and `on_icon` composition is settled as a single owner plus a
+decorator table (§7). Committed 2026-09-30; nothing pushed (§9).
+
+**The suite is not yet a trustworthy gate**: its persistence regression fails
+in roughly one run of three (§12.1). That is the only known failure.
 
 Predecessor: `/home/quirinpa/site/.pi/quest/future/axilnd-modcap-xy.md` (J4.8
 step 2) — that quest migrated the *engine's* modding caps to XY. This document
@@ -33,14 +37,14 @@ the whole API by struct copy: `src/mods.c:_mod_load` did
 | `nd-other` | 477 B | `on_add` | ported; `HD_OBJ`/`HD_SKEL`/`HD_TYPE` |
 | `nd-level` | 1015 B | `on_add`, `on_status` | ported; exports `level`/`level_up` |
 | `nd-vanilla` | 574 B | `on_new_player` | ported; `on_birth`/`on_death` are non-events |
-| `nd-wts` | 513 B | — | no deps; 11× `nd_put(HD_WTS, …)`, no events at all |
-| `nd-stone` | 1225 B | `on_add`, `on_spawn` | no deps; `map_where`, `object_add` |
-| `nd-biome` | 1291 B | — | no deps; `mod_install` only, `HD_BIOME`/`HD_SKEL` |
+| `nd-wts` | 513 B | — | ported, built, not loaded; no deps; 11× `nd_put(HD_WTS, …)`, no events at all |
+| `nd-stone` | 1225 B | `on_add`, `on_spawn` | ported, built, not loaded; no deps; `map_where`, `object_add` |
+| `nd-biome` | 1291 B | — | ported, built, not loaded; no deps; `mod_install` only, `HD_BIOME`/`HD_SKEL` |
 | `nd-seat` | 3497 B | `on_add`, `on_before_leave`, `on_examine`, `on_will_attack`\* | needs `fight`; 2 commands, 1 service, 1 `sic_last` |
 | `nd-race` | 1786 B | `on_add`, `on_status` | needs `attr`; `sic_last` chain |
 | `nd-class` | 1688 B | `on_add`, `on_status` | needs `attr` + `level`; `sic_last` chain |
 | `nd-drink` | 3734 B | `on_add`, `on_icon`, `on_view_flags` | needs `mortal`; 2 commands |
-| `nd-shop` | 3793 B | `on_icon` | no deps; 3 commands, `nd_iter`, `ematch_at`/`ematch_mine` |
+| `nd-shop` | 3793 B | `on_icon` | ported and loaded; no deps; 3 commands, `nd_iter`, `ematch_at`/`ematch_mine` |
 | `nd-mob` | 3609 B | `on_spawn` | needs `fight` + `plant` |
 | `nd-attr` | 5518 B | `on_add`, `on_status` | needs `level`; 8 services, 2 commands |
 | `nd-mortal` | 6403 B | `on_add`, `on_death`\*, `on_examine`, `on_status`, `on_update` | needs `attr`; 4 services, 3 non-events |
@@ -112,7 +116,7 @@ The `./test.sh` "axil-nd ok" run in §0.1 of this session is **void**. The only
 fresh object was `src/libaxil-nd.o` (it includes `nd_events.c`), so the changes
 to `mods.c` and the 20 `SIC_DEF`s were not even in the binary that was tested.
 Phase 0 is not verified until a clean `rm src/*.o lib/libaxil-nd.so && make &&
-./test.sh` passes. **[Since satisfied — §5.0.1 records the clean-rebuild pass.]**
+./test.sh` passes. **[Since satisfied — §0.1 records the clean-rebuild pass.]**
 
 ### 2.3 There are 20 event firing sites, not 19
 
@@ -230,6 +234,20 @@ Other facts that shape the plan (verified):
 | `HD_*` access | resolve the enum **engine-side** inside the existing hooks |
 | Legacy SIC | retire it — "old sic is now xy" |
 
+### 4.1 Decisions taken (user, 2026-09-30)
+
+| Question | Decision |
+|---|---|
+| Module naming | **`nd-<name>` is enough** — `libnd-shop.so` + `nd-shop.so`, loaded `xy_load("nd-shop")` |
+| Scope | engine runtime paths **and** module install, both needed for "installable" to be true; the user left the `nd-mod.mk` judgement to me (§8.1) |
+| Module→module dependency | **installed soname first, sibling path as the dev fallback** — the rule `nd-mod.mk` already uses to find the engine |
+| VCS | **use the old remotes and commit** |
+
+On the last point: the port repos are initialised with
+`origin = git@github.com:tty-pt/nd-<name>.git`. All 19 old per-module repos
+still exist, so the one-repo-per-module layout maps onto them exactly and no
+new repo is needed. Committed locally; **nothing pushed** (see §10).
+
 ---
 
 ## 5. Phase 0 — engine contract (prerequisite)
@@ -258,7 +276,7 @@ lib/*.so && make`):
 - `./test.sh`: `axil-nd ok` (WS route, static assets, `/tty` isolation, raw
   telnet, persistence two-boot regression).
 - Symbols: `nm -D` shows exactly 20 `T nd_evt_*`; `*_sic_adapter` count 0;
-  the four `sic_(call|areg|get|last)` globals remain as §5.0.1 intends.
+  the four `sic_(call|areg|get|last)` globals remain as §0.1 intends.
 - Exactly one `on_enter` per connection over 3 raw-telnet connections; zero
   `SIC_CALL BAD`, zero `on_new_player` re-fire on re-login.
 - **No behavioural regression**: raw-telnet output is byte-identical to `HEAD`
@@ -653,7 +671,7 @@ work.
   did the same single assignment, so they collapse; `mod_open`'s "already
   installed" case is now just make-idempotence of the install.
 - `nd_writef` → `nd_printf` (nd-level's two calls).
-- `nd_put(HD_X, …)` / `nd_get(HD_X, …)` → unchanged; §5.0.2 made them resolve
+- `nd_put(HD_X, …)` / `nd_get(HD_X, …)` → unchanged; §0.2 made them resolve
   engine-side.
 - Dead handlers → kept verbatim and commented, not ported (`nd-vanilla`).
 
@@ -690,29 +708,51 @@ comparison behaves (the two values are printed side by side).
 
 ---
 
-## 7. Phase 2 — the remaining 15
+## 7. Phase 2 — the 15 non-Phase-1 modules
 
 **15, not the 14 an earlier revision claimed.** 19 modules total (§1), 4 ported
 in Phase 1, and the section below names all 15: 4 dependency-free leaves, 6 in
-the `attr` stat layer, and 5 above it.
+the `attr` stat layer, and 5 above it. **Wave 1's 4 are now ported, so 11
+remain.**
 
 ### The dependency graph, measured
 
 Derived from `#include <nd/…>`, not from the old plan's prose, which was wrong
-in a way that would have blocked the port on its first attempt:
+in a way that would have blocked the port on its first attempt. `A -> B` means
+*A includes B's header*, i.e. **A depends on B** — the arrow points at the
+dependency, so build order runs right to left:
 
 ```
-level ─┬─> attr ─┬─> class
-       │         ├─> race
-       │         ├─> mortal ─> drink ─> plant ─┐
-       │         │        └─> fight ─┬─> equip ─┤
-       │         │                   ├─> seat  ─┤
-       │         └───────────────────┘          │
-       └──────────────────────────────────────> │  mob (needs fight+plant)
-                                                └─> spell (needs attr,equip,fight,mortal,seat)
+attr   -> level                  (nd/level.h)
+class  -> attr, level            (nd/attr.h, nd/level.h)
+race   -> attr
+mortal -> attr
+drink  -> mortal
+fight  -> level, attr, mortal
+equip  -> attr, fight
+seat   -> fight
+plant  -> drink
+mob    -> fight, plant
+spell  -> attr, equip, fight, mortal, seat
 
 leaves, no module deps:  stone  biome  wts  shop
 ```
+
+A build order that satisfies it: `wts` `biome` `stone` `shop` `attr` `race`
+`mortal` `class` `drink` `fight` `equip` `seat` `plant` `mob` `spell`.
+
+**Read as build order, not dependency direction.** An earlier revision of this
+graph was drawn as a build-order tree with `level ─> attr ─> class`, which is
+correct, but hung `mob` off `level` and `spell` off `mob` as if they were
+children of those nodes. Neither is: `mob` and `spell` are roots, and `mob`
+needs `fight` + `plant` while `spell` needs five modules.
+
+Note that **`attr` is a leaf *within* Phase 2**: its only dependency, `level`,
+was ported in Phase 1. That is why Wave 2 can start with it. Counted properly,
+it is depended on by **6 of the 15 directly** (`class`, `race`, `mortal`,
+`fight`, `equip`, `spell`) and **10 transitively** (those six plus `drink`,
+`seat`, `plant`, `mob`). An earlier revision said 8, which matched neither
+count.
 
 The old ordering line (`class → attr → equip → mortal → fight → spell`) put
 **three dependents before their own dependencies**: `class` before `attr`,
@@ -729,16 +769,20 @@ remaining Phase 0 surface for the first time: `stone` needs `map_where` +
 `nd_fin`, `ematch_at`/`ematch_mine`, `action_register`, `nd_register` ×3 and
 `on_icon`; `biome` and `wts` implement no events at all, so they only prove
 `mod_install` and `HD_*`. Estimated smallest → largest: `wts` (513 B),
-`stone` (1225 B), `biome` (1291 B), `shop` (3793 B).
+`stone` (1225 B), `biome` (1291 B), `shop` (3793 B). **Now 4 of 4 ported**;
+`shop` is loaded and asserted, the other three build but are not yet in
+`mods.load` (§9).
 
-**Wave 2 — `attr` first, then its dependents.** `attr` is depended on by 8 of
-the 15 and is the shared stat surface, so its public header is worth
-stabilising before anything builds on it: port `attr` alone, freeze
-`include/nd/attr.h`'s shape (its 8 exported services — `stat`, `modifier`,
-`effect`, `hp_max`, `mp_max`, `attr_award`, `train`, `mcp_stats` — plus the
-`enum attribute`/`ATTR_MAX` that its dependents include), and treat later
-changes to it as expensive. Then the 6 that depend on it: `class`, `race`,
-`mortal`, `drink`, `fight`, and — after `mortal` — `drink`.
+**Wave 2 — `attr` first, then its dependents.** `attr` is the shared stat
+surface and the only Phase 2 module whose sole dependency is already ported, so
+its public header is worth stabilising before anything builds on it: port
+`attr` alone, freeze `include/attr/attr.h`'s shape (its 8 exported services —
+`stat`, `modifier`, `effect`, `hp_max`, `mp_max`, `attr_award`, `train`,
+`mcp_stats` — plus the `enum attribute`/`ATTR_MAX` that its dependents
+include), and treat later changes to it as expensive. Then the **five** that
+depend on it inside this wave: `class`, `race`, `mortal`, `drink`, `fight`
+(`drink` only after `mortal`). So Wave 2 is six modules; the other four direct
+dependents of `attr` — `equip`, `spell`, and the transitive `seat` — are Wave 3.
 
 **Wave 3 — the five above: `equip`, `plant`, `seat`, `mob`, `spell`.** By this
 point every cross-module surface they need exists and has been exercised by a
@@ -851,7 +895,7 @@ handler that triggers a nested dispatch (`look_at`, `nd_get` → any hook) sets
 `xy_last_ran` on the way out, so a **later** handler in the outer dispatch can
 read a *nested hook's* result and mistake it for its predecessor's.
 
-**This also means §5.0.3's `nd_last()` claim is too strong.** It is called "the
+**This also means §0.3's `nd_last()` claim is too strong.** It is called "the
 `sic_last()` port" and "what nd-attr's listener chain needs", and Phase 0.3
 asserts it on the wire — but that assertion only proves it works *after* a
 dispatch, which is not the situation any of the 5 `sic_last()` call sites
@@ -879,7 +923,7 @@ void xy_install(void) {
 
 `index_open` is `XY_DECL`'d in `index.h` under `#ifndef INDEX_IMPL` (so the
 implementing TU can `XY_IMPL` the same name without colliding — the same rule
-§5.0.1 records for `papi/nd-hooks.h`), and `XY_DECL` expands to a
+§0.1 records for `papi/nd-hooks.h`), and `XY_DECL` expands to a
 `static inline` that dispatches through `xy_call` to *the* implementor.
 
 So `site/mods` never co-implements a hook: it has one owner, callers name it,
@@ -975,15 +1019,29 @@ must be asserted on the post-chain value.
 - **(d) Fold all four into `nd-core`** and drop the modularity. Cheapest, and
   should be the fallback if (a) turns out to need engine support anyway.
 
-Recommend **(a)**, and treat **(c)** as a separate upstream ticket regardless,
-since the nested-leak in `xy.last()` is a real bug for anyone using it as a
-`sic_last` equivalent.
+**Implemented: (a), in its registry form** — the registry is an ordered array
+of `core_icon_fn` rather than of hook names, so a decorator registers a
+function pointer and never gets an `on_icon_*` hook of its own. (c) remains a
+separate upstream ticket regardless, since the nested-leak in `xy.last()` is a
+real bug for anyone using it as a `sic_last` equivalent.
 
-**Consequence for the waves.** `shop` was going to be a Wave 1 leaf, and is
-still one on dependency grounds, but it is *blocked on this question* rather
-than on anything about `shop` itself. `plant` (Wave 3) and `drink`/`fight`
-(Wave 2) carry the same exposure, so this is a Phase 2-wide architectural
-question that happened to surface in Wave 1, not a `shop` bug.
+**Consequence for the waves.** `shop` was a Wave 1 leaf and is *blocked on this
+question* rather than on anything about `shop` itself — that is what it exposed
+in Wave 1. The question is now settled, and `shop` is ported and asserted.
+
+What remains open is everything downstream of the same mechanism:
+
+- `drink`, `fight` and `plant` are the other three `on_icon` implementors, and
+  each must register a decorator with `nd-core` rather than co-implement the
+  hook. `drink` and `fight` are Wave 2, `plant` is Wave 3.
+- `plant` and `fight` also need the service side (`drink`'s `vtf_register`,
+  `attr`'s listener chain), so a decorator that wants a *return value* from
+  another module is a different problem from decorating an icon — the
+  `~/site/mods` one-owner-one-caller pattern, not the decorator table.
+- The five `sic_last()` sites (`class`, `race`, `seat`, `equip`, `spell`) are
+  **unproven** and will read `XY_ERR_NOTFOUND` until libxylem is fixed
+  (§12.2). `class` and `race` are Wave 2, so this is a Wave 2 blocker, not a
+  Wave 3 one.
 
 ### Carried forward from the Phase 1 slice
 
@@ -1001,13 +1059,16 @@ know now than to rediscover per module:
   Wave 2's `attr`/`mortal` write from `train`/`heal`/`feed`. **This has not been
   swept across the other `do_*` handlers** — `do_status` was the only one
   fixed, and nothing currently tests for the class of bug.
-- **The repo shape is mechanical, but the four existing Makefiles do not follow
-  it.** Each new repo needs `Makefile`, `main.c`, `README.md`, BSD-2 `LICENSE`,
-  and private headers in `include/<mod>/` — never `include/uapi/`. But all four
-  Phase 1 repos do `include /home/quirinpa/axil-nd/nd-mod.mk`, an absolute path
-  into one developer's checkout, which breaks for anyone else and defeats the
-  self-locating property `nd-mod.mk` was built for. **Fix this in Wave 1**,
-  before 15 more repos inherit it; `MOD := <name>` is already correct.
+- **The repo shape is mechanical, and the four existing Makefiles did not
+  follow it — FIXED.** Each new repo needs `Makefile`, `main.c`, `README.md`,
+  BSD-2 `LICENSE`, and private headers in `include/<mod>/` — never
+  `include/uapi/`. All four Phase 1 repos originally did
+  `include /home/quirinpa/axil-nd/nd-mod.mk`, an absolute path into one
+  developer's checkout, which broke for anyone else and defeated the
+  self-locating property `nd-mod.mk` was built for. All eight now resolve
+  `$(PREFIX)/share/axil-nd/nd-mod.mk` with a `../axil-nd/nd-mod.mk` fallback,
+  and `MOD := <name>` is set in each. Verified: no `/home/quirinpa` string
+  remains in any of the eight `Makefile`s.
 
 ### Non-events, settled
 
@@ -1066,7 +1127,7 @@ Delete: `src/mods.c`'s sic registry + dlopen loader (`sic_call`, `sic_areg`,
 `mod_load_all()` call in `world.c`; the `nd.*` vtable fill in `shared_init()`
 (`world.c:248-322`); `include/papi/nd.h`'s `struct nd`; the vestigial
 fn-pointer globals in `uapi/*.h`; `module.ld`'s `.sic_auto_init`; and
-`-fcommon` if §5.0.1's removal of the `on_*_id` globals freed it.
+`-fcommon` if §0.1's removal of the `on_*_id` globals freed it.
 
 **Behavioural consequence to re-verify:** `mod_hd` lived in the persistent
 store, so `mod_load_all()` was the re-install path on later boots. `mods.load`
@@ -1075,79 +1136,120 @@ one-store case (`test.sh` persistence regression).
 
 ---
 
-## 9. Current tree state (2026-09-29, uncommitted)
+### 8.1 Phase 4 — installability (next)
 
-Modified (engine): `Makefile` (include-order fix, `make mods`, `install-papi`),
-`.gitignore` (un-ignore `mods.load`), `include/uapi/type.h`, `include/uapi/io.h`,
-`include/uapi/object.h`, `include/papi/nd-xy.h`, `include/papi/nd-xy-types.h`,
-`src/nd_events.c`, `src/nd_api.c`, `src/nd_xy.c`, `src/mods.c`, `src/world.c`,
-`src/view.c`, and the `call_on_*` → `nd_evt_*` renames in `entity.c`, `look.c`,
-`noise.c`, `object.c`, `spacetime.c`. Plus `test.sh` and `mods/demo/demo.c`.
+Goal: `nd` and every `nd` module install like an axil module, as `axil-tty`
+does. Module sonames use **`nd-<name>`**: `libnd-<name>.so` plus the unprefixed
+`nd-<name>.so` symlink, loaded by `xy_load("nd-<name>")`.
 
-Untracked and new: this file, `include/papi/nd-hd.h`, `nd-mod.mk`, `mods.load`.
-Untracked and pre-existing: `bun.lock`, `std.db` — do not touch those.
+Engine gaps, all measured:
 
-Also modified in Phase 1: `src/entity.c` (the missing `eng_nd_flush` in
-`do_status` — §6) and the out-of-tree `mods:` rule in `Makefile` (`FORCE`).
+- `make install` already ships the library, headers, `htdocs/`, `art/`, `man/`,
+  `papi/`, and `nd-mod.mk`. The installed engine still cannot run outside a
+  source checkout because runtime paths are CWD-relative: `mods.load` at
+  `src/nd_xy.c:156`, `man/%s.10` at `src/world.c:598`,
+  `htdocs/index.html` at `src/libaxil-nd.c:355`, and `/nd/art/...` with no
+  explicit engine handler found.
+- `AXIL_PREFIX` and `AXIL_HTDOCS` exist at `src/libaxil-nd.c:26-31` but are
+  unused. They should become the compiled-in prefix, not remain dead macros.
+- The missing `mods.load` fallback now boots the demo module silently. An
+  installed engine must fail loudly on missing module configuration instead.
+- Copy the house pattern from `axil-tty`'s `serve_htdocs()`
+  (`src/libaxil-tty.c:777-790`): compiled-in prefix plus a **process
+  environment** override. It must never read the override from the
+  per-connection request environment, which is populated from client input.
 
-State: **Phase 0 complete and verified** (0.1-0.4) and **Phase 1 ported and
-verified** — `./test.sh` exits 0, with two engine bugs found and fixed on the
-way (§6). Nothing committed.
+Module gaps:
 
-Four sibling repos created, each with `Makefile`, `main.c`, `README.md`,
-BSD-2 `LICENSE`: `~/axil-nd-core`, `~/axil-nd-other`, `~/axil-nd-level`
-(+ `include/level/level.h`), `~/axil-nd-vanilla`. None of the four is a git
-repo yet. All four build warning-free, load from the engine, and have their
-behaviour asserted in `test.sh`.
+- Give `nd-mod.mk` a smaller job: resolve the engine and expose `ND_INC`, plus
+  the installed-versus-sibling check. Move library/install behaviour into
+  `mk/include.mk`, with `all := libnd-<name>` and
+  `SONAME-libnd-<name> := nd-<name>`. Do not delete `nd-mod.mk` yet: the copy
+  installed at `$(PREFIX)/share/axil-nd/nd-mod.mk` is still how a module builds
+  against an installed engine without an engine checkout.
+- Module→module dependencies use installed soname first, sibling fallback:
+  `xy_load("nd-core")`, falling back to `../axil-nd-core/core` in a dev tree.
+  Keep `core.h`’s installed include path consistent with the dev-tree relative
+  include when this lands.
+- Packaging hygiene: `~/axil-nd-shop` still needs `README.md`; every module
+  already has BSD-2 `LICENSE` and ignores `*.d`, `*.o`, `*.so`.
 
-Also changed after that: all four `Makefile`s no longer hardcode
-`/home/quirinpa/axil-nd/nd-mod.mk`; they now resolve `$(PREFIX)/share/axil-nd/`
-or fall back to a sibling `../axil-nd/` checkout (§7), so the next 15 repos
-inherit a path that works outside one developer's home. Suite re-run green
-after the change.
+Still to confirm before fixing: how `/nd/art/...` is served (§10).
 
-**Wave 1 started, 3 of 4 modules built** (none yet in `mods.load`, so none yet
-asserted):
+---
 
-| module | state |
-|---|---|
-| `~/axil-nd-wts` | ported, builds clean; `xy_install` + 11 `HD_WTS` words, no events |
-| `~/axil-nd-stone` | ported, builds clean; `on_spawn` (struct-by-value `struct bio`) + `on_add`, `map_where`/`object_add`, `XXH32` from `<xxhash.h>` |
-| `~/axil-nd-biome` | ported, builds clean; 19 `HD_SKEL` + `HD_BIOME[16]`, no events |
-| `~/axil-nd-shop` | **ported** — unblocked by the decorator chain (`~/axil-nd-core/core.h`), see §7 |
+## 9. Current tree state (2026-09-30, committed)
 
-`wts`, `stone` and `biome` are built but still not in `mods.load`, so they load
-nothing and are unasserted. `shop` IS loaded and asserted. **Wave 1: 4 of 4
-ported, 1 of 4 in the suite.**
+Engine commits on `main`:
 
-**The suite is intermittently failing on the persistence regression** — see
-§12.1. It is not caused by anything in Phase 1 or Wave 1, but it currently
-makes `./test.sh` an unreliable gate, so that is the first thing to settle.
+- `0d74441` — Phase 0 engine/modding contract.
+- `1d99c73` — `test.sh` contract assertions, including `shop` and the
+  post-chain icon marker.
+- `c52d03d` — this plan.
+
+Working tree carries one uncommitted revision, on top of those commits:
+
+- `MODS.md` — Phase 4 (installability) added as §8.1, and a correction pass over
+  the whole document: the header status block, the §7 dependency graph and
+  Wave 2 counts, the resolved-vs-blocked `shop` text, and the open-questions
+  tallies.
+- A `§5.0.x` → `§0.x` reference sweep, 15 occurrences in this repo and 11 more
+  across the eight module repos. Phase 0's subsections are `0.1`–`0.4` under
+  §5, so every `§5.0.1`-style pointer was dangling — including in shipped
+  headers (`papi/nd-xy.h`, `papi/nd-hd.h`, `uapi/io.h`) and in the tracked
+  `mods.load`, `Makefile`, `test.sh`, `nd-mod.mk` and `.gitignore`. The same
+  mistake recurred in all 11 module-repo `Makefile`s, which is the argument for
+  sweeping it rather than patching it.
+
+Nothing else is dirty. `bun.lock` and `std.db` remain untracked and untouched.
+
+Eight module repos are initialised as git repos with their old remotes,
+`git@github.com:tty-pt/nd-<name>.git`, one local commit each, **nothing
+pushed**:
+
+- `~/axil-nd-core`, `~/axil-nd-other`, `~/axil-nd-level`,
+  `~/axil-nd-vanilla`
+- `~/axil-nd-wts`, `~/axil-nd-stone`, `~/axil-nd-biome`, `~/axil-nd-shop`
+
+All eight have BSD-2 `LICENSE` and ignore `*.d`, `*.o`, `*.so`. `shop`’s
+missing `LICENSE` and `.gitignore` were added from the old
+`tty-pt/nd-shop` layout; `shop` still needs `README.md`.
+
+State: **Phase 0 complete**, **Phase 1 complete**, **Wave 1 ported 4 of 4**.
+`shop` is loaded after `nd-core` in the tracked `mods.load` and asserted.
+`wts`, `stone`, and `biome` build but are still not loaded or asserted.
+
+**The suite still has the intermittent persistence failure** — see §12.1. It
+is unchanged by the commits above and remains the first open reliability
+item.
 
 ---
 
 ## 10. Open questions
 
-Three of the five questions this section used to carry are now answered, and
-are recorded in §6. What remains:
+Five questions are closed and are listed at the end of this section. **Six
+remain:**
 
 1. **The persistence flake (§12.1) — settle this first.** `./test.sh` fails
    the two-boot regression in roughly 1 run of 3, so there is no trustworthy
    green until it does. The cheap discriminator is `save` + `SIGKILL` versus
    `save` + clean quit, which separates a lazy commit from a reopen-path bug.
-2. **`on_icon` return composition (§7)** — last-wins confirmed, so the four
-   decorator modules cannot each own `on_icon`. The old engine passed the
-   running icon to each module in turn; XY's model has no equivalent, so one
-   of them has to become the single owner or the engine has to grow a
-   decorator chain. This blocks `shop` (Wave 1) and also `drink`, `plant` and
-   `fight`.
-3. **GitHub side** — push the new repos as `tty-pt/axil-nd-<name>`, or keep
-   them local-only for now? They are not git repos yet, and none of the four
-   has been committed.
-4. **`nd-core`'s place** — standalone in the old superproject, and now ported
-   and loading. The only open question is whether it stays in the slice or
-   becomes a separate concern, since it is the odd one out (icon rendering, not
-   a gameplay system).
+2. **How `/nd/art/...` is served (§8.1).** The client fetches it, the plan
+   installs `art/`, and no explicit engine handler builds that prefix.
+   `handle_nd` answers `GET:/nd` and otherwise sends CWD-relative
+   `htdocs/index.html`. Confirm the real serving path before touching it.
+3. **Push strategy.** All 19 old per-module repos exist, the eight ports use
+   them as `origin`, and nothing has been pushed. Pushing to `main` would
+   replace working SIC modules. Proposed: commit ports to a `libxylem` branch
+   per repo first and keep `main` live until the corresponding suite state is
+   green.
+4. **The five `sic_last()` sites** (`class`, `race`, `seat`, `equip`, `spell`)
+   — §7 and §12.2. `xy.last()` is unusable mid-dispatch, so these will read
+   `XY_ERR_NOTFOUND` and misbehave. `class` and `race` are Wave 2, so this is a
+   Wave 2 blocker, not a Wave 3 one. The choice is whether to fix libxylem
+   upstream (the `xy_last_ran` guard plus its nested-dispatch leak, which have
+   to land together) or to work around it nd-side the way `on_icon` was worked
+   around — one owner, explicit ordered table.
 5. **The 7 non-events** (`on_birth`, `on_death`, `on_murder`, `on_will_attack`,
    `on_mortal_life`, `on_mortal_survival`, `on_mortal_update`) — §6 and §7
    settled the mechanics: these are not engine events at all, so there is no
@@ -1158,7 +1260,7 @@ are recorded in §6. What remains:
    question.
 6. **The `eng_nd_flush` sweep** — §6 fixed `do_status` and flagged the class,
    but the other `do_*` handlers have not been swept and nothing tests for it.
-   Worth settling before Wave 1, because `shop` writes from commands.
+   `shop` is now landed, so settle this before Wave 2’s command-heavy modules.
 
 Closed in this revision:
 
@@ -1170,6 +1272,16 @@ Closed in this revision:
   reframed above; there are no firing sites to add.
 - ~~Live/dead audit of all 20 hooks~~ — **done**, §6. All 20 have exactly one
   real call site.
+- ~~`on_icon` return composition~~ — **resolved**, §7. `nd-core` is the sole
+  owner, `core_icon_decorate()` threads the running icon through registered
+  decorators, and the suite marker now reports the post-chain value.
+- ~~Missing module remotes~~ — **answered**, §4.1. All 19 old `tty-pt/nd-<name>`
+  repos exist and are mapped one-to-one; no new repos are needed.
+- ~~`nd-core`'s place in the slice~~ — **settled by §7**, and no longer a
+  question: `nd-core` is the *sole* owner of `on_icon`, so it is load-bearing
+  for `shop`, `drink`, `fight` and `plant` rather than being the odd one out.
+  It was standalone in the old superproject for historical reasons, not
+  structural ones.
 
 ## 11. Key files
 
@@ -1199,15 +1311,21 @@ Engine tree:
 | `mods.load` | the module list; tracked since 0.4, one line per module |
 | `test.sh` | the suite: engine + modules, fixture, Phase 0.2/0.3/0.4 and Phase 1 assertions |
 
-Slice module repos (all four: `Makefile`, `main.c`, `README.md`, `LICENSE`):
+Module repos (eight committed locally; `shop` still needs `README.md`):
 
 | path | role |
 |---|---|
-| `~/axil-nd-core/` | `on_icon`; struct return across the bus |
+| `~/axil-nd-core/` | `on_icon`; sole owner plus decorator table |
+| `~/axil-nd-core/core.h` | `core_icon_fn` and `core_icon_decorate()` |
 | `~/axil-nd-other/` | `on_add` + `HD_OBJ`/`HD_SKEL`; the `HD_*` indirection probe |
 | `~/axil-nd-level/` | `level`/`level_up` cross-module API, own corm table, `on_status` |
 | `~/axil-nd-level/include/level/level.h` | module-owned public header (`XY_DECL`) |
 | `~/axil-nd-vanilla/` | `on_new_player`; the two non-existent events, kept commented |
+| `~/axil-nd-shop/` | `shop`/`buy`/`sell` plus the first registered icon decorator |
+| `~/axil-nd-stone/` | `on_spawn` + `on_add`; built, not yet loaded |
+| `~/axil-nd-biome/` | skeletons and biome table; built, not yet loaded |
+| `~/axil-nd-wts/` | word table; built, not yet loaded |
+| `~/axil-nd-testprobe/` | not a module: the suite's out-of-tree fixture, written by `test.sh` on each run |
 
 References:
 
@@ -1217,6 +1335,7 @@ References:
 | `~/nd/module.mk` | the old build rule `nd-mod.mk` replaces |
 | `~/nd/include/uapi/object.h:48` | the engine's own `ACT_DROP = 8` |
 | `/tmp/nd-basics/`, `/tmp/nd-core/` | the cloned originals the slice was ported from |
+| `git@github.com:tty-pt/nd-<name>.git` | old per-module remotes, mapped one-to-one to `~/axil-nd-<name>` |
 | `~/site/AGENTS.md:34-41` | the XY module DAG contract to follow |
 
 ---
@@ -1239,7 +1358,7 @@ so it is frequent, not rare). The failing assertion is always the same:
 FAIL: boot B re-created the player
 ```
 
-which is `test.sh:762` — boot A created the player and `save`d it, boot B came
+which is `test.sh:771` — boot A created the player and `save`d it, boot B came
 up on the same store, found no player, and ran `eng_object_add` again. The
 store file is non-empty (`test.sh` asserts that) and boot A's log does contain
 the creation, so the write reached the file system but the *player* was not
@@ -1306,8 +1425,10 @@ was verified to fail when a decorator is made to clobber (see §7).
 `test.sh:118` stores the main engine's PID in `mux_pid` and the trap kills
 `${mux_pid}`. There is no mux; the variable is simply misnamed, which makes the
 trap hard to audit — the process that must not survive a run is the one whose
-name says it is a relay. Worth renaming to `axil_pid` when this file is next
-touched. The trap does kill the engine, but there is a shutdown race: a `pgrep`
+name says it is a relay. **Still not done**: rename it to `axil_pid` in the same
+pass that touches the trap, since a rename is a two-line change and leaving it
+open across a plan revision is how it survived this long. The trap does kill the
+engine, but there is a shutdown race: a `pgrep`
 taken the instant a successful run finishes can still catch the process, which
 then exits on its own within a second or so. So "no stray after a clean run"
 holds a moment later, not at the moment the trap returns — measured, after
