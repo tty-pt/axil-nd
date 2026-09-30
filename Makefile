@@ -1,7 +1,23 @@
 all := libaxil-nd
 SONAME-libaxil-nd := axil-nd
 
-LDLIBS-libaxil-nd := -laxil -lcorm -lxylem -lislet -lqsys -Wl,--no-as-needed -laxil-tty -Wl,--as-needed
+LDLIBS-libaxil-nd := -laxil -lcorm -lxylem -lislet -lqsys
+# -laxil-tty is referenced by no symbol on this line, so an ELF linker drops it
+# from NEEDED unless the pair pins it -- and it must stay, the engine calls into
+# axil-tty. Apple ld has neither option and fails with "unknown options", but it
+# records every command-line library unconditionally, so the pair is ELF-only.
+# Keep -laxil-tty BETWEEN the two: --as-needed is already back on by then, which
+# is the whole point.
+#
+# A `LDLIBS-libaxil-nd-Darwin` override would NOT work, unlike the LDFLAGS one
+# above: include.mk:68 and portable.mk:76 emit the per-uname variables as extra
+# terms APPENDED to the base one, so the flags would still reach ld and
+# -laxil-tty would be duplicated. The base variable has to be conditional.
+ifneq ($(uname),Darwin)
+LDLIBS-libaxil-nd += -Wl,--no-as-needed -laxil-tty -Wl,--as-needed
+else
+LDLIBS-libaxil-nd += -laxil-tty
+endif
 LDFLAGS-libaxil-nd := -L../axil-tty/lib
 LDFLAGS-libaxil-nd-Darwin := -undefined dynamic_lookup
 

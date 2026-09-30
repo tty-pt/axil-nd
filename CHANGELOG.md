@@ -31,6 +31,9 @@ Fixed
   Node >= 20, the `ubuntu-builder` image ships Node 18, and npm then silently
   drops the optional native binding. The client CSS is now generated with
   Tailwind v3, which is pure JS and needs no native addon.
+- The `brew` packages could not be built: `-Wl,--no-as-needed` and
+  `-Wl,--as-needed` are GNU ld options and Apple's `ld` rejects both. They are
+  now emitted on ELF targets only.
 
 Removed
 - Dead `libnd`-era files: `module.mk`, `ndcc`, `.config`, `axil-cli.js`, and the
