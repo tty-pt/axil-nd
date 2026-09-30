@@ -45,7 +45,7 @@ eng_enter(unsigned player_ref, unsigned loc_ref, enum exit e)
 	corm_get_copy(obj_hd, &player_ref, &(player));
 	unsigned old_loc_ref = player.location;
 
-	call_on_before_leave(player_ref);
+	nd_evt_before_leave(player_ref);
 
 	if (e == E_NULL)
 		nd_owritef(player_ref, "%s teleports out.\n", player.name);
@@ -61,7 +61,7 @@ eng_enter(unsigned player_ref, unsigned loc_ref, enum exit e)
 	} else
 		nd_owritef(player_ref, "%s comes in from the %s.\n", player.name, e_name(e_simm(e)));
 
-	call_on_after_enter(player_ref);
+	nd_evt_after_enter(player_ref);
 }
 
 int
@@ -233,6 +233,15 @@ do_status(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((
 	unsigned player_ref = eng_fd_player(fd);
 	corm_get_copy(obj_hd, &player_ref, &(obj));
 	nd_writef(player_ref, "%s (%u) type %u owner %u flags %u at %u\n", obj.name, player_ref, obj.type, obj.owner, obj.flags, obj.location);
-	call_on_status(player_ref);
+	nd_evt_status(player_ref);
+	/* Same reason do_connect flushes after nd_event_announce() (world.c:865):
+	 * eng_nd_write() is a history+dedup buffer, not an append buffer (io.c:180)
+	 * -- a differing message flushes the PREVIOUS one and replaces it. So
+	 * without this, the last on_status listener's output is still pending
+	 * when do_status returns, and the player sees only the line above: a
+	 * module that writes in on_status silently never appears. Verified both
+	 * ways: without the flush, `status` followed by 2.5s of silence printed
+	 * no "Level"; with it, the line is on the wire immediately. */
+	eng_nd_flush(player_ref);
 	return 0;
 }

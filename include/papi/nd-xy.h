@@ -35,8 +35,8 @@
  *     are passed as coord_t *).
  *
  * This header is deliberately SELF-CONTAINED (raw types from
- * papi/nd-xy-types.h). It does NOT include uapi/*.h: those declare the
- * matching fn-pointer globals (e.g. `nd_write_t nd_write;`) which would
+ * papi/nd-xy-types.h). It does NOT include the uapi headers: those declare
+ * the matching fn-pointer globals (e.g. `nd_write_t nd_write;`) which would
  * collide with the XY_DECL inline of the same name in a module TU.
  *
  * Region model (st_* ownership): a game module claims a subspace with
@@ -54,8 +54,16 @@
  *   - `nd_assoc` — inline bring here if a module needs it.
  */
 
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+/* nd_printf below calls vsnprintf. A module TU that includes this header
+ * first -- which is the normal order -- must not depend on the module having
+ * pulled in <stdio.h> itself: the in-tree demo happened to include stdio
+ * before this header and so never showed the gap, but a first out-of-tree
+ * module that did not died with "implicit declaration of vsnprintf". A
+ * self-contained public header has to carry its own dependencies. */
+#include <stdio.h>
 
 #include <ttypt/xy.h>
 
@@ -81,6 +89,52 @@ XY_DECL(int, nd_twrites, unsigned, player_ref, char *, str, size_t, len);
 /* close / flush all fds of a player */
 XY_DECL(int, nd_close, unsigned, player_ref);
 XY_DECL(int, nd_flush, unsigned, player_ref);
+
+/* snprintf'd text to one player (MODS.md §5.0.3).
+ *
+ * Every write hook here takes an explicit length because a `va_list` cannot
+ * cross the XY boundary (see HOOK SHAPE CONSTRAINT above), so the old modules'
+ * nd_writef/nd_owritef/nd_twritef have no direct equivalent. This is the
+ * ergonomic stand-in: a module formats and writes in one call.
+ *
+ * A static inline rather than a hook on purpose -- it adds nothing the module
+ * cannot already do with snprintf + nd_write, and it keeps the formatting
+ * entirely on the module side of the bus. Returns the byte count, or a
+ * negative value if the text was truncated; truncation is a bug in the
+ * caller's format, not a runtime condition, so it is not silent. */
+static inline int
+nd_printf(unsigned player_ref, char *fmt, ...)
+{
+	char buf[1024];
+	va_list va;
+	int n;
+
+	va_start(va, fmt);
+	n = vsnprintf(buf, sizeof(buf), fmt, va);
+	va_end(va);
+	if (n < 0)
+		return n;
+	nd_write(player_ref, buf, (size_t) n < sizeof(buf) ? (size_t) n
+	                                                    : sizeof(buf) - 1);
+	return n;
+}
+
+/* nd_last(ret) — the sic_last() port (MODS.md §5.0.3).
+ *
+ * sic_last() handed a module the return value of the module that ran before
+ * it in the current dispatch, which is how nd-attr chains its listener
+ * families (stat, modifier, effect, hp_max, mp_max): each one reads what the
+ * previous one decided and folds its own adjustment in. libxylem has the same
+ * primitive, xy_last() (xy.h:349); this is just the name the ported modules
+ * read.
+ *
+ * It goes through the INJECTED context (`xy.last`) rather than the global
+ * `xy_last`, because a module links no libxylem at all: <ttypt/xy-mod.h>
+ * declares `static struct xy_ctx xy` and the host fills it in via
+ * get_xy_ptr(). So <ttypt/xy-mod.h> has to be included BEFORE this header --
+ * which is exactly MODS.md §6's porting rule, and if it is missed `xy` is
+ * undeclared at the use site, which is the clearest available signal. */
+#define nd_last(ret) (xy.last(ret))
 
 /* map-cursor API (hds are engine-side ids): put/get by map id */
 XY_DECL(unsigned, nd_put, unsigned, hd, void *, key, void *, data);

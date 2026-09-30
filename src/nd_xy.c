@@ -128,11 +128,29 @@ nd_demo_announce(unsigned player_ref)
 void
 nd_mods_load(void)
 {
-	/* load game modules from a mods.load list file (site mods/core
-	 * pattern: one `mods/<name>/<name>` line each, # comments, blank
-	 * lines skipped), so modules land in the region subtree and their
-	 * listeners dispatch to game events the engine fires. Falls back to
-	 * the demo module when no list file is present. */
+	/* Load game modules from the mods.load list (site mods/core pattern:
+	 * one line per module, `#` comments, blank lines skipped), so modules
+	 * land in the region subtree and their listeners dispatch to the game
+	 * events the engine fires.
+	 *
+	 * A line is EITHER a bare module name -- loaded as `mods/<n>/<n>`, the
+	 * in-tree layout -- OR a path (anything containing `/`), taken
+	 * verbatim. That is what makes the one-repo-per-module layout
+	 * (MODS.md §4) work: a sibling checkout is named by its own path, e.g.
+	 *   ../axil-nd-level/level
+	 * and needs no copying into the engine tree. Bare names stay the
+	 * default so the common case is unchanged.
+	 *
+	 * Entries name the STEM, never the `*.so`: xy_load() appends the suffix
+	 * itself (libxylem-module.c:114; libxylem-watch.c:54 notes it strips
+	 * `.so` back off for the watch table), so writing `level.so` here
+	 * makes it look for `level.so.so` and silently fail. Verified: the
+	 * `mods/demo/demo.so` form booted with
+	 *   mod_load_open_handle: _mod_load failed loading
+	 *   'mods/demo/demo.so': ...so.so: cannot open shared object file
+	 * and the suite died on `FAIL: on_demo frame missing`.
+	 *
+	 * Falls back to the demo module when no list file is present. */
 	char path[1030];
 	char line[512];
 	FILE *fp = fopen("mods.load", "r");
@@ -149,7 +167,11 @@ nd_mods_load(void)
 		}
 		if (len == 0 || line[0] == '#')
 			continue;
-		snprintf(path, sizeof(path), "mods/%s/%s", line, line);
+		if (strchr(line, '/'))
+			snprintf(path, sizeof(path), "%s", line);
+		else
+			snprintf(path, sizeof(path), "mods/%s/%s", line,
+				line);
 		if (xy_load(path) != XY_OK)
 			fprintf(stderr, "nd_mods_load: module %s failed to load\n",
 				path);

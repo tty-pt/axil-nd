@@ -148,7 +148,7 @@ eng_object_add(OBJ *nu, unsigned skel_id, unsigned where_ref, uint64_t v, unsign
 	}
 
 	corm_put(obj_hd, &nu_ref, nu);
-	call_on_add(nu_ref, nu->type, v);
+	nd_evt_add(nu_ref, nu->type, v);
 
 	if (skel.type != TYPE_ROOM)
 		eng_mcp_content_in(where_ref, nu_ref);
@@ -248,7 +248,7 @@ objects_update(double dt)
 	while (corm_next(&kp, &vp, c)) {
 		obj_ref = *(const unsigned *)kp;
 		obj = *(const OBJ *)vp;
-		call_on_update(obj_ref, obj.type, dt);
+		nd_evt_update(obj_ref, obj.type, dt);
 	}
 }
 
@@ -314,7 +314,7 @@ eng_object_move(unsigned what_ref, unsigned where_ref)
 		eng_mcp_content_out(last_loc, what_ref);
 		corm_del(obj_hd, &what_ref);
 
-		call_on_del(what_ref, what.type);
+		nd_evt_del(what_ref, what.type);
 		return;
 	}
 
@@ -336,8 +336,8 @@ eng_object_move(unsigned what_ref, unsigned where_ref)
 	}
 
 	corm_put(contents_hd, &where_ref, &what_ref);
-	call_on_leave(what_ref, last_loc);
-	call_on_enter(what_ref, where_ref);
+	nd_evt_leave(what_ref, last_loc);
+	nd_evt_enter(what_ref, where_ref);
 	eng_mcp_content_in(where_ref, what_ref);
 }
 
@@ -346,7 +346,7 @@ eng_object_icon(unsigned player_ref, unsigned what_ref)
 {
 	OBJ what;
 	corm_get_copy(obj_hd, &what_ref, &(what));
-	return call_on_icon(what_ref, what.type, player_ref);
+	return nd_evt_icon(what_ref, what.type, player_ref);
 }
 
 static inline int
@@ -421,7 +421,7 @@ do_clone(int fd, int argc __attribute__((unused)), char *argv[])
 	clone.type = thing.type;
 
 	corm_put(obj_hd, &clone_ref, &clone);
-	call_on_clone(thing_ref, clone_ref);
+	nd_evt_clone(thing_ref, clone_ref);
 	eng_object_move(clone_ref, player_ref);
 }
 
@@ -592,7 +592,7 @@ do_get(int fd, int argc __attribute__((unused)), char *argv[])
 	default: break;
 	}
 
-	if (call_on_get(player_ref, thing_ref))
+	if (nd_evt_get(player_ref, thing_ref))
 		goto error;
 
 	eng_object_move(thing_ref, player_ref);

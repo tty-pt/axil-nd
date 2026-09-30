@@ -43,7 +43,7 @@ void base_vtf_init(void) {
 static inline char *
 empty_tile(char *b, view_tile_t *t, unsigned side) {
 	sic_str_t ss = { .str = "" };
-	SIC_CALL(&ss, on_empty_tile, *t, side, ss);
+	ss = nd_evt_empty_tile(*t, side, ss);
 	b += sprintf(b, "%s", ss.str);
 	return b;
 }
@@ -338,7 +338,7 @@ view_build_flags(unsigned loc_ref) {
 			break;
 		}
 
-		call_on_view_flags(flags, tmp_ref);
+		nd_evt_view_flags(flags, tmp_ref);
 	}
 
 	return flags;

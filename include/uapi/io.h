@@ -5,24 +5,25 @@
 #include <stddef.h>
 #include "azoth.h"
 
-enum hd {
-	HD_FD,
-	HD_SKEL,
-	HD_DROP,
-	HD_ADROP,
-	HD_BIOME,
-	HD_WTS,
-	HD_RWTS,
-	HD_OBJ,
-	HD_OBS,
-	HD_CONTENTS,
-	HD_TYPE,
-	HD_RTYPE,
-	HD_BCP,
-	HD_ELEMENT,
-	HD_HD,
-	HD_MAX,
-};
+/* `enum hd` moved to papi/nd-hd.h so game modules can name the same tables
+ * (MODS.md §5.0.2). It is included rather than pasted so the two copies
+ * cannot drift. */
+#include "../papi/nd-hd.h"
+
+/* The engine-side table each `enum hd` resolves to, filled by shared_init()
+ * (world.c). Replaces indexing nd.hds[] from the providers, and is the only
+ * place the enum -> corm mapping exists. */
+extern unsigned nd_hds[HD_MAX];
+
+/* Resolve a module-facing handle to the corm table it names: an `enum hd`
+ * indexes nd_hds[], a module-opened tag indexes the module-table registry.
+ * Returns 0 for a handle in neither namespace (an unopened slot, or a bug in
+ * the module), which corm_* reports as a miss rather than corrupting a table. */
+unsigned hd_resolve(unsigned hd);
+
+/* nd_open()'s engine half: corm_open + registry insert, returning a tagged
+ * nd_hd_mod() handle (or 0 if the table could not be opened). */
+unsigned hd_mod_open(char *type, char *iden, char *anon, unsigned flags);
 
 typedef unsigned fd_player_t(unsigned fd);
 fd_player_t eng_fd_player;

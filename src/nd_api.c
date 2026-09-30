@@ -74,41 +74,42 @@ void eng_mcp_bar(unsigned char iden, unsigned player_ref,
 	unsigned short val, unsigned short max);
 unsigned shared_put(unsigned hd, void *key, void *data);
 unsigned shared_get(unsigned hd, void *value, void *key);
+/* MODS.md §5.0.2 handle resolution: nd_get/nd_put/nd_iter take a module-facing
+ * handle (an `enum hd`, or an nd_open() tag) and the engine maps it to a corm
+ * table. uapi/io.h declares these, but nd_api.c cannot include uapi headers
+ * (their struct/enum defs collide with papi/nd-xy-types.h), so they are
+ * forward-declared here. HD_MAX itself comes from papi/nd-hd.h, which
+ * papi/nd-xy-types.h includes. */
+unsigned hd_resolve(unsigned hd);
+unsigned hd_mod_open(char *type, char *iden, char *anon, unsigned flags);
 void eng_nd_register(char *str, nd_cb_t *cb, unsigned flags);
 const char *world_db(void);
 
 /* map-cursor API (real corm bodies honoring the XY signatures) */
 XY_IMPL(unsigned, nd_put, unsigned, hd, void *, key, void *, data)
 {
-	return shared_put(hd, key, data);
+	return shared_put(hd_resolve(hd), key, data);
 }
 
 XY_IMPL(unsigned, nd_get, unsigned, hd, void *, value, void *, key)
 {
-	return shared_get(hd, value, key);
-}
-
-static uint32_t
-nd_open_kind(char *t)
-{
-	if (!strcmp(t, "s"))
-		return CM_STR;
-	if (!strcmp(t, "p"))
-		return CM_PTR;
-	return CM_U32;
+	return shared_get(hd_resolve(hd), value, key);
 }
 
 XY_IMPL(int, nd_open, char *, type, char *, iden, char *, anon, unsigned, flags)
 {
-	(void)flags;
-	corm_open(world_db(), type, nd_open_kind(iden), nd_open_kind(anon),
-		0xFF, 0);
-	return 0;
+	/* Returns a TAGGED module handle (papi/nd-hd.h), not a corm handle:
+	 * a module's own table and the engine's `enum hd` share one unsigned,
+	 * and a bare corm handle could collide with e.g. HD_OBJ == 7. This used
+	 * to discard corm_open's result and return 0, so every module that
+	 * saved the handle (nd-class, nd-level, nd-attr) got 0 and then read
+	 * and wrote table 0. */
+	return (int)hd_mod_open(type, iden, anon, flags);
 }
 
 XY_IMPL(unsigned, nd_iter, unsigned, hd, void *, key)
 {
-	return corm_iter(hd, key, 0);
+	return corm_iter(hd_resolve(hd), key, 0);
 }
 
 XY_IMPL(int, nd_next, void *, key, void *, data, unsigned, cur)

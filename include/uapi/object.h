@@ -45,6 +45,17 @@ enum base_actions {
 	ACT_LOOK = 1,
 	ACT_OPEN = 2,
 	ACT_GET = 4,
+	/* ACT_DROP was lost when this engine was split out of the old nd and
+	 * has never come back, so nd-core's on_icon -- the module that builds
+	 * every icon -- could not be ported at all. The value is not a guess:
+	 * it is the old engine's own ACT_DROP, and `ico.actions` is memcpy'd
+	 * into the BCP frame (src/mcp.c:116) as a raw int, so 8 is a WIRE value
+	 * the NeverDark client already decodes. Verified by diffing this enum
+	 * against /home/quirinpa/nd/include/uapi/object.h: ACT_DROP = 8 was the
+	 * only line missing. Additive, so no existing value moves. Keep
+	 * papi/nd-xy-types.h's copy in step -- modules compile against that one,
+	 * and the two were verified byte-identical. */
+	ACT_DROP = 8,
 };
 
 typedef struct entity {

@@ -20,6 +20,12 @@
 
 #include <ttypt/xy.h>
 
+/* --- nd-hd.h ------------------------------------------------------------- */
+
+/* The table handles (`HD_OBJ`, …) and the nd_open() tag helpers, so a module
+ * can write nd_get(HD_OBJ, …) without pulling in any uapi header. */
+#include "nd-hd.h"
+
 /* --- azoth.h ------------------------------------------------------------- */
 
 enum color {
@@ -85,6 +91,7 @@ enum base_actions {
 	ACT_LOOK = 1,
 	ACT_OPEN = 2,
 	ACT_GET = 4,
+	ACT_DROP = 8,
 };
 
 typedef struct entity {

@@ -496,7 +496,7 @@ st_room_at(unsigned player_ref, pos_t pos)
 	rthere->floor = bio.bio_idx;
 	corm_put(obj_hd, &there_ref, &there);
 	uint32_t v = XXH32((const char *) pos, sizeof(pos_t), 1);
-	call_on_spawn(player_ref, there_ref, bio, v);
+	nd_evt_spawn(player_ref, there_ref, bio, v);
 	return there_ref;
 }
 
@@ -535,7 +535,7 @@ e_move(unsigned player_ref, enum exit e) {
 	char const *dwts = "door";
 	int door = 0;
 
-	int cant_move = call_on_move(player_ref);
+	int cant_move = nd_evt_move(player_ref);
 	if (cant_move)
 		return NOTHING;
 

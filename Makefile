@@ -14,6 +14,31 @@ LDFLAGS-libaxil-nd-Darwin := -undefined dynamic_lookup
 share != find ./htdocs -type f
 share-dir := axil-nd
 
+# J4.8 step 4: engine TUs (12 + split world.c/io.c/mods.c; libnd.o excluded).
+# Compiled via `make smoke` for the smoke gate; since SESSION-9m they also
+# LINK into lib/libaxil-nd.so (nd_api.c's 52 XY_IMPLs forward to the eng_*
+# engine symbols, nd_xy.c delegates io to io.c), so plain `make`/`./test`
+# run the REAL multi-TU engine.
+# -fcommon: uapi/type.h's SIC_DECL emitted tentative on_*_id in every TU; the
+# game events are XY hooks now (see src/nd_events.c), so the common merge is
+# only still needed for whatever globals the engine TUs share -- kept until
+# MODS.md Phase 3 re-checks it.
+ENGINE-obj-y := \
+	src/entity.o src/item.o src/look.o src/map.o src/match.o \
+	src/mcp.o src/noise.o src/object.o src/spacetime.o src/speech.o \
+	src/view.o src/wiz.o src/world.o src/io.o src/mods.o
+
+libaxil-nd-obj-y := ${ENGINE-obj-y}
+
+# MUST come after libaxil-nd-obj-y is defined. include.mk builds the library
+# rule as `$(libtarget): lib ${LIB:%=src/%.o} ${LIB-obj-y}` -- and prerequisite
+# lists are expanded when the rule is READ, i.e. at this -include. Recipes are
+# expanded when they RUN, which is why the engine objects used to reach the link
+# line but not the prerequisite list: the library was declared out of date by
+# src/libaxil-nd.o alone, so `make` relinked yesterday's engine .o files and
+# never recompiled an edited engine TU. With src/mods.o deleted the link then
+# failed outright rather than rebuilding it. Anything referenced in a
+# prerequisite list has to be set above this line.
 -include ./../mk/include.mk
 
 man: man/.stamp
@@ -29,20 +54,6 @@ man/.stamp: man-src/*.10
 all: man
 
 smoke: man ${ENGINE-obj-y}
-
-# J4.8 step 4: engine TUs (12 + split world.c/io.c/mods.c; libnd.o excluded).
-# Compiled via `make smoke` for the smoke gate; since SESSION-9m they also
-# LINK into lib/libaxil-nd.so (nd_api.c's 52 XY_IMPLs forward to the eng_*
-# engine symbols, nd_xy.c delegates io to io.c), so plain `make`/`./test`
-# run the REAL multi-TU engine.
-# -fcommon: uapi/type.h SIC_DECL emits tentative on_*_id in every TU; common
-# merge keeps the multi-TU link single-definition.
-ENGINE-obj-y := \
-	src/entity.o src/item.o src/look.o src/map.o src/match.o \
-	src/mcp.o src/noise.o src/object.o src/spacetime.o src/speech.o \
-	src/view.o src/wiz.o src/world.o src/io.o src/mods.o
-
-libaxil-nd-obj-y := ${ENGINE-obj-y}
 
 CFLAGS-entity-o := -fPIC -D_GNU_SOURCE -fcommon
 CFLAGS-item-o := -fPIC -D_GNU_SOURCE -fcommon
@@ -90,6 +101,95 @@ mods/demo/demo.so: mods/demo/demo.c include/papi/nd-xy.h
 	cd mods && cc -shared -fPIC -I../include -I/usr/include -o demo/demo.so demo/demo.c
 .PHONY: demo
 
+# MODS.md §5.0.4: build every module named in mods.load. Each line is either a
+# bare name (built at mods/<n>/<n>.so) or a path (built where it is named), so
+# the one-repo-per-module layout works without copying anything into this
+# tree. `make mods` is the module gate; test.sh runs it before booting axil.
+MODS_LOAD := mods.load
+# Pull the module list out with a character-class match rather than a `#`
+# strip: make removes everything from an unescaped `#` to end of line BEFORE
+# `$$` is expanded, so `-e 's/$$#.*//'` still loses the closing quote and make
+# dies with "Unterminated quoted string" at parse time -- taking every target
+# with it. Matching `[A-Za-z0-9_./-][...]*` against line start drops comments,
+# blank lines and indented lines for free, since none of them can start with a
+# name character, and keeps both a bare name and a sibling path.
+modnames != sed -n 's/^\([A-Za-z0-9_.\/-][A-Za-z0-9_.\/-]*\).*/\1/p' \
+	${MODS_LOAD} 2>/dev/null
+# $(sort) is load-bearing, not tidiness: a module listed twice makes the
+# per-module rules below declare one target twice, and make refuses the whole
+# makefile with "target '...' given more than once in the same rule". A
+# duplicated entry is exactly what a re-run looks like if a previous run died
+# before restoring mods.load.
+modnames := $(sort ${modnames})
+
+# A path entry (contains '/') is already a full stem, so the artifact to build
+# is that stem plus the suffix; a bare name is the in-tree `mods/<n>/<n>.so`.
+# $(if) takes (cond,then,else) and $(findstring) yields the needle or the empty
+# string, so the '/' case is the THEN branch. Getting these two the wrong way
+# round silently drops path entries from the list: `make mods` then reports
+# "Nothing to be done" for a module whose .so does not exist, which is how the
+# out-of-tree build looked like it worked while building nothing.
+mods: $(foreach m,${modnames},$(if $(findstring /,${m}),${m}.$(SO),mods/${m}/${m}.so))
+
+# in-tree module: a bare name, so mods/<n>/<n>.so
+mods/%.so: mods/%/%.c include/papi/nd-xy.h
+	cd mods/$* && $(CC) -shared -fPIC -I../../include -I/usr/include \
+		-o $*.so $*.c
+
+# out-of-tree module: a line with a '/', built through the same nd-mod.mk that
+# ships installed, so a sibling checkout is compiled exactly as it would be
+# from $(PREFIX). Only ND_INC is redirected -- the XY headers come from the
+# installed prefix, the same as for an installed module.
+#
+# Split out of ${modnames} with $(if $(findstring ...)) rather than
+# $(filter %/%,...): make's pattern matching is not a "contains" operator.
+# Measured on GNU Make 4.4.1 with `x := a/b demo c/d/e`:
+#   $(filter %,$(x))    -> a/b demo c/d/e     (ok)
+#   $(filter a%,$(x))   -> a/b                 (ok)
+#   $(filter a/%,$(x))  -> a/b                 (ok)
+#   $(filter /%,$(x))   ->                     (leading % never matches)
+#   $(filter %b%,$(x))  ->                     (two % never match)
+# so `%/%,...` silently yields the EMPTY list -- no rule defined, and make then
+# reports "No rule to make target '../axil-nd-<mod>/<mod>.so'". $(findstring)
+# has no such quirk and is what the `mods:` line above already uses.
+# The recipe derives everything from $@ rather than from the foreach variable.
+# A `$(foreach m,...)` variable is only in scope while the TARGET LINE is being
+# expanded; recipes are expanded lazily, when the rule actually runs, by which
+# point `m` is gone and `$(m)` expands to the empty string. The symptom is
+# precise and misleading: the target came out right (so the rule was found and
+# selected) while the recipe ran `MOD= ... -C  .so` and died on an empty name:
+#   make -f nd-mod.mk MOD= ND_INC=.../include -C  .so
+# $@ is an automatic variable, always in scope in a recipe. The stem is
+# $(basename $@) because mods.load names the stem, not the .so.
+#
+# The prerequisite is FORCE, not nd-mod.mk, and that is a bug fix rather than a
+# style choice. Nothing in THIS tree knows an out-of-tree module's sources, so
+# any prerequisite list here can only name nd-mod.mk -- which is older than
+# every .so, so make considers the target permanently up to date and never
+# runs the recipe. Measured: after editing axil-nd-other/main.c,
+#   -rw-r--r-- 18:34:18 other.so      <- older than the source
+#   -rw-r--r-- 18:35:14 main.c
+# `make mods` printed nothing for it, the engine loaded the STALE .so, and
+# nd-other's new WARN markers never appeared -- so the suite failed on
+# "nd-other: on_add first call" with the source right there in the log's own
+# repo. This is MODS.md §2.1's bug (the engine linking yesterday's objects)
+# one level out, and it is the same class: a build that silently ships stale
+# code, which for a modding test is indistinguishable from a broken hook.
+#
+# So the .so is not treated as up-to-date at all: FORCE always makes the
+# recipe run, and the recipe delegates to the module's own nd-mod.mk, which has
+# the real `%.o: %.c` tracking and so still recompiles only what changed. The
+# cost is one sub-make invocation per module, not a full rebuild.
+$(foreach m,$(filter $(foreach n,${modnames},$(if $(findstring /,${n}),${n},)),${modnames}),$(m).$(SO)): FORCE
+	$(MAKE) -f $(CURDIR)/nd-mod.mk MOD=$(notdir $(basename $@)) \
+		ND_INC=$(CURDIR)/include -C $(patsubst %/,%,$(dir $(basename $@))) \
+		$(notdir $@)
+
+# Never a real file; exists only to be always-out-of-date. Declared .PHONY
+# because an accidental file named FORCE would otherwise defeat the point.
+FORCE:
+.PHONY: mods FORCE
+
 # README.md:31 documents `make test`; mk/include.mk defines no such target, so
 # it silently did nothing. test.sh is the real suite and is self-contained
 # (it generates man/ from man-src/ itself), so it needs no separate deps.
@@ -108,4 +208,24 @@ install-data: man
 	done
 .PHONY: install-data
 
-install: install-data
+# MODS.md §5.0.4: the module-facing API has to be installed, or a sibling
+# ~/axil-nd-<name> repo has nothing to compile against. mk's install rule only
+# covers include/${FOLDER} (FOLDER=ttypt, include.mk:19-21,104-108), so papi/
+# is installed here, under its own prefix: modules use
+# `-I$(PREFIX)/include/axil-nd` and keep writing `#include "papi/nd-xy.h"`.
+#
+# nd-mod.mk goes alongside it in share/, which is where a module's Makefile
+# includes it from -- the same reason the engine's own htdocs/art/man live
+# there rather than in the framework's word-split `share` list.
+ND_PAPI := nd-hd.h nd-xy-types.h nd-xy.h nd-hooks.h
+
+install-papi:
+	@dst=$(DESTDIR)$(PREFIX)/include/axil-nd/papi; \
+	install -d "$$dst" || exit 1; \
+	for h in $(ND_PAPI); do \
+		install -m 644 include/papi/$$h "$$dst/$$h" || exit 1; \
+	done; \
+	install -D -m 644 nd-mod.mk $(DESTDIR)$(PREFIX)/share/axil-nd/nd-mod.mk
+.PHONY: install-papi
+
+install: install-data install-papi

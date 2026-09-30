@@ -38,9 +38,6 @@
 
 #include "papi/nd.h"
 
-#define SIC_AREG(fname) \
-	fname##_id = sic_areg(XSTR(fname), &fname##_sic_adapter)
-
 ROO room_zero_room = {
 	.flags = RF_HAVEN,
 	.doors = 0,
@@ -223,9 +220,69 @@ shared_open(char *name, char *kt, char *vt, unsigned flags)
 	return 0;
 }
 
+/* The engine's `enum hd` -> corm table map (MODS.md §5.0.2). Defined here
+ * because this is where the tables are opened; uapi/io.h declares it and
+ * nd_api.c's providers resolve through hd_resolve(). */
+unsigned nd_hds[HD_MAX];
+
+/* Tables modules opened with nd_open(), indexed by nd_hd_mod_idx(). The
+ * corm handle never leaves this table: a module holds the tag from
+ * hd_mod_open() and gets the handle back through hd_resolve(). Fixed cap
+ * because the whole module set opens on the order of ten. */
+#define HD_MOD_MAX 32
+static unsigned hd_mod[HD_MOD_MAX];
+static unsigned hd_mod_n;
+
+unsigned
+hd_mod_open(char *type, char *iden, char *anon, unsigned flags)
+{
+	(void) flags;
+	if (hd_mod_n >= HD_MOD_MAX)
+		return 0;
+	unsigned h = corm_open(world_db(), type, shared_kind(iden),
+		shared_kind(anon), 0xFF, 0);
+	/* corm_open returns 0 on failure; do not burn a registry slot on it. */
+	if (!h)
+		return 0;
+	hd_mod[hd_mod_n] = h;
+	return nd_hd_mod(hd_mod_n++);
+}
+
+unsigned
+hd_resolve(unsigned hd)
+{
+	if (nd_hd_is_mod(hd)) {
+		unsigned idx = nd_hd_mod_idx(hd);
+		return idx < hd_mod_n ? hd_mod[idx] : 0;
+	}
+	return hd < HD_MAX ? nd_hds[hd] : 0;
+}
+
 void
 shared_init(void)
 {
+	nd_hds[HD_FD] = fds_hd;
+	nd_hds[HD_SKEL] = skel_hd;
+	nd_hds[HD_DROP] = drop_hd;
+	nd_hds[HD_ADROP] = adrop_hd;
+	nd_hds[HD_BIOME] = biome_hd;
+	nd_hds[HD_WTS] = wts_hd;
+	nd_hds[HD_RWTS] = wts_hd + 2;
+	nd_hds[HD_OBJ] = obj_hd;
+	nd_hds[HD_OBS] = obs_hd;
+	nd_hds[HD_CONTENTS] = contents_hd;
+	/* +1/+2 are not arbitrary: the transient type_hd seeds below put
+	 * "room" at 1 and "entity" at 2, in that order, before any module
+	 * loads. See the comment at those seeds. */
+	nd_hds[HD_TYPE] = type_hd;
+	nd_hds[HD_RTYPE] = type_hd + 2;
+	nd_hds[HD_BCP] = bcp_hd;
+	nd_hds[HD_ELEMENT] = element_hd;
+	nd_hds[HD_HD] = hd_hd;
+
+	/* The legacy `struct nd` vtable goes away in Phase 3; until then it has
+	 * to agree with nd_hds[], so fill it from the same values rather than
+	 * repeating the mapping. */
 	nd.hds[HD_FD] = fds_hd;
 	nd.hds[HD_SKEL] = skel_hd;
 	nd.hds[HD_DROP] = drop_hd;
@@ -236,9 +293,6 @@ shared_init(void)
 	nd.hds[HD_OBJ] = obj_hd;
 	nd.hds[HD_OBS] = obs_hd;
 	nd.hds[HD_CONTENTS] = contents_hd;
-	/* +1/+2 are not arbitrary: the transient type_hd seeds below put
-	 * "room" at 1 and "entity" at 2, in that order, before any module
-	 * loads. See the comment at those seeds. */
 	nd.hds[HD_TYPE] = type_hd;
 	nd.hds[HD_RTYPE] = type_hd + 2;
 	nd.hds[HD_BCP] = bcp_hd;
@@ -414,29 +468,12 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 		corm_put(obj_hd, NULL, &room_zero);
 	}
 
-	SIC_AREG(on_status);
-	SIC_AREG(on_examine);
-	SIC_AREG(on_add);
-	SIC_AREG(on_view_flags);
-	SIC_AREG(on_icon);
-	SIC_AREG(on_del);
-	SIC_AREG(on_clone);
-	SIC_AREG(on_update);
-	SIC_AREG(on_move);
-
-	SIC_AREG(on_vim);
-
-	SIC_AREG(on_new_player);
-	SIC_AREG(on_auth);
-	SIC_AREG(on_before_leave);
-	SIC_AREG(on_leave);
-	SIC_AREG(on_enter);
-	SIC_AREG(on_after_enter);
-	SIC_AREG(on_spawn);
-	SIC_AREG(on_get);
-
-	SIC_AREG(on_noise);
-	SIC_AREG(on_empty_tile);
+	/* The 20 SIC_AREG() calls that used to stand here are gone. SIC_AREG
+	 * was world.c-local (`fname##_id = sic_areg(XSTR(fname), &fname##_sic_adapter)`)
+	 * and registered every adapter explicitly at boot, redundantly with the
+	 * .sic_auto_init sections the SIC_DEFs emitted. Registration is now a
+	 * single path: each XY_DEF's AUTO_INIT constructor in src/nd_events.c
+	 * (folded into libaxil-nd.c) registers its own hook. */
 
 	/* type_hd is transient: these two are its only entries, re-registered
 	 * every boot in this fixed order. The order is load-bearing, not
@@ -782,7 +819,7 @@ nd_player_login(int fd, char *user)
 		nd_io_attach(fd, player_ref);
 		corm_put(obj_hd, &player_ref, &player);
 
-		call_on_new_player(player_ref);
+		nd_evt_new_player(player_ref);
 	} else {
 		ENT eplayer = eng_ent_get(player_ref);
 
@@ -806,7 +843,7 @@ nd_player_login(int fd, char *user)
 	else
 		mcp_tod(player_ref, 0);
 
-	call_on_auth(player_ref);
+	nd_evt_auth(player_ref);
 	return player_ref;
 }
 
@@ -890,7 +927,7 @@ nd_vim(int fd, int argc __attribute__((unused)), char *argv[]) {
 
 		pos += ret < 0 ? - ret : ret;
 		ss.pos = pos;
-		ret = call_on_vim(player_ref, ss);
+		ret = nd_evt_vim(player_ref, ss);
 		pos += ret < 0 ? - ret : ret;
 
 		if (pos == old_pos && s[pos])
