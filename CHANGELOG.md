@@ -27,6 +27,10 @@ Fixed
   guarded-against-absent value on the following line.
 - Two `??` precedence bugs that made their guards inert.
 - CI installed 3 of the 6 libraries the module links.
+- The `deb` package could not be built: Tailwind v4's `@tailwindcss/oxide` needs
+  Node >= 20, the `ubuntu-builder` image ships Node 18, and npm then silently
+  drops the optional native binding. The client CSS is now generated with
+  Tailwind v3, which is pure JS and needs no native addon.
 
 Removed
 - Dead `libnd`-era files: `module.mk`, `ndcc`, `.config`, `axil-cli.js`, and the

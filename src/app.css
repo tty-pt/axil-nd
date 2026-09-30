@@ -1,38 +1,46 @@
 /* Tailwind entry for the NeverDark browser client.
  *
- * Preflight is deliberately NOT imported. `styles.css:104` already sets
+ * Preflight is deliberately disabled (`corePlugins.preflight: false` in
+ * `tailwind.config.js`). `styles.css:104` already sets
  * `body { font-family: monospace; margin: 0; font-size: 10pt }`, and the
- * original site never had a CSS reset. Importing preflight would swap the
+ * original site never had a CSS reset. Enabling preflight would swap the
  * font stack, margins and line-height that the terminal UI is tuned around.
  *
- * Only the utilities layer is generated; see CSS.md for the class mapping
+ * Only utilities are generated; see CSS.md for the class mapping
  * (`f` -> `flex`, `fic` -> `items-center`, ...) and for the classes that are
  * deliberately left unmigrated.
- *
- * `styles.css` is the game's own sheet (byte-identical to `tty.pt:~/nd/styles.css`)
- * and is already correct. It is not self-contained, though: it *consumes* 38
- * `:root` custom properties and defines none of them. Those lived in the site
- * shell's own stylesheet, which the original `/nd` page never linked -- the
- * page was a fragment with an empty `<head>`, injected into a shell that had
- * already loaded `basics.css` and `vim.css`. See STYLE-AUDIT.md.
  */
 
-@layer theme, components, utilities;
+/* The game's own sheet (byte-identical to `tty.pt:~/nd/styles.css`), and
+ * already correct. It is not self-contained, though: it *consumes* 38 `:root`
+ * custom properties and defines none of them. Those lived in the site shell's
+ * own stylesheet, which the original `/nd` page never linked -- the page was
+ * a fragment with an empty `<head>`, injected into a shell that had already
+ * loaded `basics.css` and `vim.css`. See STYLE-AUDIT.md.
+ *
+ * Hoisted to the top of this file, above `@tailwind utilities`. PostCSS wants
+ * `@import` before any other rule, and v3 gives no layer to hide behind, so
+ * this is where it has to go: inlined first, it is overridden by any utility
+ * that touches the same property, exactly as v4's `layer(utilities)` did.
+ * Nothing in the client relies on that in the other direction today.
+ */
+@import "../styles.css";
 
-@import "tailwindcss/theme.css" layer(theme);
-
-/* Automatic source detection is off, and the two files the client is actually
- * rendered from are named instead. Left on, Tailwind v4 walks the whole repo
- * and treats anything it finds as a class list: the markdown, the man pages,
- * the C sources, the build output under cjs/ and esm/. The production bundle
- * was therefore a function of the tree rather than of the client -- `table`,
- * `container`, `collapse` and `truncate` all reached it from `src/world.c` and
- * `man/get.10`, and this repo's own prose leaked `opacity-50` and `flex-wrap`.
- * tools/verify-css.mjs fails the build if any of that comes back. */
-@import "tailwindcss/utilities.css" layer(utilities) source(none);
-
-@source "../index.html";
-@source "../index.js";
+/* Source detection is off: `content` in `tailwind.config.js` names the two
+ * files the client is actually rendered from, and nothing else. Left on,
+ * Tailwind v3 walks the whole tree and treats anything it finds as a class
+ * list: the markdown, the man pages, the C sources, the build output under
+ * cjs/ and esm/. The production bundle was therefore a function of the tree
+ * rather than of the client -- `table`, `container`, `collapse` and
+ * `truncate` all reached it from `src/world.c` and `man/get.10`, and this
+ * repo's own prose leaked `opacity-50` and `flex-wrap`. tools/verify-css.mjs
+ * fails the build if any of that comes back.
+ *
+ * v3 emits its utilities unlayered, so from here on precedence is decided by
+ * source order and specificity alone. That is the whole reason the game
+ * sheet's `@import` is hoisted to the top of this file and the ported rules
+ * are kept at the bottom; each block says how it relies on that. */
+@tailwind utilities;
 
 /* The palette. Ported verbatim from `tty.pt:/var/www/htdocs/basics.css:2-44`,
  * which is where the site's `:root` block actually lived. Without it every
@@ -86,16 +94,16 @@
 
 /* NeverDark-specific rules: biome background on #main, the ID-level layout
  * (#holder / #right-panel / #cb / #directions), the .cf0-.cf15 palette and
- * the .terminal-mode toggle. Kept unlayered so it still wins over the
- * utilities layer, exactly as it did as a plain linked stylesheet. */
-@import "../styles.css";
+ * the .terminal-mode toggle. These live in `styles.css`, inlined above the
+ * utilities, so any utility touching the same property wins -- the same
+ * outcome v4 got from keeping these unlayered against `@layer utilities`. */
 
 /* ---------------------------------------------------------------------------
  * Everything below is ported verbatim from `basics.css` and `vim.css`, and is
- * deliberately *unlayered* so it beats both `@layer utilities` and the
- * game sheet above. Geometry that has an exact utility equivalent was migrated
- * to Tailwind in the markup instead; what remains here is the part that
- * cannot be a utility.
+ * deliberately last so it beats both the utilities above and the game sheet,
+ * winning every tie on source order. Geometry that has an exact utility
+ * equivalent was migrated to Tailwind in the markup instead; what remains
+ * here is the part that cannot be a utility.
  * ------------------------------------------------------------------------- */
 
 /* fonts: NOT PORTED {{{
@@ -288,14 +296,15 @@ nd-button.btn.txt-17:not([square]) {
  * one that `Equipment` does set. Plain rules cannot be tree-shaken, so the
  * mapping is now explicit and total: see `BUTTON_CLASS` in index.js.
  *
- * Do not spell an arbitrary-value utility in a comment in this file. Tailwind
- * scans this file too, so a padding utility written out to explain something is
- * a candidate and will be emitted. `tools/verify-css.mjs` fails the build if
- * any class in the bundle is not in index.html, index.js or here.
+ * `content` in `tailwind.config.js` lists `index.html` and `index.js` and not
+ * this file, so nothing spelled out below is a Tailwind candidate -- v4 scanned
+ * the CSS entry itself, v3 does not. The three classes below are plain rules,
+ * so they are emitted unconditionally either way. `tools/verify-css.mjs` fails
+ * the build if any class in the bundle is not in index.html, index.js or here.
  *
  * None of these three names is a Tailwind namespace, deliberately. `size-24`
- * *is* one -- it means 6rem -- and shadowing a built-in utility from an
- * unlayered rule works right up until the day it does not. */
+ * *is* one -- it means 6rem -- and shadowing a built-in utility from a plain
+ * rule here works right up until the day it does not. */
 .pad-8 { padding: 8px; }
 .txt-17 { font-size: 17px; line-height: 17px; }
 .box-24 { width: 24px; height: 24px; }

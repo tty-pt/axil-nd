@@ -12,6 +12,11 @@
 /cjs
 /esm
 /node_modules
+# NO package-lock.json. The build matrix covers 7 platforms and CI installs
+# with a bare `npm install`; a lockfile would pin whichever platform's optional
+# deps the generating machine resolved, breaking the other legs rather than
+# helping. See CI note in CHANGELOG 1.0.0.
+/package-lock.json
 /sessions
 /docs
 /var
