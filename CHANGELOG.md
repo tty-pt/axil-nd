@@ -34,6 +34,9 @@ Fixed
 - The `brew` packages could not be built: `-Wl,--no-as-needed` and
   `-Wl,--as-needed` are GNU ld options and Apple's `ld` rejects both. They are
   now emitted on ELF targets only.
+- The `brew` packages then failed in `install`: `install -D` is GNU coreutils
+  only, and BSD `install` has no `-D`. `art/`, `man/` and `nd-mod.mk` are now
+  staged with `mkdir -p` plus a plain `install -m 644`.
 
 Removed
 - Dead `libnd`-era files: `module.mk`, `ndcc`, `.config`, `axil-cli.js`, and the

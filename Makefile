@@ -226,11 +226,24 @@ test: all
 # art/ and man/ alongside htdocs/, per §6.2 of RELEASE.md. These cannot use the
 # framework's `share` variable: include.mk:115 word-splits it, and 330 art paths
 # contain spaces, which corrupts both the target list and the install recipe.
-# `find -exec install -D` keeps each path quoted end to end.
+# `find -exec` keeps each path quoted end to end: find substitutes {} anywhere
+# in an argument, so a path with a space stays one argv slot.
+#
+# Two passes -- mkdir the tree, then install the files -- and deliberately NOT
+# `install -D`. -D (create leading components of DESTINATION) is GNU coreutils
+# only; BSD install, which is what the brew legs run on, has no -D and exits 64
+# on the usage message:
+#   install: target directory `.../share/axil-nd/nd-mod.mk' does not exist
+#   usage: install [-bCcpSsUv] [-f flags] [-g group] [-m mode] ...
+#   make: *** [install-papi] Error 64
+# It is invisible here and fatal on the two legs nobody builds by hand, the same
+# way -Wl,--as-needed was. `find -type d` also gets the . directories that the
+# file paths hang off, which is what the old -D was implicitly creating.
 install-data: man
 	@dst=$(abspath $(DESTDIR)$(PREFIX))/share/axil-nd; \
 	for d in art man; do \
-		( cd $$d && find . -type f ! -name '.stamp' -exec install -D -m 644 {} "$$dst/$$d/{}" \; ) || exit 1; \
+		( cd $$d && find . -type d -exec mkdir -p "$$dst/$$d/{}" \; ) || exit 1; \
+		( cd $$d && find . -type f ! -name '.stamp' -exec install -m 644 {} "$$dst/$$d/{}" \; ) || exit 1; \
 	done
 .PHONY: install-data
 
@@ -251,7 +264,8 @@ install-papi:
 	for h in $(ND_PAPI); do \
 		install -m 644 include/papi/$$h "$$dst/$$h" || exit 1; \
 	done; \
-	install -D -m 644 nd-mod.mk $(DESTDIR)$(PREFIX)/share/axil-nd/nd-mod.mk
+	install -d $(DESTDIR)$(PREFIX)/share/axil-nd || exit 1; \
+	install -m 644 nd-mod.mk $(DESTDIR)$(PREFIX)/share/axil-nd/nd-mod.mk
 .PHONY: install-papi
 
 install: install-data install-papi
