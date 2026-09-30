@@ -42,7 +42,7 @@ trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -r
 #
 # The engine only ever had modules inside its own tree, so nothing has ever
 # exercised the sibling-repo layout that Phase 1 depends on: a separate repo,
-# its own Makefile, built through the shared nd-mod.mk against the papi
+# its own Makefile, built through the shared nd-mod.mk against the nd
 # headers, named in mods.load by its own path. That is the single riskiest new
 # seam in 0.4 -- a path that is silently reshaped to `mods/<n>/<n>` fails with
 # no error at all, just a hook that stopped firing.
@@ -58,14 +58,14 @@ cat > "$probe/Makefile" <<EOF
 PREFIX ?= /usr
 include $(pwd)/nd-mod.mk
 EOF
-# Deliberately minimal: the ONLY thing this TU knows is papi/nd-xy.h and
+# Deliberately minimal: the ONLY thing this TU knows is nd/xy.h and
 # <ttypt/xy.h>, i.e. what an installed module gets. It includes no uapi header,
-# which is the point -- that is the rule nd-xy.h documents and the demo, being
+# which is the point -- that is the rule nd/xy.h documents and the demo, being
 # in-tree, is not evidence for.
 cat > "$probe/testprobe.c" <<'EOF'
 #include <string.h>
 #include <ttypt/xy-mod.h>
-#include "papi/nd-xy.h"
+#include <nd/xy.h>
 
 XY_MODULE_API void xy_install(void)
 {
@@ -309,7 +309,7 @@ if [ "$probe_mod" -ge 1 ]; then
 	grep -qF "testprobe module installed from '${probe}/testprobe'" "$log" \
 		|| { echo "FAIL: out-of-tree module was not loaded from its mods.load path" >&2; exit 1; }
 	# Proves the whole §0.2/§0.3 contract again from a SECOND, genuinely
-	# out-of-tree TU: a module built only against the installed papi headers
+	# out-of-tree TU: a module built only against the installed nd/
 	# through nd-mod.mk, with no access to the engine tree.
 	grep -qF "testprobe on_enter: HD_OBJ=resolved (ok) hd=tagged" "$log" \
 		|| { echo "FAIL: out-of-tree module could not resolve HD_OBJ / tag a handle" >&2; exit 1; }

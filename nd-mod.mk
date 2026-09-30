@@ -10,13 +10,13 @@
 # top level) plus an optional private header dir. Keep private types in
 # `include/<mod>/`, NOT `include/uapi/`: `uapi` belongs to the engine and is
 # already on the include path via ND_INC, so a module putting its own uapi/
-# there produces two `uapi` roots and the same nd-xy-types.h vs uapi collision
+# there produces two `uapi` roots and the same nd/xy-types.h vs uapi collision
 # MODS.md §3 exists to prevent. Override anything below per module.
 #
 # Why a shared file rather than each module carrying a copy: the include path,
 # the XY headers and the `-shared -fPIC` shape are all engine contracts. A
 # copy per module drifts the moment the engine moves a header -- which is
-# exactly what the papi/ vs uapi/ split in MODS.md §3 makes easy to get wrong.
+# exactly what the nd/ vs uapi/ split in MODS.md §3 makes easy to get wrong.
 #
 # The module is deliberately NOT linked against libaxil-nd: at runtime it is
 # dlopen'd by an axil that already has the engine loaded, and XY_DECL/XY_IMPL
@@ -33,7 +33,7 @@ SO := so
 # Locate ourselves, so a module repo works against a source checkout AND an
 # installed engine with no configuration. $(lastword $(MAKEFILE_LIST)) is the
 # file being read right now, i.e. this one; the dir it sits in is either the
-# axil-nd source root (which has include/papi/ beside it) or
+# axil-nd source root (which has include/nd/ beside it) or
 # $(PREFIX)/share/axil-nd (which does not).
 #
 # This replaces an earlier version that hardcoded
@@ -44,10 +44,13 @@ SO := so
 # right place to decide.
 nd-mod-dir := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
 
-# ND_INC: the papi/ + uapi/ headers, the papi ones being what a module actually
-# includes directly (MODS.md §3).
-ND_INC ?= $(if $(wildcard $(nd-mod-dir)/include/papi/nd-xy.h),\
-	$(nd-mod-dir)/include,$(PREFIX)/include/axil-nd)
+# ND_INC: the nd/ + uapi/ headers, the nd/ ones being what a module actually
+# includes directly (MODS.md §3). Against an installed engine this is the same
+# directory as XY_INC below -- `make install` puts include/nd/ in
+# $(PREFIX)/include, so one -I now carries the game API and the XY headers
+# together, and a module needs no path of its own for either.
+ND_INC ?= $(if $(wildcard $(nd-mod-dir)/include/nd/xy.h),\
+	$(nd-mod-dir)/include,$(PREFIX)/include)
 
 # XY_INC: <ttypt/xy.h> and <ttypt/xy-mod.h> from libxylem, installed under the
 # same prefix as the engine. No source-tree fallback: libxylem is a separate
@@ -57,8 +60,8 @@ XY_INC ?= $(PREFIX)/include
 # Fail loudly rather than emitting a confusing "No such file" from the first
 # module TU: both header trees are contracts, and a missing one means the
 # engine and module were built against different worlds.
-ifeq ($(wildcard $(ND_INC)/papi/nd-xy.h),)
-$(error nd-xy.h not found: ND_INC=$(ND_INC) has no papi/nd-xy.h -- build \
+ifeq ($(wildcard $(ND_INC)/nd/xy.h),)
+$(error nd/xy.h not found: ND_INC=$(ND_INC) has no nd/xy.h -- build \
 against an axil-nd checkout (include nd-mod.mk from its root) or install one)
 endif
 ifeq ($(wildcard $(XY_INC)/ttypt/xy.h),)

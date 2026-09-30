@@ -53,7 +53,7 @@ enum base_actions {
 	 * the NeverDark client already decodes. Verified by diffing this enum
 	 * against /home/quirinpa/nd/include/uapi/object.h: ACT_DROP = 8 was the
 	 * only line missing. Additive, so no existing value moves. Keep
-	 * papi/nd-xy-types.h's copy in step -- modules compile against that one,
+	 * nd/xy-types.h's copy in step -- modules compile against that one,
 	 * and the two were verified byte-identical. */
 	ACT_DROP = 8,
 };

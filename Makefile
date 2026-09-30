@@ -14,6 +14,23 @@ ENGINE-obj-y := \
 
 libaxil-nd-obj-y := ${ENGINE-obj-y}
 
+# Where the module-facing headers install. mk/include.mk:19-21 lists
+# `ls include/$(FOLDER)` and :104-108 installs each to
+# $(PREFIX)/include/$(FOLDER)/, so FOLDER is the whole mechanism: `nd/` is what
+# makes `#include <nd/xy.h>` resolve from -I$(PREFIX)/include, the one -I that
+# mk/portable.mk and nd-mod.mk's XY_INC already put on every module compile
+# line. It used to be the default `ttypt`, which is why this needed a bespoke
+# install-papi writing to $(PREFIX)/include/axil-nd/papi/ -- a directory on no
+# default include path, so every module carried a private -I for it.
+FOLDER := nd
+# FOLDER no longer creates include/ttypt, so the engine's own header has to
+# name its own dir and its own install: install-dirs gets the directory,
+# install-extra the file (mk/include.mk:123-125). Both must be set BEFORE the
+# -include below: mk assigns install-dirs := ... with := immediately after its
+# own +=, so a later append would miss the $(DESTDIR)$(PREFIX)/ substitution.
+install-dirs += include/ttypt
+install-extra := include/ttypt/axil-nd.h
+
 -include ./../mk/include.mk
 
 LDLIBS-libaxil-nd := -laxil -lcorm -lxylem -lislet -lqsys -laxil-tty
@@ -65,7 +82,7 @@ check-lib:
 .PHONY: check-lib
 
 demo: mods/demo/demo.so
-mods/demo/demo.so: mods/demo/demo.c include/papi/nd-xy.h
+mods/demo/demo.so: mods/demo/demo.c include/nd/xy.h
 	cd mods && cc -shared -fPIC -I../include -I/usr/include -o demo/demo.so demo/demo.c
 .PHONY: demo
 
@@ -84,7 +101,7 @@ mods: $(foreach m,${inmods},mods/${m}/${m}.so) \
 	$(foreach m,${slashmods},${m}.$(SO))
 
 # in-tree module: a bare name, so mods/<n>/<n>.so
-mods/%.so: mods/%/%.c include/papi/nd-xy.h
+mods/%.so: mods/%/%.c include/nd/xy.h
 	cd mods/$* && $(CC) -shared -fPIC -I../../include -I/usr/include \
 		-o $*.so $*.c
 
@@ -114,16 +131,25 @@ install-data: man
 	done
 .PHONY: install-data
 
-ND_PAPI := nd-hd.h nd-xy-types.h nd-xy.h nd-hooks.h
-
-install-papi:
-	@dst=$(DESTDIR)$(PREFIX)/include/axil-nd/papi; \
+# The one install job mk's rules cannot reach. Its `share` set is
+# `find ./htdocs -type f` (Makefile:7), so it only ever stages files under
+# htdocs/, and nd-mod.mk sits in the repo root: it is what a sibling module
+# repo includes to build against an installed engine (MODS.md §0.4). mk's
+# uninstall does not list install-extra either, so both files this target and
+# install-extra own are removed by hand in uninstall-mods below.
+install-mods:
+	@dst=$(DESTDIR)$(PREFIX)/share/axil-nd; \
 	install -d "$$dst" || exit 1; \
-	for h in $(ND_PAPI); do \
-		install -m 644 include/papi/$$h "$$dst/$$h" || exit 1; \
-	done; \
-	install -d $(DESTDIR)$(PREFIX)/share/axil-nd || exit 1; \
-	install -m 644 nd-mod.mk $(DESTDIR)$(PREFIX)/share/axil-nd/nd-mod.mk
-.PHONY: install-papi
+	install -m 644 nd-mod.mk "$$dst/nd-mod.mk"
+.PHONY: install-mods
 
-install: install-data install-papi
+# Prerequisite-only, so it merges with mk/include.mk:139's uninstall rather than
+# overriding its recipe (make warns on a second recipe, not on a second prereq).
+uninstall: uninstall-mods
+
+uninstall-mods:
+	rm -f $(DESTDIR)$(PREFIX)/share/axil-nd/nd-mod.mk \
+		$(DESTDIR)$(PREFIX)/include/ttypt/axil-nd.h
+.PHONY: uninstall-mods
+
+install: install-data install-mods

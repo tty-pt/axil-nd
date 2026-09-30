@@ -1,8 +1,8 @@
-#ifndef PAPI_ND_HD_H
-#define PAPI_ND_HD_H
+#ifndef ND_HD_H
+#define ND_HD_H
 
 /*
- * nd-hd.h — the module-visible table handle namespace (MODS.md §0.2).
+ * hd.h — the module-visible table handle namespace (MODS.md §0.2).
  *
  * A game module names engine tables with the `enum hd` below
  * (`nd_get(HD_OBJ, &obj, &ref)`) and names the tables IT opened with
@@ -18,7 +18,7 @@
  *                             module-table registry
  *
  * This header is included by BOTH the engine (`uapi/io.h`, which no longer
- * defines `enum hd` itself) and modules (`papi/nd-xy-types.h`). It therefore
+ * defines `enum hd` itself) and modules (`nd/xy-types.h`). It therefore
  * declares nothing but the enum and these inline helpers: no struct or enum
  * that the uapi headers also define, and no `extern` the engine TU would have
  * to define. `nd_hds[]` and the resolver live in `uapi/io.h`.
@@ -54,4 +54,4 @@ static inline unsigned nd_hd_mod(unsigned idx) { return ND_HD_MOD | idx; }
 static inline int nd_hd_is_mod(unsigned hd) { return (hd & ND_HD_MOD) != 0; }
 static inline unsigned nd_hd_mod_idx(unsigned hd) { return hd & ~ND_HD_MOD; }
 
-#endif /* PAPI_ND_HD_H */
+#endif /* ND_HD_H */

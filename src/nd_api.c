@@ -1,9 +1,9 @@
-/* nd_api.c — engine XY_IMPL side for the papi/nd-xy.h service hooks.
+/* nd_api.c — engine XY_IMPL side for the nd/xy.h service hooks.
  *
  * Folded into src/libaxil-nd.c (single-TU module): do NOT compile standalone
- * and do NOT include papi/nd-xy.h here (XY_IMPL + XY_DECL clash). Value types
- * come from papi/nd-xy-types.h only; uapi headers are NOT includable here
- * (their enum/struct defs collide with papi/nd-xy-types.h), so the engine
+ * and do NOT include nd/xy.h here (XY_IMPL + XY_DECL clash). Value types
+ * come from nd/xy-types.h only; uapi headers are NOT includable here
+ * (their enum/struct defs collide with nd/xy-types.h), so the engine
  * providers are forward-declared locally below.
  *
  * PROVIDER POLICY (post-J4.8-step-4 flip): every hook below calls the real
@@ -21,7 +21,7 @@
 
 #include <ttypt/corm.h>
 
-#include "papi/nd-xy-types.h"
+#include "nd/xy-types.h"
 
 typedef void nd_cb_t(int fd, int argc, char *argv[]);
 
@@ -77,9 +77,9 @@ unsigned shared_get(unsigned hd, void *value, void *key);
 /* MODS.md §0.2 handle resolution: nd_get/nd_put/nd_iter take a module-facing
  * handle (an `enum hd`, or an nd_open() tag) and the engine maps it to a corm
  * table. uapi/io.h declares these, but nd_api.c cannot include uapi headers
- * (their struct/enum defs collide with papi/nd-xy-types.h), so they are
- * forward-declared here. HD_MAX itself comes from papi/nd-hd.h, which
- * papi/nd-xy-types.h includes. */
+ * (their struct/enum defs collide with nd/xy-types.h), so they are
+ * forward-declared here. HD_MAX itself comes from nd/hd.h, which
+ * nd/xy-types.h includes. */
 unsigned hd_resolve(unsigned hd);
 unsigned hd_mod_open(char *type, char *iden, char *anon, unsigned flags);
 void eng_nd_register(char *str, nd_cb_t *cb, unsigned flags);
@@ -98,7 +98,7 @@ XY_IMPL(unsigned, nd_get, unsigned, hd, void *, value, void *, key)
 
 XY_IMPL(int, nd_open, char *, type, char *, iden, char *, anon, unsigned, flags)
 {
-	/* Returns a TAGGED module handle (papi/nd-hd.h), not a corm handle:
+	/* Returns a TAGGED module handle (nd/hd.h), not a corm handle:
 	 * a module's own table and the engine's `enum hd` share one unsigned,
 	 * and a bare corm handle could collide with e.g. HD_OBJ == 7. This used
 	 * to discard corm_open's result and return 0, so every module that

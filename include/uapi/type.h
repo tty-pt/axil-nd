@@ -63,7 +63,7 @@ sic_get_t sic_get;
  * injected module context — see that file for why the call sites go through
  * wrappers instead of XY_DECL.
  *
- * Signatures are the canonical ones from papi/nd-hooks.h and must stay
+ * Signatures are the canonical ones from nd/hooks.h and must stay
  * ABI-identical to both it and the XY_DEFs. Return value is the last
  * listener's; 0 when no module implements the event. */
 int nd_evt_status(unsigned player_ref);

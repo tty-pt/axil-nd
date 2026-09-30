@@ -1,0 +1,16 @@
+CFLAGS-libaxil-nd-o := -fPIC
+CFLAGS-entity-o := -fPIC
+CFLAGS-item-o := -fPIC
+CFLAGS-look-o := -fPIC
+CFLAGS-map-o := -fPIC
+CFLAGS-match-o := -fPIC
+CFLAGS-mcp-o := -fPIC
+CFLAGS-noise-o := -fPIC
+CFLAGS-object-o := -fPIC
+CFLAGS-spacetime-o := -fPIC
+CFLAGS-speech-o := -fPIC
+CFLAGS-view-o := -fPIC
+CFLAGS-wiz-o := -fPIC
+CFLAGS-world-o := -fPIC
+CFLAGS-io-o := -fPIC
+CFLAGS-mods-o := -fPIC

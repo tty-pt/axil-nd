@@ -5,10 +5,10 @@
 #include <stddef.h>
 #include "azoth.h"
 
-/* `enum hd` moved to papi/nd-hd.h so game modules can name the same tables
+/* `enum hd` moved to nd/hd.h so game modules can name the same tables
  * (MODS.md §0.2). It is included rather than pasted so the two copies
  * cannot drift. */
-#include "../papi/nd-hd.h"
+#include "../nd/hd.h"
 
 /* The engine-side table each `enum hd` resolves to, filled by shared_init()
  * (world.c). Replaces indexing nd.hds[] from the providers, and is the only

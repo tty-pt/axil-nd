@@ -1,11 +1,11 @@
 /* nd_xy.c — the NEVERDARK engine's libxylem provider side.
  *
  * This TU XYZ_IMPLs the game API hooks declared for game modules in
- * papi/nd-xy.h. It is the ONE TU that provides io primitives: game modules
+ * nd/xy.h. It is the ONE TU that provides io primitives: game modules
  * (loaded via xy_load into the engine's region subtree) call `nd_write(player,
  * str, len)` as plain C; XY_CALL dispatches here.
  *
- * Like mods/common/common.c, this TU must NOT include papi/nd-xy.h
+ * Like mods/common/common.c, this TU must NOT include nd/xy.h
  * (XY_IMPL + XY_DECL on the same symbol clash). Game modules include it.
  *
  * The fd→player registry (dplayer_hd/fds_hd) and the write-path bodies now
@@ -39,7 +39,7 @@ extern void eng_nd_twrites(unsigned player_ref, char *str, size_t len);
 extern void eng_nd_close(unsigned player_ref);
 extern void eng_nd_flush(unsigned player_ref);
 
-/* --- XY_IMPL providers for the papi/nd-xy.h hooks ------------------------- */
+/* --- XY_IMPL providers for the nd/xy.h hooks ------------------------- */
 
 /* forward decls (XY_IMPL emits bodies below; keep TU-internal callers happy) */
 extern unsigned fd_player(unsigned fd);

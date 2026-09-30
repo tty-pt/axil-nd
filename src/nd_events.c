@@ -1,16 +1,16 @@
-/* nd_events.c — engine XY_DEF side for the papi/nd-hooks.h game events.
+/* nd_events.c — engine XY_DEF side for the nd/hooks.h game events.
  *
  * Each XY_DEF emits the canonical adapter + a static inline dispatcher that
  * runs every listener in the current region. Game modules XY_IMPL the
  * listeners they want.
  * Folded into src/libaxil-nd.c (single-TU module): do NOT compile standalone
- * and do NOT include papi/nd-hooks.h here (XY_DEF + XY_DECL clash).
+ * and do NOT include nd/hooks.h here (XY_DEF + XY_DECL clash).
  *
  * WHY THE nd_evt_* WRAPPERS
  * -------------------------
  * The engine's event firing sites live in ordinary engine TUs (object.c,
- * entity.c, spacetime.c, world.c, ...) which CANNOT include papi/nd-hooks.h:
- * papi/nd-xy-types.h redefines struct icon / enum color / sic_str_t that the
+ * entity.c, spacetime.c, world.c, ...) which CANNOT include nd/hooks.h:
+ * nd/xy-types.h redefines struct icon / enum color / sic_str_t that the
  * uapi headers already define, and the same symbols then appear twice. So the
  * engine calls exported wrappers instead, declared in uapi/type.h.
  *
@@ -30,7 +30,7 @@
  *     what makes them see the events at all.
  */
 
-#include "papi/nd-xy-types.h"
+#include "nd/xy-types.h"
 
 XY_DEF(int, on_status, unsigned, player_ref);
 XY_DEF(int, on_examine, unsigned, player_ref, unsigned, ref, unsigned, type);

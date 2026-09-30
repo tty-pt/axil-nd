@@ -1,8 +1,8 @@
-#ifndef PAPI_ND_HOOKS_H
-#define PAPI_ND_HOOKS_H
+#ifndef ND_HOOKS_H
+#define ND_HOOKS_H
 
 /*
- * nd-hooks.h — the NeverDark SIC event surface as libxylem (XY) hooks.
+ * hooks.h — the NeverDark SIC event surface as libxylem (XY) hooks.
  *
  * These are the game events the ENGINE fires (XY_DEF in the engine provider
  * TU) and GAME MODULES listen to (XY_IMPL in the module). Each is the XY
@@ -10,8 +10,8 @@
  * are the CANONICAL ones (interface.c:464-486) — note uapi/type.h SIC_DECLs
  * drift (e.g. on_del has 2 args here, on_icon carries player_ref).
  *
- * Same XY HOOK SHAPE CONSTRAINT as papi/nd-xy.h: engine XY_DEFs / modules
- * XY_IMPL in a TU that must NOT include this header (or nd-xy.h) for the
+ * Same XY HOOK SHAPE CONSTRAINT as nd/xy.h: engine XY_DEFs / modules
+ * XY_IMPL in a TU that must NOT include this header (or xy.h) for the
  * hooks they define. Modules include THIS header only to CALL an event or to
  * see listener shapes; listeners are written with XY_IMPL in their own TU.
  *
@@ -25,7 +25,7 @@
 
 #include <ttypt/xy.h>
 
-#include "papi/nd-xy-types.h"
+#include "xy-types.h"
 
 /* object/view hooks */
 XY_DECL(int, on_status, unsigned, player_ref);
@@ -55,4 +55,4 @@ XY_DECL(int, on_spawn, unsigned, player_ref, unsigned, loc_ref, struct bio, bio,
 	uint64_t, v);
 XY_DECL(int, on_get, unsigned, player_ref, unsigned, ref);
 
-#endif /* PAPI_ND_HOOKS_H */
+#endif /* ND_HOOKS_H */

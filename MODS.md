@@ -973,7 +973,7 @@ decorator table.**
   `i = core_icon_decorators[n](i, ref, type, player_ref);` — the old
   `sic_call` loop, with the order now explicit.
 - `~/axil-nd-shop` is ported. Its `xy_install` does
-  `xy_load("nd-core")` — the installed soname since §8.1, where it was the
+  `xy_load("libnd-core")` — the installed filename since §8.1, where it was the
   relative `../axil-nd-core/core`; `xy_load` is refcounted and
   idempotent via `mod_load_try_reuse_existing`, so it is safe whether or not
   nd-core is also named in `mods.load` — and then
@@ -1172,9 +1172,18 @@ Module gaps:
 - **`nd-core` no longer uses `nd-mod.mk` at all.** It resolves the game's
   headers itself, the way every other house library does: `ND_INC` was its only
   job, and inlining that idiom dropped the dependency. Its `Makefile` is now the
-  ordinary flat shape (`all := libnd-core`, `SONAME-libnd-core := nd-core`,
-  `LDLIBS := -lxylem`, then `-include ../mk/include.mk`) — zero conditionals,
+  ordinary flat shape (`all := libnd-core`, `LDLIBS := -lxylem`, then
+  `-include ../mk/include.mk`) — zero conditionals,
   like `axil-tty`, `axil-auth` and `axil-hyle`.
+
+  It installs `lib/libnd-core.so` and nothing else — no `SONAME`, so no
+  `lib/nd-core.so` symlink. `mods.load` therefore names it `libnd-core`.
+  A symlink would not survive packaging anyway: `tty-pt/ci` builds the OpenBSD
+  packing list from `find usr -type f`, which never lists a symlink, so the
+  package would have carried the library under one name and asked the loader for
+  another. `module_load_path()` in libxylem only appends `.so` and `realpath`s
+  it — there is no `lib`-prefix fallback — which is why the load name is the
+  installed filename rather than the bare stem.
 
   Do not delete `nd-mod.mk` yet. Seven module repos still `include` it, this
   Makefile's slash-module rule still drives four of them, and `make install`
@@ -1198,8 +1207,8 @@ Module gaps:
   (`on_icon TYPE_ROOM -> ch='-'`, `core_icon_decorate #1`); without it, the
   engine reported `nd_mods_load: module nd-core failed to load`.
 
-- **Module→module dependencies use the installed soname, with no sibling
-  fallback.** `xy_load("nd-core")` — `shop` does this from its `xy_install`.
+- **Module→module dependencies use the installed filename, with no sibling
+  fallback.** `xy_load("libnd-core")` — `shop` does this from its `xy_install`.
   Since `module_load_path()` `realpath()`s, the engine's `mods.load` line and
   the module's own `xy_load()` collapse to one refcounted entry either way.
 

@@ -27,7 +27,7 @@ demo
 # finds libnd-core.so through the normal search path. The rest are dev-tree
 # checkouts named by path; Makefile's slash-module rule derives the stem with
 # $(notdir $(basename $@)), so ~/axil-nd-<name>/<name> builds <name>.so.
-nd-core
+libnd-core
 ../axil-nd-other/other
 ../axil-nd-level/level
 ../axil-nd-vanilla/vanilla

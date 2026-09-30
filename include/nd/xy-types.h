@@ -1,11 +1,11 @@
-#ifndef PAPI_ND_XY_TYPES_H
-#define PAPI_ND_XY_TYPES_H
+#ifndef ND_XY_TYPES_H
+#define ND_XY_TYPES_H
 
 /*
- * nd-xy-types.h — shared value types for the NeverDark game API (XY).
+ * xy-types.h — shared value types for the NeverDark game API (XY).
  *
- * Defines the GAME data types that papi/nd-xy.h (service hooks) and
- * papi/nd-hooks.h (events) pass by value/pointer. It is a PASTE of the
+ * Defines the GAME data types that nd/xy.h (service hooks) and
+ * nd/hooks.h (events) pass by value/pointer. It is a PASTE of the
  * struct/enum definitions from the engine's uapi headers WITHOUT any
  * fn-pointer globals (`ent_get_t ent_get;` etc.) or `extern unsigned *_hd;`
  * so game modules and the engine provider TU can include it freely alongside
@@ -20,11 +20,11 @@
 
 #include <ttypt/xy.h>
 
-/* --- nd-hd.h ------------------------------------------------------------- */
+/* --- hd.h ---------------------------------------------------------------- */
 
 /* The table handles (`HD_OBJ`, …) and the nd_open() tag helpers, so a module
  * can write nd_get(HD_OBJ, …) without pulling in any uapi header. */
-#include "nd-hd.h"
+#include "hd.h"
 
 /* --- azoth.h ------------------------------------------------------------- */
 
@@ -252,4 +252,4 @@ typedef struct {
 	char emp;
 } vtf_t;
 
-#endif /* PAPI_ND_XY_TYPES_H */
+#endif /* ND_XY_TYPES_H */

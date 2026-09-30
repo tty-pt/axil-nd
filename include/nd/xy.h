@@ -1,8 +1,16 @@
-#ifndef PAPI_ND_XY_H
-#define PAPI_ND_XY_H
+#ifndef ND_XY_H
+#define ND_XY_H
 
 /*
- * nd-xy.h — the NeverDark game API exposed through libxylem (XY).
+ * xy.h — the NeverDark game API exposed through libxylem (XY).
+ *
+ * A game module includes this header as `<nd/xy.h>`. `make install` puts this
+ * tree in $(PREFIX)/include/nd/, so `-I$(PREFIX)/include` resolves it — the
+ * same -I that mk/portable.mk and nd-mod.mk's XY_INC already put on every
+ * module compile line, and the one that carries <ttypt/xy.h> too:
+ *
+ *     #include <ttypt/xy-mod.h>   // must PRECEDE this header; see nd_last
+ *     #include <nd/xy.h>
  *
  * Replaces the engine's dlopen mod-load / `struct nd` handoff / SIC macros
  * (interface.c mod_load + `*ind = nd`, uapi/type.h SIC_DECL/SIC_DEF/SIC_CALL)
@@ -14,7 +22,7 @@
  *     within the caller's region subtree.
  *   - GAME MODULES include this header freely, then call the hooks as plain C
  *     (XY_DECL forwards through xy_call to the engine provider). Modules
- *     implement their own game events (see papi/nd-hooks.h) with XY_IMPL.
+ *     implement their own game events (see nd/hooks.h) with XY_IMPL.
  *   - `get_xy_ptr()` in xy-mod.h supplies the injected xy context
  *     (module_path, region_id, load/unload, ...) — the replacement for
  *     `struct nd *ind = dlsym(sl, "nd"); *ind = nd;`.
@@ -35,7 +43,7 @@
  *     are passed as coord_t *).
  *
  * This header is deliberately SELF-CONTAINED (raw types from
- * papi/nd-xy-types.h). It does NOT include the uapi headers: those declare
+ * nd/xy-types.h). It does NOT include the uapi headers: those declare
  * the matching fn-pointer globals (e.g. `nd_write_t nd_write;`) which would
  * collide with the XY_DECL inline of the same name in a module TU.
  *
@@ -43,7 +51,8 @@
  * `xy_require_claim()` in its xy_install(); `xy_with_region()`/regions scope
  * per-owner plugin dispatch — maps the spacetime per-owner `st_*` loader.
  *
- * This is the XY expansion of `struct nd` (include/papi/nd.h). Members
+ * This is the XY expansion of `struct nd` (include/papi/nd.h, which is still
+ * engine-internal). Members
  * SKIPPED on purpose:
  *   - nd_dwritef / nd_dowritef / nd_tdwritef / dnotify_wts /
  *     dnotify_wts_to — variadic (va_list), engine-side only;
@@ -67,7 +76,7 @@
 
 #include <ttypt/xy.h>
 
-#include "papi/nd-xy-types.h"
+#include "xy-types.h"
 
 /* ------------------------------------------------------------------ io */
 
@@ -224,4 +233,4 @@ XY_DECL(int, mcp_content_out, unsigned, loc_ref, unsigned, thing_ref);
 XY_DECL(int, mcp_content_in, unsigned, loc_ref, unsigned, thing_ref);
 XY_DECL(int, mcp_bar, unsigned char, iden, unsigned, player_ref, unsigned short, val, unsigned short, max);
 
-#endif /* PAPI_ND_XY_H */
+#endif /* ND_XY_H */
