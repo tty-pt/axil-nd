@@ -961,19 +961,22 @@ visible instead of incidental.
 **RESOLVED — implemented as the ~/site/mods style, single owner plus a
 decorator table.**
 
-- `~/axil-nd-core/core.h` (new, in the module's own repo): `core_icon_fn` and
+- `~/axil-nd-core/core.h` (new, in the module's own repo; since §8.1 it is
+  `include/ttypt/nd-core.h`): `core_icon_fn` and
   `XY_DECL(int, core_icon_decorate, ...)`, under `#ifndef CORE_IMPL` so the
   implementing TU can `XY_IMPL` the same name — the same guard
   `~/site/mods/index/index.h` uses, and the same rule as `papi/nd-hooks.h`.
-- `nd-core/main.c` is the sole `XY_IMPL` of `on_icon`. It holds
+- `nd-core/main.c` is the sole `XY_IMPL` of `on_icon` (since §8.1 it is
+  `nd-core/src/libnd-core.c`). It holds
   `core_icon_decorators[16]`, and after building the base icon threads it
   through each registered decorator in registration order:
   `i = core_icon_decorators[n](i, ref, type, player_ref);` — the old
   `sic_call` loop, with the order now explicit.
 - `~/axil-nd-shop` is ported. Its `xy_install` does
-  `xy_load("../axil-nd-core/core")` (relative, §4; `xy_load` is refcounted and
+  `xy_load("nd-core")` — the installed soname since §8.1, where it was the
+  relative `../axil-nd-core/core`; `xy_load` is refcounted and
   idempotent via `mod_load_try_reuse_existing`, so it is safe whether or not
-  nd-core is also named in `mods.load`) and then
+  nd-core is also named in `mods.load` — and then
   `core_icon_decorate(shop_icon_decorate)`.
 - `core_icon_fn` takes the **running icon as its first argument**, so
   `shop_icon_decorate` is the original `on_icon` body verbatim. This is not
@@ -1136,11 +1139,14 @@ one-store case (`test.sh` persistence regression).
 
 ---
 
-### 8.1 Phase 4 — installability (next)
+### 8.1 Phase 4 — installability
 
 Goal: `nd` and every `nd` module install like an axil module, as `axil-tty`
 does. Module sonames use **`nd-<name>`**: `libnd-<name>.so` plus the unprefixed
 `nd-<name>.so` symlink, loaded by `xy_load("nd-<name>")`.
+
+**`nd-core` has landed.** It is the first module converted, so the rest of this
+section is the pattern it set rather than a plan for it.
 
 Engine gaps, all measured:
 
@@ -1149,7 +1155,9 @@ Engine gaps, all measured:
   source checkout because runtime paths are CWD-relative: `mods.load` at
   `src/nd_xy.c:156`, `man/%s.10` at `src/world.c:598`,
   `htdocs/index.html` at `src/libaxil-nd.c:355`, and `/nd/art/...` with no
-  explicit engine handler found.
+  explicit engine handler found. So "installed library" pays off inside a
+  checkout today; against a fully installed engine the `mods.load` path still
+  has to be fixed first.
 - `AXIL_PREFIX` and `AXIL_HTDOCS` exist at `src/libaxil-nd.c:26-31` but are
   unused. They should become the compiled-in prefix, not remain dead macros.
 - The missing `mods.load` fallback now boots the demo module silently. An
@@ -1161,18 +1169,59 @@ Engine gaps, all measured:
 
 Module gaps:
 
-- Give `nd-mod.mk` a smaller job: resolve the engine and expose `ND_INC`, plus
-  the installed-versus-sibling check. Move library/install behaviour into
-  `mk/include.mk`, with `all := libnd-<name>` and
-  `SONAME-libnd-<name> := nd-<name>`. Do not delete `nd-mod.mk` yet: the copy
-  installed at `$(PREFIX)/share/axil-nd/nd-mod.mk` is still how a module builds
-  against an installed engine without an engine checkout.
-- Module→module dependencies use installed soname first, sibling fallback:
-  `xy_load("nd-core")`, falling back to `../axil-nd-core/core` in a dev tree.
-  Keep `core.h`’s installed include path consistent with the dev-tree relative
-  include when this lands.
-- Packaging hygiene: `~/axil-nd-shop` still needs `README.md`; every module
-  already has BSD-2 `LICENSE` and ignores `*.d`, `*.o`, `*.so`.
+- **`nd-core` no longer uses `nd-mod.mk` at all.** It resolves the game's
+  headers itself, the way every other house library does: `ND_INC` was its only
+  job, and inlining that idiom dropped the dependency. Its `Makefile` is now the
+  ordinary flat shape (`all := libnd-core`, `SONAME-libnd-core := nd-core`,
+  `LDLIBS := -lxylem`, then `-include ../mk/include.mk`) — zero conditionals,
+  like `axil-tty`, `axil-auth` and `axil-hyle`.
+
+  Do not delete `nd-mod.mk` yet. Seven module repos still `include` it, this
+  Makefile's slash-module rule still drives four of them, and `make install`
+  still ships it to `$(PREFIX)/share/axil-nd/nd-mod.mk`, which is how a module
+  builds against an installed engine with no engine checkout. Deleting it is
+  gated on converting the rest.
+
+- **`mods.load` has a third form.** A line is now one of:
+  1. a bare name **with** a module in `mods/<n>/<n>.c` — in-tree, built by the
+     `mods/%.so` rule;
+  2. a bare name **without** one — an **installed library by soname**.
+     `xy_load()` appends the suffix and `dlopen()` resolves it through the
+     normal search path, so `nd-core` is just "install the package";
+  3. a path containing `/` — taken verbatim, for a sibling checkout
+     (`../axil-nd-level/level`).
+
+  Two places apply this test and **must not drift**: `nd_mods_load()` in
+  `src/nd_xy.c` (the `access("mods/<n>/<n>.c")` branch) and the `mods:` target
+  here, via the `inmods` set. Measured: with nd-core staged outside the tree,
+  `LD_LIBRARY_PATH` pointing at it made both suite assertions pass
+  (`on_icon TYPE_ROOM -> ch='-'`, `core_icon_decorate #1`); without it, the
+  engine reported `nd_mods_load: module nd-core failed to load`.
+
+- **Module→module dependencies use the installed soname, with no sibling
+  fallback.** `xy_load("nd-core")` — `shop` does this from its `xy_install`.
+  Since `module_load_path()` `realpath()`s, the engine's `mods.load` line and
+  the module's own `xy_load()` collapse to one refcounted entry either way.
+
+- The public header moved to `include/ttypt/nd-core.h` and is included as
+  `<ttypt/nd-core.h>`. `mk/portable.mk:22`/`:67` put `$(pwd)/include` ahead of
+  `$(PREFIX)/include`, so one spelling resolves to the checkout in a dev build
+  and to the installed header otherwise. Consumers still need
+  `-I$(PREFIX)/include/axil-nd` for the `papi/` half, which is why nd-core's
+  own `CFLAGS` names both that and `../axil-nd/include` — a missing `-I` is
+  ignored, so the same command works either way.
+
+- Packaging hygiene: every module now has a `README.md`, a BSD-2 `LICENSE`, and
+  ignores `*.d`, `*.o`, `*.so`. `shop`'s README is the only one that also
+  documents a build-time dependency on an installed `nd-core`, since it is the
+  sole module that includes `<ttypt/nd-core.h>`.
+
+Still open: shop's amend-path marker (`nd-shop: decorated ref=... ch='$' ...`)
+is the one part of the `on_icon` chain no assertion covers, because nothing in
+the engine or the art ever sets `EF_SHOP` — `src/view.c:335` only reads it, so
+no vendor exists on a stock boot for the line to fire on. `test.sh:280` proves
+the decorator was *registered*; asserting it ran needs a fixture world with a
+vendor in it.
 
 Still to confirm before fixing: how `/nd/art/...` is served (§10).
 
@@ -1315,8 +1364,8 @@ Module repos (eight committed locally; `shop` still needs `README.md`):
 
 | path | role |
 |---|---|
-| `~/axil-nd-core/` | `on_icon`; sole owner plus decorator table |
-| `~/axil-nd-core/core.h` | `core_icon_fn` and `core_icon_decorate()` |
+| `~/axil-nd-core/` | `on_icon`; sole owner plus decorator table. Installable library since §8.1 |
+| `~/axil-nd-core/include/ttypt/nd-core.h` | `core_icon_fn` and `core_icon_decorate()` |
 | `~/axil-nd-other/` | `on_add` + `HD_OBJ`/`HD_SKEL`; the `HD_*` indirection probe |
 | `~/axil-nd-level/` | `level`/`level_up` cross-module API, own corm table, `on_status` |
 | `~/axil-nd-level/include/level/level.h` | module-owned public header (`XY_DECL`) |

@@ -2,11 +2,17 @@
 #
 # One module per line. `#` starts a comment; blank lines are skipped.
 #
-# A line is EITHER
-#   - a bare name, loaded as `mods/<name>/<name>` (in-tree layout), or
+# A line is one of three things
+#   - a bare name WITH a module in this tree, loaded as `mods/<n>/<n>`, or
+#   - a bare name WITHOUT one, which names an INSTALLED library by soname --
+#     xy_load() appends the suffix and dlopen() resolves it through the normal
+#     search path, so installing the package is all that is needed,
 #   - a path (anything containing a `/`), taken VERBATIM -- which is how a
 #     sibling module checkout is named without being copied into this tree
 #     (MODS.md §4: one repo per module, ~/axil-nd-<name>).
+#
+# Makefile's `mods:` target applies the identical test for the first two, so
+# build and load never disagree about what a bare name means.
 #
 # Name the STEM, not the file: xy_load() appends `.so` itself, so a line
 # `level.so` makes the engine look for `level.so.so` and fail. A sibling
@@ -15,11 +21,13 @@
 # Lines that name a module which is not built are reported on stderr
 # ("nd_mods_load: module ... failed to load"); the engine still boots.
 demo
-# out-of-tree sibling repo (MODS.md §4/§0.4)
-# Phase 1 vertical slice (MODS.md §6). Each is a separate repo next to the
-# engine, named by path; nd-mod.mk strips the `axil-nd-` prefix to get the
-# module name, so the artifact is <name>.so and the stem is <name>.
-../axil-nd-core/core
+# out-of-tree sibling repos (MODS.md §4/§0.4) and installed modules.
+# Phase 1 vertical slice (MODS.md §6). `nd-core` is an installed library now:
+# it has no module in this tree, so the bare name is its soname and dlopen()
+# finds libnd-core.so through the normal search path. The rest are dev-tree
+# checkouts named by path; Makefile's slash-module rule derives the stem with
+# $(notdir $(basename $@)), so ~/axil-nd-<name>/<name> builds <name>.so.
+nd-core
 ../axil-nd-other/other
 ../axil-nd-level/level
 ../axil-nd-vanilla/vanilla
@@ -27,5 +35,6 @@ demo
 # registers an icon decorator with it: nd-core is the sole owner of on_icon and
 # walks its decorator table in registration order, so a decorator loaded first
 # would have nowhere to register. shop's own xy_install also xy_load()s nd-core
-# by relative path, which is a no-op refcount bump when core is already here.
+# by the same soname, which is a no-op refcount bump: module_load_path()
+# realpath()s, so both spellings collapse to one entry.
 ../axil-nd-shop/shop

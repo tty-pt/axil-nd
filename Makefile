@@ -74,14 +74,27 @@ modnames != sed -n 's/^\([A-Za-z0-9_.\/-][A-Za-z0-9_.\/-]*\).*/\1/p' \
 	${MODS_LOAD} 2>/dev/null
 modnames := $(sort ${modnames})
 
-mods: $(foreach m,${modnames},$(if $(findstring /,${m}),${m}.$(SO),mods/${m}/${m}.so))
+# Names containing `/` are dev-tree checkouts; bare names are either in-tree or
+# an installed library. nd_mods_load() (src/nd_xy.c) splits them the same way.
+slashmods := $(foreach n,${modnames},$(if $(findstring /,${n}),${n}))
+baremods  := $(filter-out ${slashmods},${modnames})
+inmods    := $(foreach n,${baremods},$(if $(wildcard mods/$(n)/$(n).c),${n}))
+
+mods: $(foreach m,${inmods},mods/${m}/${m}.so) \
+	$(foreach m,${slashmods},${m}.$(SO))
 
 # in-tree module: a bare name, so mods/<n>/<n>.so
 mods/%.so: mods/%/%.c include/papi/nd-xy.h
 	cd mods/$* && $(CC) -shared -fPIC -I../../include -I/usr/include \
 		-o $*.so $*.c
 
-$(foreach m,$(filter $(foreach n,${modnames},$(if $(findstring /,${n}),${n},)),${modnames}),$(m).$(SO)): FORCE
+# A bare name with no module in this tree is an INSTALLED library, so there is
+# nothing to build here: its soname symlink is all `make install` has to produce
+# and dlopen() resolves it at boot. Deliberately not a prerequisite, so `make
+# mods` does not require it to be installed first; a missing one is reported by
+# nd_mods_load() and the engine still boots (mods.load says so too).
+
+$(foreach m,${slashmods},$(m).$(SO)): FORCE
 	$(MAKE) -f $(CURDIR)/nd-mod.mk MOD=$(notdir $(basename $@)) \
 		ND_INC=$(CURDIR)/include -C $(patsubst %/,%,$(dir $(basename $@))) \
 		$(notdir $@)

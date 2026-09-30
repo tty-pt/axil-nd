@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* engine registry + providers (io.c). uapi/io.h is NOT includable here
  * (its azoth/object defs collide with the value types below), hence the
@@ -133,13 +134,21 @@ nd_mods_load(void)
 	 * land in the region subtree and their listeners dispatch to the game
 	 * events the engine fires.
 	 *
-	 * A line is EITHER a bare module name -- loaded as `mods/<n>/<n>`, the
-	 * in-tree layout -- OR a path (anything containing `/`), taken
-	 * verbatim. That is what makes the one-repo-per-module layout
-	 * (MODS.md §4) work: a sibling checkout is named by its own path, e.g.
+	 * A line is one of three things: a bare module name WITH a module in
+	 * this tree -- loaded as `mods/<n>/<n>`, the in-tree layout -- a bare
+	 * name WITHOUT one, which names an INSTALLED library by soname, or a
+	 * path (anything containing `/`), taken verbatim. The first is what
+	 * makes the one-repo-per-module layout (MODS.md §4) work: a sibling
+	 * checkout is named by its own path, e.g.
 	 *   ../axil-nd-level/level
-	 * and needs no copying into the engine tree. Bare names stay the
-	 * default so the common case is unchanged.
+	 * and needs no copying into the engine tree. The second is what makes
+	 * "installable" true: xy_load() appends the suffix and hands the bare
+	 * filename to dlopen(), which resolves it through the normal search
+	 * path, so a module shipped as a package -- libnd-core.so plus its
+	 * nd-core.so soname symlink -- just loads.
+	 *
+	 * Makefile's `mods:` target applies the identical test, so build and
+	 * load never disagree about what a bare name means.
 	 *
 	 * Entries name the STEM, never the `*.so`: xy_load() appends the suffix
 	 * itself (libxylem-module.c:114; libxylem-watch.c:54 notes it strips
@@ -152,6 +161,9 @@ nd_mods_load(void)
 	 *
 	 * Falls back to the demo module when no list file is present. */
 	char path[1030];
+	/* "mods/" + name + "/" + name + ".c" over a `line` of up to 511 bytes
+	 * is 1030 plus the NUL, so this has to be wider than `path`. */
+	char inpath[sizeof(path) + 8];
 	char line[512];
 	FILE *fp = fopen("mods.load", "r");
 	if (!fp) {
@@ -169,9 +181,16 @@ nd_mods_load(void)
 			continue;
 		if (strchr(line, '/'))
 			snprintf(path, sizeof(path), "%s", line);
-		else
-			snprintf(path, sizeof(path), "mods/%s/%s", line,
-				line);
+		else {
+			/* Same test Makefile's `mods:` target uses. A source file
+			 * under mods/<n>/ is what makes a name in-tree; anything
+			 * else is an installed soname. */
+			snprintf(inpath, sizeof(inpath), "mods/%s/%s.c",
+				line, line);
+			snprintf(path, sizeof(path),
+				access(inpath, R_OK) == 0 ? "mods/%s/%s" : "%s",
+				line, line);
+		}
 		if (xy_load(path) != XY_OK)
 			fprintf(stderr, "nd_mods_load: module %s failed to load\n",
 				path);
