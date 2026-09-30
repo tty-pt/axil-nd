@@ -11,12 +11,97 @@ esac
 # `help` assertions below pass without the pages being there.
 make --no-print-directory man
 
+# Build the ENGINE too, not just the data. The suite boots whatever
+# lib/libaxil-nd.so is on disk, so an engine edit that was never compiled was
+# silently untested -- which is the same class of bug as the stale-object link
+# in MODS.md §2.1, one level up. Measured here: with the path-aware branch in
+# src/nd_xy.c deliberately reverted, `./test.sh` still printed "axil-nd ok"
+# because only the modules were rebuilt. The engine has to be part of the
+# suite's inputs.
+make --no-print-directory
+
 port=$((20000 + RANDOM % 8000))
 tmpout=$(mktemp)
 tmpdb=$(mktemp -d)
 persist_pid_a=
 persist_pid_b=
-trap 'rm -f "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} 2>/dev/null || true' EXIT
+# mods.load is tracked, so the fixture below registers the test module in it
+# for this run and the trap puts the shipped list back. The trap is installed
+# BEFORE anything can fail -- an earlier version created the fixture and ran
+# `make mods` first, so a build error left the fixture named in a tracked file
+# and every later run inherited a module that did not exist.
+mods_load_saved=$(mktemp)
+cp mods.load "$mods_load_saved"
+# Restores the tracked mods.load even on FAILURE or interrupt: a suite that
+# leaves a test fixture committed in the shipped module list is worse than one
+# that fails to clean up its temp dir.
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} 2>/dev/null || true' EXIT
+
+# ---------------------------------------------------------------------------
+# MODS.md §5.0.4 out-of-tree module fixture.
+#
+# The engine only ever had modules inside its own tree, so nothing has ever
+# exercised the sibling-repo layout that Phase 1 depends on: a separate repo,
+# its own Makefile, built through the shared nd-mod.mk against the papi
+# headers, named in mods.load by its own path. That is the single riskiest new
+# seam in 0.4 -- a path that is silently reshaped to `mods/<n>/<n>` fails with
+# no error at all, just a hook that stopped firing.
+#
+# So build one here, in the shape Phase 1 will actually use, rather than
+# trusting that a hand-made probe still works. `MOD ?= $(patsubst axil-nd-%,%)`
+# in nd-mod.mk is what turns the directory name axil-nd-testprobe into the
+# module name testprobe, matching ~/axil-nd-<mod> -> <mod>.
+probe=../axil-nd-testprobe
+rm -rf "$probe"
+mkdir -p "$probe"
+cat > "$probe/Makefile" <<EOF
+PREFIX ?= /usr
+include $(pwd)/nd-mod.mk
+EOF
+# Deliberately minimal: the ONLY thing this TU knows is papi/nd-xy.h and
+# <ttypt/xy.h>, i.e. what an installed module gets. It includes no uapi header,
+# which is the point -- that is the rule nd-xy.h documents and the demo, being
+# in-tree, is not evidence for.
+cat > "$probe/testprobe.c" <<'EOF'
+#include <string.h>
+#include <ttypt/xy-mod.h>
+#include "papi/nd-xy.h"
+
+XY_MODULE_API void xy_install(void)
+{
+	WARN("testprobe module installed from '%s'\n", xy.module_path);
+}
+
+XY_IMPL(int, on_enter, unsigned, player_ref, unsigned, loc_ref)
+{
+	unsigned h = nd_open("testprobe_ent", "u", "u", 0);
+	OBJ obj;
+	int rc;
+
+	(void)loc_ref;
+	memset(&obj, 0, sizeof(obj));
+	rc = nd_get(HD_OBJ, &obj, &player_ref);
+	nd_printf(player_ref, "[testprobe] on_enter %s hd=%s\n",
+		(rc == 0 && obj.name[0]) ? obj.name : "(unresolved)",
+		nd_hd_is_mod(h) ? "tagged" : "UNTAGGED");
+	WARN("testprobe on_enter: HD_OBJ=%s hd=%s\n",
+		(rc == 0 && obj.name[0]) ? "resolved (ok)" : "NOT RESOLVED (bug)",
+		nd_hd_is_mod(h) ? "tagged" : "UNTAGGED");
+	return 0;
+}
+EOF
+
+# Register it by path for this run only; the trap above restores mods.load.
+printf '%s\n' "$probe/testprobe" >> mods.load
+
+# Build every module named in mods.load before booting (MODS.md §5.0.4). The
+# engine loads whatever is in that list, so a module that no longer compiles
+# would otherwise be discovered as "the hook silently stopped firing" deep in
+# the suite, which is the exact failure mode Phase 1 makes worse: modules move
+# into sibling repos and a stale .so on disk will happily keep serving the old
+# code. `make mods` also re-checks that a mods.load path entry actually
+# resolves, since the path-aware nd_mods_load() now trusts it verbatim.
+make --no-print-directory mods
 
 # the real engine boot opens its store here (world_db(): AXIL_ND_DB else
 # /var/nd/std.db, unwritable on dev hosts).
@@ -130,6 +215,111 @@ echo "$hex" | grep -qiF "5b64656d6f5d20706c6179657220" \
 echo "$hex" | grep -qiF "5b64656d6f5d206f6e5f656e74657220" \
 	|| { echo "FAIL: on_enter frame missing" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# MODS.md §5.0.2 handle namespaces. The demo module probes all three and
+# WARN()s the result to axil's stderr, which is /tmp/axil_test.log. Each of
+# these was broken before 0.2 and is a crash-or-corruption tripwire, so they
+# assert on the RESULT word, not just on the probe having run:
+#   - nd_open used to discard corm_open's return and hand back 0, so every
+#     module that saved the handle got table 0.
+#   - nd_get/nd_put/nd_iter took a module-facing handle straight to corm_*, so
+#     HD_OBJ (== 7) read corm table 7 instead of the object table.
+#   - an untagged module handle could collide with an enum hd outright.
+log=/tmp/axil_test.log
+
+grep -qF "demo nd_open -> 0x80000000 (tagged)" "$log" \
+	|| { echo "FAIL: nd_open did not return a tagged handle" >&2; exit 1; }
+grep -qF "demo nd_open/nd_put/nd_get round trip: ok" "$log" \
+	|| { echo "FAIL: a module's own table did not round-trip" >&2; exit 1; }
+grep -qF "demo out-of-range handles: enum=missed (ok) mod=missed (ok)" "$log" \
+	|| { echo "FAIL: an out-of-range handle did not miss cleanly" >&2; exit 1; }
+grep -qF "resolved (ok)" "$log" \
+	|| { echo "FAIL: nd_get(HD_OBJ, ...) did not resolve to the object table" >&2; exit 1; }
+grep -qF "NOT RESOLVED (bug)" "$log" \
+	&& { echo "FAIL: HD_OBJ did not reach the object table" >&2; exit 1; }
+
+# MODS.md §5.0.3 module ergonomics. nd_printf and nd_last are the ports of
+# nd_writef and sic_last; both are compiled into the demo, so these fail at
+# BUILD time if either regresses, and the first two assert the runtime path.
+# "[demo] nd_printf " on the wire (5b64656d6f5d206e645f7072696e7466) proves
+# the formatted text reached a real player, not just a WARN.
+grep -qF "demo nd_printf compiled and dispatched" "$log" \
+	|| { echo "FAIL: nd_printf did not dispatch" >&2; exit 1; }
+grep -qF "demo nd_last resolved" "$log" \
+	|| { echo "FAIL: nd_last did not resolve against the injected xy context" >&2; exit 1; }
+echo "$hex" | grep -qiF "5b64656d6f5d206e645f7072696e7466" \
+	|| { echo "FAIL: nd_printf output not on the wire" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# MODS.md §6 Phase 1 vertical slice. Four real modules in four sibling repos,
+# named in the TRACKED mods.load by path, built by `make mods` above.
+#
+# All of these are CONNECT-TIME hooks (on_icon, on_add, on_new_player,
+# xy_install), so they are asserted on the log right after the WS handshake.
+# nd-level's on_status is the exception and is asserted separately below,
+# because on_status only fires when a player runs `status` (do_status,
+# src/entity.c:236) -- it is not a connect-time event. The earlier version of
+# this block asserted the "Level" line against the connect-time capture, which
+# could never contain it; the assertion was right, its timing was not.
+grep -qF "nd-core: on_icon TYPE_ROOM -> ch='-'" "$log" \
+	|| { echo "FAIL: nd-core's on_icon did not fire for a room (struct return across the bus)" >&2; exit 1; }
+grep -qF "nd-other: on_add first call" "$log" \
+	|| { echo "FAIL: nd-other's on_add never fired" >&2; exit 1; }
+grep -qF "nd-vanilla: on_new_player teleported" "$log" \
+	|| { echo "FAIL: nd-vanilla's on_new_player did not fire" >&2; exit 1; }
+# nd-level's table must be a TAGGED module handle (0x80000001), never a bare
+# corm handle that could alias HD_*. Asserted on the real value, because
+# §5.0.2's whole point is that the untagged case used to be silently wrong.
+grep -qE "nd-level: xy_install, level_hd = 0x8[0-9a-f]+ \(tagged\)" "$log" \
+	|| { echo "FAIL: nd-level's nd_open did not return a tagged handle" >&2; exit 1; }
+# nd-shop: the icon CHAIN. A decorator must be registered with nd-core (the
+# single owner of on_icon) rather than co-implementing on_icon, because a
+# co-implementor runs but its return replaces the owner's, and xy.last() cannot
+# read the previous one mid-dispatch (MODS.md §7, measured rc=-1 ran=0).
+# "#1" is the first registration, i.e. the table took it.
+grep -qF "nd-core: core_icon_decorate #1" "$log" \
+	|| { echo "FAIL: nd-shop did not register an icon decorator with nd-core" >&2; exit 1; }
+grep -qF "nd-shop: xy_install, commands shop/buy/sell" "$log" \
+	|| { echo "FAIL: nd-shop's xy_install did not run" >&2; exit 1; }
+# Every slice module must be present, and none may have failed to load: a
+# missing module in mods.load produces no error, just silence.
+for m in core other level vanilla; do
+	grep -qF "nd-$m: xy_install" "$log" \
+		|| { echo "FAIL: nd-$m did not install" >&2; exit 1; }
+done
+! grep -qF "failed to load" "$log" \
+	|| { echo "FAIL: a mods.load entry failed to load" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# MODS.md §5.0.4 out-of-tree build + path-aware loader. `make mods` above is
+# the build half; this is the load half.
+#
+# A sibling module repo (~/axil-nd-<mod>) is named in mods.load by its STEM,
+# e.g. `../axil-nd-probe/probe`, and nd_mods_load() must hand that to xy_load()
+# verbatim instead of reshaping it to `mods/<n>/<n>`. The .so for this
+# fixture is NOT in mods/, so nothing but the path branch can load it.
+#
+# The suite creates the fixture itself rather than depending on a checkout
+# left lying around, so this stays green on a fresh clone.
+probe=../axil-nd-testprobe
+probe_mod=$(grep -cE "^${probe}/" mods.load || true)
+if [ "$probe_mod" -ge 1 ]; then
+	[ -f "${probe}/testprobe.so" ] \
+		|| { echo "FAIL: make mods did not build the out-of-tree ${probe}" >&2; exit 1; }
+	grep -qF "testprobe module installed from '${probe}/testprobe'" "$log" \
+		|| { echo "FAIL: out-of-tree module was not loaded from its mods.load path" >&2; exit 1; }
+	# Proves the whole §5.0.2/§5.0.3 contract again from a SECOND, genuinely
+	# out-of-tree TU: a module built only against the installed papi headers
+	# through nd-mod.mk, with no access to the engine tree.
+	grep -qF "testprobe on_enter: HD_OBJ=resolved (ok) hd=tagged" "$log" \
+		|| { echo "FAIL: out-of-tree module could not resolve HD_OBJ / tag a handle" >&2; exit 1; }
+else
+	# Not in the list: assert the loader did NOT try to reshape it into
+	# mods/<n>/<n>, which is the regression this branch guards.
+	! grep -qF "testprobe module installed" "$log" \
+		|| { echo "FAIL: a module loaded that is not in mods.load" >&2; exit 1; }
+fi
+
 # Real verb round-trip: "say pong" over WS dispatches through cmds[] →
 # do_say → "You say: pong." (mask key = 00 00 00 00 → payload unchanged)
 # frame: FIN binary, len 9, "say pong\n"
@@ -153,6 +343,36 @@ grep -qa "You say:" "$tmpout" \
 hexsay=$(xxd -p "$tmpout" | tr -d '\n')
 echo "$hexsay" | grep -qiF "596f75207361793a20706f6e67202e0d0a" \
 	|| { echo "FAIL: 'You say: pong .' not CRLF-terminated on WS" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# MODS.md §6: nd-level's `Level` line -- the only user-visible output the whole
+# Phase 1 slice produces, and the assertion that needs a command to exist.
+#
+# The chain it proves, end to end on a real socket: the `status` command
+# dispatches through cmds[] -> do_status (src/entity.c:230) -> nd_evt_status
+# (src/nd_events.c:66) -> the module hook crosses the bus as nd-level's
+# XY_IMPL -> its handler reads its OWN corm table through a handle it got from
+# nd_open -> nd_printf formats -> nd_write puts it on the wire. Printing a
+# level number is only possible if that table read returned, so this one line
+# covers on_status, nd_open, the tagged-handle namespace, the
+# engine->bus->module->bus->client round trip, and nd_printf at once.
+#
+# "status\n" is 7 bytes, so the WS length byte is 0x87.
+printf '\x82\x87\x00\x00\x00\x00status\n' >&3
+tries=30
+while [ $tries -gt 0 ]; do
+	grep -qa "Level" "$tmpout" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+
+# "Level\t" in hex (4c 65 76 65 6c 09). The tab matters: the engine's own
+# do_status writes a space-separated dump, so a bare "Level" could be matched
+# by a substring of something else, while the label-plus-tab is what nd-level
+# actually emits.
+hexstatus=$(xxd -p "$tmpout" | tr -d '\n')
+echo "$hexstatus" | grep -qiF "4c6576656c09" \
+	|| { echo "FAIL: nd-level's on_status output not on the wire" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # NAWS routing: axil-nd's on_axil_tick must hand EVERY frame to
