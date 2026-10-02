@@ -20,8 +20,18 @@ int axil_tty_handle_tty(socket_t cfd, char *body);
 
 #include <arpa/telnet.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* Same sentinel as uapi/object.h / nd/xy-types.h -- not included directly:
+ * this file folds nd_xy.c/nd_events.c/nd_api.c in as one TU (see the bottom
+ * of this file), and uapi/object.h's eng_object_* typedefs conflict with
+ * those files' own XY_IMPL-based definitions of the same names. */
+#ifndef NOTHING
+#define NOTHING ((unsigned) -1)
+#endif
 
 #ifndef AXIL_PREFIX
 #define AXIL_PREFIX "/usr/local"
@@ -170,9 +180,36 @@ XY_IMPL(int, on_axil_connect, socket_t, fd)
   axil_tty_attach(fd);
 
   unsigned player_ref = nd_connect(fd);
-  if (!player_ref)
-    return 0; /* mcp_auth_fail already emitted */
+  /* nd_connect() -> auth() -> nd_player_login() returns TWO distinct failure
+   * sentinels, not one: plain 0 when there is no REMOTE_USER at all
+   * (mcp_auth_fail already emitted), and NOTHING when nd_player_login's own
+   * `if (axil_auth(fd, user)) return NOTHING;` (world.c) rejects the name --
+   * which getpwnam() does for any site-registered account that is not also
+   * a real OS/passwd-backed user (confirmed: an axil-auth-registered name
+   * resolves through the site's own login flow, not through getpwnam()).
+   * NOTHING is (unsigned) -1, nonzero, so the old `!player_ref` check alone
+   * let it through: this then called nd_io_attach(fd, NOTHING) below,
+   * clobbering the valid attach nd_player_login's own NEW-PLAYER branch had
+   * already made (world.c, nd_io_attach before the axil_auth check) --
+   * and any later command on this fd (do_say and siblings read
+   * eng_fd_player(fd) unconditionally) aborted in corm_get_copy on the
+   * bogus key. The raw-telnet counterpart (world.c:do_connect) already
+   * checks both sentinels; this WS path just didn't.
+   *
+   * Note this means axil_auth()'s rejection of an unknown-OS name does not
+   * actually block a returning site-registered player from being usable
+   * here: nd_player_login's own earlier nd_io_attach (for a brand-new
+   * player) or its RETURNING-player branch's nd_io_attach already set a
+   * working fd->player mapping before the rejection fires, and this check
+   * now simply stops clobbering it rather than making nd_player_login's
+   * rejection fully authoritative. Whether axil-nd should enforce that
+   * rejection all the way through (disconnecting an unknown-OS name
+   * outright) is a separate policy question, not addressed here -- this
+   * fix's scope is the crash only. */
+  if (!player_ref || player_ref == NOTHING)
+    return 0; /* mcp_auth_fail already emitted, or axil_auth() rejected it */
   nd_io_attach(fd, player_ref);
+
   nd_demo_announce(player_ref);
   nd_event_announce(player_ref, player_ref); /* P5: real location */
   /* The ioc dedup self-flushes on every differing write, so the ONLY
@@ -334,6 +371,25 @@ XY_IMPL(int, on_axil_exit, int, i)
 /* HTTP handlers                                                       */
 /* ------------------------------------------------------------------ */
 
+/* Compiled-in default (AXIL_HTDOCS, set above) plus a process-environment
+ * override, copied from axil-tty's serve_htdocs() (libaxil-tty.c). A
+ * distinct env var name (AXIL_ND_HTDOCS, not axil-tty's AXIL_HTDOCS) is
+ * required: both modules load into the same process when the site embeds
+ * this engine, and they serve two different asset trees. Deliberately not
+ * read from the per-connection request env (axil_env_get()), which is
+ * populated from client input. */
+static void
+nd_serve_htdocs(socket_t fd, const char *file)
+{
+  char htdocs[PATH_MAX - 1] = AXIL_HTDOCS;
+  char path[PATH_MAX];
+  const char *override = getenv("AXIL_ND_HTDOCS");
+  if (override && *override)
+    snprintf(htdocs, sizeof(htdocs), "%s", override);
+  snprintf(path, sizeof(path), "%s/%s", htdocs, file);
+  axil_sendfile(fd, path);
+}
+
 static int
 handle_nd(socket_t fd, char *body)
 {
@@ -352,7 +408,7 @@ handle_nd(socket_t fd, char *body)
      * called entirely. */
     return 0;
   }
-  axil_sendfile(fd, "htdocs/index.html");
+  nd_serve_htdocs(fd, "index.html");
   return 0;
 }
 

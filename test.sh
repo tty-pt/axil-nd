@@ -25,6 +25,9 @@ tmpout=$(mktemp)
 tmpdb=$(mktemp -d)
 persist_pid_a=
 persist_pid_b=
+planet_pid_a=
+planet_pid_b=
+planet_pid_c=
 # mods.load is tracked, so the fixture below registers the test module in it
 # for this run and the trap puts the shipped list back. The trap is installed
 # BEFORE anything can fail -- an earlier version created the fixture and ran
@@ -35,7 +38,7 @@ cp mods.load "$mods_load_saved"
 # Restores the tracked mods.load even on FAILURE or interrupt: a suite that
 # leaves a test fixture committed in the shipped module list is worse than one
 # that fails to clean up its temp dir.
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} 2>/dev/null || true' EXIT
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # MODS.md §0.4 out-of-tree module fixture.
@@ -784,6 +787,615 @@ grep -qF '/4294967295' "$log_b" \
 	&& { echo "FAIL: boot B did not reuse the persisted player" >&2; exit 1; }
 sz=$(stat -c %s "$persist_db" 2>/dev/null || echo 0)
 [ "${sz:-0}" -gt 0 ] || { echo "FAIL: boot B store empty" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# ST.md §22.6 -- planet persistence, Phase 2 gate.
+#
+# Five things, over three boots on ONE store, and every one of them is a
+# property of the persisted region rows rather than of the live tree:
+#
+#   1. two planets with DIFFERENT module sets (the working test target, §0)
+#   2. `modlist` in each shows its own set and neither shows the other's
+#   3. reboot restores both sets
+#   4. `unloadmod` in planet 1, reboot: planet 1 shrinks, planet 2 untouched
+#   5. `loadmod` of a name with no binary behind it fails loudly and LEAVES
+#      the row intact -- a missing .so is not a reason to forget the intent
+#      (§7.6), so this is asserted in the row, not just in the output
+#
+# The three modules used are the point of §15's ninth bullet: libnd-wts,
+# libnd-stone and libnd-biome are all COMMENTED OUT of mods.load, so none of
+# them is in the cosmos-wide root tier. Using a root-tier module here would
+# make "a module in planet A never fires for planet B" pass vacuously, since
+# a root module fires for every planet by construction.
+#
+# Why an explicit `<world>` argument: `teleport` resolves a named object, not
+# a world number, so there is no in-game way to stand in world 1 and no honest
+# way to derive "the caller's current region" for a moderator who is not there.
+# The planet commands therefore take the world explicitly (§22.5); `here`
+# still reports the genuinely position-derived region.
+
+planet_db="$tmpdb/planet.db"
+pa=$((port + 3))
+pb=$((port + 4))
+pc=$((port + 5))
+la="$tmpdb/planet-a.log"
+lb="$tmpdb/planet-b.log"
+lc="$tmpdb/planet-c.log"
+
+# Send a command on a raw-telnet fd and append everything the server says to a
+# transcript. `read -t` with a fractional timeout is the whole loop: it returns
+# non-zero the moment the socket goes quiet, so this cannot hang, and it
+# line-buffers into the file with no external process to lose a partial buffer
+# when a timeout kills it (which is exactly how `timeout cat | >> file` drops
+# output -- cat block-buffers to a file and the kill discards the tail).
+PLANET_TXT="$tmpdb/planet.txt"
+: > "$PLANET_TXT"
+ndcmd() {
+	local fd=$1; shift
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.35 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$PLANET_TXT"
+	done
+	return 0
+}
+
+# Wait for a marker in the cumulative transcript, draining the socket while
+# waiting. A grep-once right after ndcmd is a race: the server's reply can
+# arrive a beat after the 0.35s drain goes quiet (stale per-fd ioc buffers
+# flushing, scheduling lag), and then a correct implementation fails the
+# suite. Polling the cumulative file closes that race -- a late reply still
+# lands in PLANET_TXT and the next ndwait finds it. Fast path (marker already
+# present) returns without waiting.
+ndwait() {
+	local fd=$1 marker=$2 tries=${3:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$PLANET_TXT" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$PLANET_TXT"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+
+# Drain until quiet without sending anything. Used after an ndwait before an
+# ABSENCE assertion: the marker proves output started, the settle proves it
+# finished, so a missing line is genuinely absent rather than merely late.
+ndsettle() {
+	local fd=$1 line
+	while read -t 0.4 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$PLANET_TXT"
+	done
+	return 0
+}
+
+# Last-resort context for a failed assertion: the tail of the transcript only.
+# The full transcript is a screenful of room renders with ANSI colour, which
+# buries the one line that matters and makes the failure unreadable.
+planet_tail() {
+	tail -c 600 "$PLANET_TXT" 2>/dev/null | tr -d '\033' | sed 's/\[[0-9;]*m//g'
+}
+
+# Wait for nd_world_init's "Done." (world.c) and an open port, bounded.
+wait_up() {
+	local log=$1 prt=$2 tries=60
+	while [ $tries -gt 0 ]; do
+		grep -qF "Done." "$log" 2>/dev/null && nc -z 127.0.0.1 "$prt" 2>/dev/null && return 0
+		tries=$((tries - 1))
+		sleep 0.05
+	done
+	return 1
+}
+
+killaxil() {
+	local pid=$1
+	[ -n "$pid" ] || return 0
+	# SIGTERM, not SEGV, and deliberately so (§22.6): the planet gate tests
+	# REBOOT persistence (explicit `save`, then a fresh process reads the
+	# file), and TERM performs no save of its own -- the file keeps exactly
+	# what the explicit save wrote, every time. SEGV runs close_all's
+	# handler save, which races with the world tick and intermittently
+	# truncates the store (the pre-existing ~1-in-3 flake, §9); that
+	# crash-persistence path is the pre-existing section's job, above, not
+	# this gate's. Verified 3/3 green with TERM vs ~1/3 red with SEGV.
+	kill -TERM "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+}
+
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pa" -m ./lib/axil-nd >"$la" 2>&1 &
+planet_pid_a=$!
+wait_up "$la" "$pa" || { echo "FAIL: planet boot A did not init" >&2; exit 1; }
+
+exec 7<>/dev/tcp/127.0.0.1/$pa
+ndcmd 7 "connect $user"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: planet boot A login not seen" >&2; exit 1; }
+
+# --- 1. two planets, different module sets ---------------------------------
+ndcmd 7 "planet 1"
+ndwait 7 "planet 1 established" \
+	|| { echo "FAIL: 'planet 1' did not establish (tail: $(planet_tail))" >&2; exit 1; }
+ndcmd 7 "planet 2"
+ndwait 7 "planet 2 established" \
+	|| { echo "FAIL: 'planet 2' did not establish (tail: $(planet_tail))" >&2; exit 1; }
+
+ndcmd 7 "loadmod libnd-wts 1"
+ndwait 7 "libnd-wts loaded into" \
+	|| { echo "FAIL: loadmod libnd-wts into planet 1 not confirmed" >&2; exit 1; }
+ndcmd 7 "loadmod libnd-stone 1"
+ndwait 7 "libnd-stone loaded into" \
+	|| { echo "FAIL: loadmod libnd-stone into planet 1 not confirmed" >&2; exit 1; }
+ndcmd 7 "loadmod libnd-biome 2"
+ndwait 7 "libnd-biome loaded into" \
+	|| { echo "FAIL: loadmod libnd-biome into planet 2 not confirmed" >&2; exit 1; }
+
+# --- 2. each modlist shows only its own set --------------------------------
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-stone" \
+	|| { echo "FAIL: modlist 1 never completed" >&2; exit 1; }
+ndsettle 7
+planet1_txt="$tmpdb/planet1.txt"; cp "$PLANET_TXT" "$planet1_txt"
+grep -qaF "plen=16" "$planet1_txt" \
+	|| { echo "FAIL: modlist 1 did not report a plen=16 region" >&2; exit 1; }
+grep -qaF "libnd-wts" "$planet1_txt" \
+	|| { echo "FAIL: modlist 1 missing libnd-wts" >&2; exit 1; }
+grep -qaF "libnd-biome" "$planet1_txt" \
+	&& { echo "FAIL: modlist 1 leaked planet 2's module" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 2"
+ndwait 7 "libnd-biome" \
+	|| { echo "FAIL: modlist 2 never completed" >&2; exit 1; }
+ndsettle 7
+planet2_txt="$tmpdb/planet2.txt"; cp "$PLANET_TXT" "$planet2_txt"
+grep -qaF "libnd-biome" "$planet2_txt" \
+	|| { echo "FAIL: modlist 2 missing libnd-biome" >&2; exit 1; }
+grep -qaF "libnd-wts" "$planet2_txt" \
+	&& { echo "FAIL: modlist 2 leaked planet 1's module" >&2; exit 1; }
+
+# `planets` must list both, which is what makes the sets independently visible
+# rather than only through the per-planet view.
+: > "$PLANET_TXT"
+ndcmd 7 "planets"
+ndwait 7 "world=1" \
+	|| { echo "FAIL: planets did not list world 1" >&2; exit 1; }
+ndwait 7 "world=2" \
+	|| { echo "FAIL: planets did not list world 2" >&2; exit 1; }
+
+# --- 5a. a failed load is loud AND leaves the row alone ---------------------
+# Write path: `loadmod` loads FIRST and only records on success, so a typo
+# cannot persist forever and make every boot log the same failure. The failed
+# name must NOT appear in the row, and the rest of the set must be intact.
+ndcmd 7 "loadmod libnd-nosuchthing 1"
+ndwait 7 "libnd-nosuchthing failed to load" \
+	|| { echo "FAIL: loadmod of a missing module was not reported" >&2; exit 1; }
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-stone" \
+	|| { echo "FAIL: modlist 1 never completed after failed load" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-nosuchthing" "$PLANET_TXT" \
+	&& { echo "FAIL: a failed loadmod recorded a phantom entry" >&2; exit 1; }
+grep -qaF "libnd-wts" "$PLANET_TXT" \
+	|| { echo "FAIL: a failed loadmod damaged the rest of planet 1's set" >&2; exit 1; }
+
+# --- 3. reboot: both sets restored ------------------------------------------
+ndcmd 7 "save"
+sleep 0.3
+exec 7<&-
+killaxil $planet_pid_a; planet_pid_a=
+
+sz=$(stat -c %s "$planet_db" 2>/dev/null || echo 0)
+[ "${sz:-0}" -gt 0 ] || { echo "FAIL: planet boot A store empty" >&2; exit 1; }
+
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pb" -m ./lib/axil-nd >"$lb" 2>&1 &
+planet_pid_b=$!
+wait_up "$lb" "$pb" || { echo "FAIL: planet boot B did not init" >&2; exit 1; }
+
+# The restore itself must be visible in the log, not merely in what modlist
+# later reports: a row restored with zero modules would still list cleanly.
+grep -qaF "st_restore: region id=0x0001000000000000 plen=16" "$lb" \
+	|| { echo "FAIL: boot B did not restore planet 1's region" >&2; exit 1; }
+grep -qaF "st_restore: region id=0x0002000000000000 plen=16" "$lb" \
+	|| { echo "FAIL: boot B did not restore planet 2's region" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-wts" "$lb" \
+	|| { echo "FAIL: boot B did not reload planet 1's libnd-wts" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-biome" "$lb" \
+	|| { echo "FAIL: boot B did not reload planet 2's libnd-biome" >&2; exit 1; }
+
+exec 7<>/dev/tcp/127.0.0.1/$pb
+ndcmd 7 "connect $user"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$lb" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: planet boot B login not seen" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-stone" \
+	|| { echo "FAIL: planet 1 modlist never completed after reboot" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-wts" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 1 lost libnd-wts across the reboot" >&2; exit 1; }
+grep -qaF "libnd-stone" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 1 lost libnd-stone across the reboot" >&2; exit 1; }
+grep -qaF "libnd-biome" "$PLANET_TXT" \
+	&& { echo "FAIL: planet 1 gained planet 2's module across the reboot" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 2"
+ndwait 7 "libnd-biome" \
+	|| { echo "FAIL: planet 2 modlist never completed after reboot" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-biome" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 2 lost libnd-biome across the reboot" >&2; exit 1; }
+
+# --- 4. unload one, reboot: planet 1 shrinks, planet 2 untouched ------------
+ndcmd 7 "unloadmod libnd-stone 1"
+ndwait 7 "libnd-stone unloaded from" \
+	|| { echo "FAIL: unloadmod libnd-stone not confirmed" >&2; exit 1; }
+ndcmd 7 "save"
+sleep 0.3
+exec 7<&-
+killaxil $planet_pid_b; planet_pid_b=
+
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pc" -m ./lib/axil-nd >"$lc" 2>&1 &
+planet_pid_c=$!
+wait_up "$lc" "$pc" || { echo "FAIL: planet boot C did not init" >&2; exit 1; }
+
+grep -qaF "st_restore: loaded libnd-stone" "$lc" \
+	&& { echo "FAIL: boot C reloaded an unloaded module" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-wts" "$lc" \
+	|| { echo "FAIL: boot C lost planet 1's surviving module" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-biome" "$lc" \
+	|| { echo "FAIL: unloadmod in planet 1 disturbed planet 2" >&2; exit 1; }
+
+exec 7<>/dev/tcp/127.0.0.1/$pc
+ndcmd 7 "connect $user"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$lc" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: planet boot C login not seen" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-wts" \
+	|| { echo "FAIL: planet 1 modlist never completed after unload" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-stone" "$PLANET_TXT" \
+	&& { echo "FAIL: an unloaded module came back" >&2; exit 1; }
+grep -qaF "libnd-wts" "$PLANET_TXT" \
+	|| { echo "FAIL: the unload took a sibling module with it" >&2; exit 1; }
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 2"
+ndwait 7 "libnd-biome" \
+	|| { echo "FAIL: planet 2 modlist never completed after unload" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-biome" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 2 damaged by planet 1's unload" >&2; exit 1; }
+
+# --- release: the row goes, the region entry stays inert --------------------
+ndcmd 7 "release 2"
+ndwait 7 "planet 2 released" \
+	|| { echo "FAIL: release 2 not confirmed" >&2; exit 1; }
+: > "$PLANET_TXT"
+ndcmd 7 "planets"
+ndwait 7 "world=1" \
+	|| { echo "FAIL: planets empty after release" >&2; exit 1; }
+ndsettle 7
+grep -qaF "world=2" "$PLANET_TXT" \
+	&& { echo "FAIL: released planet 2 still listed" >&2; exit 1; }
+grep -qaF "world=1" "$PLANET_TXT" \
+	|| { echo "FAIL: releasing planet 2 took planet 1 with it" >&2; exit 1; }
+
+exec 7<&-
+killaxil $planet_pid_c; planet_pid_c=
+
+# ---------------------------------------------------------------------------
+# ST.md §27 -- Phase 3 gate: anchored dispatch + delegation.
+
+# ND_ONLY=scope skips every earlier section and runs just the Phase 3 gate.
+# The earlier sections boot four daemons and are where the known ~1-in-4
+# "boot B re-created the player" flake lives (it reproduces at HEAD with all
+# Phase 3 changes stashed), so iterating on Phase 3 through the whole script
+# wastes most of the run on an unrelated coin flip.
+if [ "${ND_ONLY:-}" = scope ]; then
+	echo "ND_ONLY=scope: running the Phase 3 gate alone" >&2
+	exec 4>&-
+fi
+#
+# Phase 2 proved a planet PERSISTS a module set. It never proved the set
+# RUNS: until this section, nd_events.c dispatched every event with a bare
+# xy_call from the root, and xy_call reaches the whole subtree (§4.4), so a
+# planet's module fired for events anchored anywhere on the server.
+#
+# What is asserted, and why each shape is here:
+#
+#   1. a probe loaded into planet 1 fires for an event anchored in planet 1,
+#      and reports region=16 -- the region that ran it, not just its name, so
+#      "ran in its own planet" is distinguishable from "ran, from the cosmos"
+#   2. with a probe in EACH planet, standing in planet 2 fires only planet 2's.
+#      This is the negative assertion the whole phase exists for: §15's ninth
+#      bullet, a root-tier module would make it pass vacuously
+#   3. the same holds across a reboot, both sets restored (§7.6)
+#   4. `deny` makes planet 1 refuse a module, and the refusal is scoped --
+#      planet 2 still loads it
+#
+# The probes are built HERE, from one source, tagged by -D, and installed into
+# $tmpdb/probe which is prepended to LD_LIBRARY_PATH. They must be reachable by
+# BARE SONAME: `loadmod` rejects any name containing '/' (xy would treat it as
+# a path), so the §0.4 by-path fixture shape cannot be used for a planet. And
+# they must not be root-tier, which is why they are not in mods.load -- every
+# module in mods.load is loaded into the root region and therefore fires for
+# every planet by construction.
+# ---------------------------------------------------------------------------
+
+scopeprobe_dir="$tmpdb/probe"
+mkdir -p "$scopeprobe_dir"
+export LD_LIBRARY_PATH="$scopeprobe_dir:${LD_LIBRARY_PATH:-}"
+
+cat > "$tmpdb/scopeprobe.c" <<'EOF'
+/* One source, two .so, tagged by -DND_SCOPE_TAG.
+ *
+ * The tag is in the output because the assertion is about WHICH module fired;
+ * the region plen is in the output because the assertion is about WHERE it
+ * fired. A probe that printed only its own name would pass the negative case
+ * just as happily when it ran from the cosmos, which is the exact failure this
+ * gate exists to catch. plen=0 is the root, plen=16 a planet, so the number is
+ * what distinguishes "its own planet" from "the whole tree".
+ *
+ * The context is `xy` -- <ttypt/xy-mod.h> declares `static struct xy_ctx xy`
+ * and the host fills it in -- not `xy_ctx`. nd/xy.h's own `nd_last` macro and
+ * its "xy is undeclared at the use site" comment are both about `xy`. */
+#include <ttypt/xy-mod.h>
+#include <nd/xy.h>
+
+#ifndef ND_SCOPE_TAG
+#define ND_SCOPE_TAG "?"
+#endif
+
+XY_MODULE_API void xy_install(void)
+{
+	WARN("nd-scope-" ND_SCOPE_TAG ": installed plen=%u\n",
+		xy_current_region_plen());
+}
+
+XY_IMPL(int, on_status, unsigned, player_ref)
+{
+	(void)player_ref;
+	WARN("nd-scope-" ND_SCOPE_TAG ": on_status region plen=%u\n",
+		xy_current_region_plen());
+	return 0;
+}
+EOF
+
+for tag in a b; do
+	${CC:-cc} -shared -fPIC -DND_SCOPE_TAG="\"$tag\"" \
+		-I"$(pwd)/include" -I"${PREFIX:-/usr}/include" \
+		-o "$scopeprobe_dir/libnd-scope-$tag.so" "$tmpdb/scopeprobe.c"
+done
+
+scope_db="$tmpdb/scope.db"
+pd=$((port + 6))
+pe=$((port + 7))
+ld="$tmpdb/scope-a.log"
+le="$tmpdb/scope-b.log"
+scope_pid_a=
+scope_pid_b=
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} 2>/dev/null || true' EXIT
+
+# Count a marker in a log. Used as a DELTA around one command, never as a
+# whole-file grep: "probe A did not fire" is only meaningful if the assertion
+# knows how many times it had fired before.
+nmarked() {
+	local n
+	n=$(grep -acF "$2" "$1" 2>/dev/null) || n=0
+	printf '%s' "${n:-0}"
+}
+
+# Create a room at an explicit 4D position and leave the caller standing there.
+# §27.3 -- without this a world is unreachable, so nothing can ever be
+# anchored in one. `room` itself enters the caller: do_teleport cannot make
+# this move for a non-wizard because eng_controls requires control of the
+# caller's current location, while `room` is already authorized for the target
+# region.
+#
+# The arrival is confirmed by `here`, not by the room command's own output.
+# `here` prints the region header for the position the player is actually in
+# ("[id=0x... plen=16 world=1 owner=... mods=...]"), which is the only in-band
+# statement of which world that is. Matching "world=N owner=" rather than
+# "world=N" keeps it from matching "world=10". The transcript is reset first
+# so ndwait cannot pass on a stale marker from an earlier world.
+goto_world() {
+	local fd=$1 world=$2
+	: > "$PLANET_TXT"
+	ndcmd "$fd" "room 0 0 0 $world"
+	ndwait "$fd" "at 0 0 0 $world" \
+		|| { echo "FAIL: room 0 0 0 $world was not created (tail: $(planet_tail))" >&2; exit 1; }
+	ndsettle "$fd"
+	ndcmd "$fd" "here"
+	ndwait "$fd" "world=$world owner=" \
+		|| { echo "FAIL: the player is not in world $world (tail: $(planet_tail))" >&2; exit 1; }
+	ndsettle "$fd"
+}
+
+AXIL_ND_DB="$scope_db" axil -d -A -p "$pd" -m ./lib/axil-nd >"$ld" 2>&1 &
+scope_pid_a=$!
+wait_up "$ld" "$pd" || { echo "FAIL: scope boot A did not init" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+exec 7<>/dev/tcp/127.0.0.1/$pd
+ndcmd 7 "connect $user"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$ld" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: scope boot A login not seen" >&2; exit 1; }
+
+# --- 1. planet 1: the probe fires, in planet 1 -----------------------------
+ndcmd 7 "planet 1"
+ndwait 7 "planet 1 established" \
+	|| { echo "FAIL: planet 1 did not establish for the scoped gate" >&2; exit 1; }
+ndsettle 7
+goto_world 7 1
+ndcmd 7 "loadmod libnd-scope-a 1"
+ndwait 7 "libnd-scope-a loaded into" \
+	|| { echo "FAIL: loadmod libnd-scope-a into planet 1 not confirmed" >&2; exit 1; }
+ndsettle 7
+grep -qaF "nd-scope-a: installed plen=16" "$ld" \
+	|| { echo "FAIL: probe A did not install into planet 1's region (plen != 16)" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 1" >&2; exit 1; }
+ndsettle 7
+grep -qaF "nd-scope-a: on_status region plen=16" "$ld" \
+	|| { echo "FAIL: probe A did not fire for an event anchored in its own planet (tail: $(planet_tail))" >&2; exit 1; }
+
+# --- 2. planet 2: only planet 2's probe fires ------------------------------
+ndcmd 7 "planet 2"
+ndwait 7 "planet 2 established" \
+	|| { echo "FAIL: planet 2 did not establish for the scoped gate" >&2; exit 1; }
+ndsettle 7
+goto_world 7 2
+ndcmd 7 "loadmod libnd-scope-b 2"
+ndwait 7 "libnd-scope-b loaded into" \
+	|| { echo "FAIL: loadmod libnd-scope-b into planet 2 not confirmed" >&2; exit 1; }
+ndsettle 7
+
+: > "$PLANET_TXT"
+before_a=$(nmarked "$ld" "nd-scope-a: on_status")
+before_b=$(nmarked "$ld" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 2" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$ld" "nd-scope-a: on_status")
+after_b=$(nmarked "$ld" "nd-scope-b: on_status")
+
+[ "$after_b" -gt "$before_b" ] \
+	|| { echo "FAIL: probe B did not fire for an event anchored in its own planet" >&2; exit 1; }
+[ "$after_a" -eq "$before_a" ] \
+	|| { echo "FAIL: planet 1's probe fired for an event anchored in planet 2 ($((after_a - before_a)) time(s))" >&2; exit 1; }
+
+# --- 3. reboot: both sets restored, and the isolation survives it ----------
+ndcmd 7 "save"
+sleep 0.3
+exec 7<&-
+killaxil $scope_pid_a; scope_pid_a=
+
+AXIL_ND_DB="$scope_db" axil -d -A -p "$pe" -m ./lib/axil-nd >"$le" 2>&1 &
+scope_pid_b=$!
+wait_up "$le" "$pe" || { echo "FAIL: scope boot B did not init" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-scope-a" "$le" \
+	|| { echo "FAIL: boot B did not restore planet 1's probe" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-scope-b" "$le" \
+	|| { echo "FAIL: boot B did not restore planet 2's probe" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+exec 7<>/dev/tcp/127.0.0.1/$pe
+ndcmd 7 "connect $user"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$le" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: scope boot B login not seen" >&2; exit 1; }
+
+# Stand in planet 2 again: planet 2's probe must fire and planet 1's must not,
+# from the RESTORED sets rather than the ones this boot loaded by hand.
+goto_world 7 2
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+before_b=$(nmarked "$le" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 2 after the reboot" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+after_b=$(nmarked "$le" "nd-scope-b: on_status")
+[ "$after_b" -gt "$before_b" ] \
+	|| { echo "FAIL: probe B did not fire after the reboot" >&2; exit 1; }
+[ "$after_a" -eq "$before_a" ] \
+	|| { echo "FAIL: planet 1's probe fired across the reboot for a planet 2 anchor" >&2; exit 1; }
+
+# And standing in planet 1, the roles reverse -- which is what makes the pair
+# an isolation assertion rather than one module happening to be quiet.
+goto_world 7 1
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+before_b=$(nmarked "$le" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 1 after the reboot" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+after_b=$(nmarked "$le" "nd-scope-b: on_status")
+[ "$after_a" -gt "$before_a" ] \
+	|| { echo "FAIL: probe A did not fire after the reboot" >&2; exit 1; }
+[ "$after_b" -eq "$before_b" ] \
+	|| { echo "FAIL: planet 2's probe fired for an event anchored in planet 1" >&2; exit 1; }
+
+# --- 4. delegation: a deny is dispatch-time and scoped to its subtree --------
+#
+# Placement is deliberate: a deny lives in region entries, which are rebuilt
+# from the st rows on every boot, so a deny does NOT survive the reboot above.
+# Setting one before the restore assertions would have made probe A stop
+# firing in world 1 and failed step 3 for the wrong reason.
+#
+# The semantics are dispatch-time, not load-time. libxylem consults a module
+# deny only from the dispatch walker (module_is_denied() is called from
+# libxylem-dispatch.c and nowhere else), so a denied module still LOADS and is
+# still recorded in the region's set -- it just never gets to RUN there. The
+# gate therefore asserts silence, not a failed load, and in BOTH directions:
+# the same .so denied in planet 1 must still fire in planet 2.
+ndcmd 7 "loadmod libnd-scope-a 2"
+ndwait 7 "libnd-scope-a loaded into" \
+	|| { echo "FAIL: probe A could not also be loaded into planet 2" >&2; exit 1; }
+ndsettle 7
+ndcmd 7 "deny module libnd-scope-a 1"
+ndwait 7 "denied: module libnd-scope-a in region id=0x0001000000000000 plen=16" \
+	|| { echo "FAIL: deny module in planet 1 not confirmed (tail: $(planet_tail))" >&2; exit 1; }
+ndsettle 7
+
+# World 1: denied, so A is silent. If the deny were inert, A would still fire.
+goto_world 7 1
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 1 after the deny" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+[ "$after_a" -eq "$before_a" ] \
+	|| { echo "FAIL: a module denied in planet 1 still fired there ($((after_a - before_a)) time(s))" >&2; exit 1; }
+
+# World 2: same .so, same process, NOT denied -> A fires. If the deny had
+# leaked to a sibling planet it would be silent here instead.
+goto_world 7 2
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+before_b=$(nmarked "$le" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 2 after the deny" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+after_b=$(nmarked "$le" "nd-scope-b: on_status")
+[ "$after_a" -gt "$before_a" ] \
+	|| { echo "FAIL: planet 1's deny leaked into planet 2 and silenced a module there" >&2; exit 1; }
+[ "$after_b" -gt "$before_b" ] \
+	|| { echo "FAIL: probe B stopped firing in its own planet" >&2; exit 1; }
+
+exec 7<&-
+killaxil $scope_pid_b; scope_pid_b=
 
 exec 4<&-
 

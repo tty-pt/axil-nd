@@ -91,6 +91,8 @@ void do_say(int fd, int argc, char *argv[]);
 void do_select(int fd, int argc, char *argv[]);
 void do_status(int fd, int argc, char *argv[]);
 void do_teleport(int fd, int argc, char *argv[]);
+void do_room(int fd, int argc, char *argv[]);
+void do_deny(int fd, int argc, char *argv[]);
 void do_toad(int fd, int argc, char *argv[]);
 void do_view(int fd, int argc, char *argv[]);
 void do_wall(int fd, int argc, char *argv[]);
@@ -458,7 +460,18 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	nd_io_init();
 	signal(SIGSEGV, close_all);
 
-	owner_hd = corm_open(db, "st", st_type, CM_U32, 0xFFFF, 0);
+	/* The region table is record-aware with a string key (ST.md §22.1): one
+	 * row per region holding owner + width + module set. The record layout
+	 * must be registered before the open, and both halves of the open --
+	 * vtype and CM_RECORD(id) -- must name the same registration, or the
+	 * open refuses with CM_MISS and every region call below degrades to a
+	 * miss instead of indexing corm_heads[CM_MISS]. */
+	uint32_t st_rec = st_rec_register();
+	owner_hd = st_rec == CM_MISS ? CM_MISS :
+		corm_open(db, "st", CM_STR, corm_record_type_id(st_rec),
+			0xFFFF, CM_RECORD(st_rec));
+	if (owner_hd == CM_MISS)
+		WARN("nd_world_init: region table unavailable, planets disabled\n");
 	sl_hd = corm_open(db, "sl", st_type, CM_PTR, 0xFFFF, 0);
 
 	vtf_hd = corm_open(NULL, "vtf", CM_U32, vtf_type, 0xFF, CM_AINDEX);
@@ -611,8 +624,17 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 		void_ref = 16;
 		corm_put(biome_hd, &void_ref, biome_map);
 
-		unsigned owner = 1;
-		sthd_put(owner_hd, 0, 0, &owner);
+		/* The cosmos row (0, 0), owned by root. This is what makes the first
+		 * player the super-moderator: `planet` demands cosmos ownership
+		 * for a new claim, and st_high_shift answers 64 for its owner.
+		 * The old seed wrote a binary st_key {0,0} -- shift 0, i.e. plen
+		 * 64, a single cell -- which was never the cosmos at all (§22). */
+		struct st_rec cosmos;
+
+		memset(&cosmos, 0, sizeof(cosmos));
+		cosmos.owner = 1;
+		cosmos.plen = ST_PLEN_ROOT;
+		st_row_put(0, ST_PLEN_ROOT, &cosmos);
 	}
 
 	objects_init();
@@ -620,7 +642,6 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	if (existed)
 		mod_load_all();
 	else {
-		st_put(1, 0, 64);
 		eng_st_run(-1, "mod_init");
 	}
 
@@ -755,8 +776,40 @@ struct cmd_slot cmds[] = {
 		.name = "streload",
 		.cb = &do_streload,
 	}, {
+		.name = "planet",
+		.cb = &do_planet,
+	}, {
+		.name = "planets",
+		.cb = &do_planets,
+	}, {
+		.name = "here",
+		.cb = &do_here,
+	}, {
+		.name = "loadmod",
+		.cb = &do_loadmod,
+	}, {
+		.name = "unloadmod",
+		.cb = &do_unloadmod,
+	}, {
+		.name = "modlist",
+		.cb = &do_modlist,
+	}, {
+		.name = "release",
+		.cb = &do_release,
+	}, {
 		.name = "status",
 		.cb = &do_status,
+	}, {
+		/* ST.md §27.3: the enabling primitive -- create a room at an explicit
+		 * 4D position, because every carved room otherwise inherits pos[3]
+		 * from its parent and no non-zero world is reachable in-game. */
+		.name = "room",
+		.cb = &do_room,
+	}, {
+		/* ST.md §4.x delegation: dispatch-time refusal, scoped to the
+		 * region's subtree, and permanent for the process. */
+		.name = "deny",
+		.cb = &do_deny,
 	}, {
 		.name = NULL,
 		.cb = NULL,

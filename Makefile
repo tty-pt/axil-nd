@@ -84,7 +84,14 @@ check-lib:
 .PHONY: check-lib
 
 demo: mods/demo/demo.so
-mods/demo/demo.so: mods/demo/demo.c include/nd/xy.h
+# The installed xylem headers are prerequisites, not just an -I path. demo.so
+# embeds XY_CTX_ABI_DESC at compile time, so bumping XY_CTX_ABI_VER in
+# $(PREFIX)/include/ttypt/xy.h invalidates nothing else -- `make` sees only
+# demo.c and include/nd/xy.h, both older, and reports "Nothing to be done"
+# while leaving a binary from the previous ABI in place. Listing them here is
+# what turns an ABI bump into an actual rebuild.
+XY_HDRS := /usr/include/ttypt/xy.h /usr/include/ttypt/xy-mod.h
+mods/demo/demo.so: mods/demo/demo.c include/nd/xy.h $(XY_HDRS)
 	cd mods && cc -shared -fPIC -I../include -I/usr/include -o demo/demo.so demo/demo.c
 .PHONY: demo
 
@@ -103,7 +110,7 @@ mods: $(foreach m,${inmods},mods/${m}/${m}.so) \
 	$(foreach m,${slashmods},${m}.$(SO))
 
 # in-tree module: a bare name, so mods/<n>/<n>.so
-mods/%.so: mods/%/%.c include/nd/xy.h
+mods/%.so: mods/%/%.c include/nd/xy.h $(XY_HDRS)
 	cd mods/$* && $(CC) -shared -fPIC -I../../include -I/usr/include \
 		-o $*.so $*.c
 

@@ -28,9 +28,13 @@ typedef void nd_cb_t(int fd, int argc, char *argv[]);
 /* engine providers (engine TUs) */
 int eng_map_has(unsigned thing);
 morton_t eng_map_mwhere(unsigned thing);
-void eng_map_where(coord_t *p, unsigned thing);
+/* pos_t, not a bare pointer: the engine defines this as eng_map_where(pos_t p,
+ * ...) (map.c, spacetime.c:36). Same type after decay, but declaring one as a
+ * pointer and the other as an array is a -Warray-parameter mismatch, and this
+ * TU is #included into libaxil-nd.c alongside those declarations. */
+void eng_map_where(pos_t p, unsigned thing);
 int eng_map_delete(unsigned what);
-unsigned eng_map_get(coord_t *p);
+unsigned eng_map_get(pos_t p);
 void eng_st_teleport(unsigned player_ref, uint64_t pos);
 void eng_st_run(unsigned player_ref, char *symbol);
 char *plural(char *singular);
