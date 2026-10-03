@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -e
 
+# Prefer the in-tree axil over any installed copy, so the suite tests the code in
+# this checkout. The module libs resolve by soname through the loader and the
+# `axil` binary resolves through PATH, so without this the whole suite silently
+# ran against whatever `sudo make install` last left in /usr -- and reported
+# "axil-nd ok" for an engine whose axil had never been compiled here. Measured:
+# with only the module rebuilt, an in-tree libaxil fix (S5.4) showed no effect at
+# all until these paths were prepended. Prepended, not replaced, so a system
+# library still fills any gap the tree does not provide.
+axil_bin="$(cd "$(dirname "$0")/../axil/bin" 2>/dev/null && pwd)"
+axil_lib="$(cd "$(dirname "$0")/../axil/lib" 2>/dev/null && pwd)"
+axil_tty_lib="$(cd "$(dirname "$0")/../axil-tty/lib" 2>/dev/null && pwd)"
+[ -n "$axil_bin" ] && PATH="$axil_bin:$PATH"
+in_tree_lib="$PWD/lib${axil_lib:+:$axil_lib}${axil_tty_lib:+:$axil_tty_lib}"
+
 case "$(uname -s)" in
-	Darwin) export DYLD_LIBRARY_PATH=./lib:${DYLD_LIBRARY_PATH} ;;
-	*)      export LD_LIBRARY_PATH=./lib:${LD_LIBRARY_PATH} ;;
+	Darwin) export DYLD_LIBRARY_PATH="$in_tree_lib:${DYLD_LIBRARY_PATH}" ;;
+	*)      export LD_LIBRARY_PATH="$in_tree_lib:${LD_LIBRARY_PATH}" ;;
 esac
+export PATH
 
 # man/ is generated from the tracked man-src/*.10 (see Makefile). Always refresh
 # rather than only when absent: a stale or partial man/ would otherwise let the
@@ -19,6 +34,11 @@ make --no-print-directory man
 # because only the modules were rebuilt. The engine has to be part of the
 # suite's inputs.
 make --no-print-directory
+# Same reasoning one level down: build the axil and axil-tty this suite is about
+# to boot, so a fix in either cannot go untested because someone forgot to
+# compile it.
+make --no-print-directory -C ../axil
+make --no-print-directory -C ../axil-tty
 
 port=$((20000 + RANDOM % 8000))
 tmpout=$(mktemp)
@@ -526,6 +546,19 @@ nd_404_resp=$(http_req "/nd/nonexistent_asset.xyz")
 echo "$nd_404_resp" | grep -qF "404 Not Found" \
 	|| { echo "FAIL: GET /nd/nonexistent_asset.xyz did not 404" >&2; exit 1; }
 
+# S5.5 regression: a request body may legally contain 0xFF. The telnet IAC scan
+# must never run on a chunk that opens with an HTTP request line -- it used to
+# read a body byte as negotiation, slide the request head off the front of the
+# input, and answer the POST with the raw-telnet banner instead of an HTTP
+# status. Title bytes mirror the site's song-add-invalid-utf8 e2e case.
+s55_body=$(printf '%b' '------boundary\r\nContent-Disposition: form-data; name="title"\r\n\r\nA\xffbc\xc0ef\xff\r\n------boundary--\r\n')
+s55_len=$(printf '%s' "$s55_body" | wc -c)
+s55_resp=$(printf 'POST /nd/nonexistent_s55 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: multipart/form-data; boundary=----boundary\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$port" "$s55_len" "$s55_body" | nc -w2 127.0.0.1 "$port" 2>/dev/null)
+echo "$s55_resp" | grep -qF "HTTP/1.1" \
+	|| { echo "FAIL: S5.5: POST with 0xFF body not answered as HTTP" >&2; exit 1; }
+echo "$s55_resp" | grep -qa "Connect with:" \
+	&& { echo "FAIL: S5.5: raw-telnet banner leaked into an HTTP response" >&2; exit 1; }
+
 nd_trav_resp=$(http_req "/nd/../Makefile")
 echo "$nd_trav_resp" | grep -qF "404 Not Found" \
 	|| echo "$nd_trav_resp" | grep -qF "400" \
@@ -701,6 +734,157 @@ grep -qa "You say:" "$tmpout" \
 
 grep -qa "ND_RAW_OK" "$tmpout" \
 	|| { echo "FAIL: raw live-PTY shell echo ND_RAW_OK not seen" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# S5.4 regression: a PTY connection that is never authenticated must be cleaned up.
+#
+# This needs its own server, booted WITHOUT -A. The suite's main axil runs with -A
+# (AXIL_AUTOAUTH), which authenticates every WebSocket upgrade through
+# axil_connect(), and that hides the bug completely: with the connection
+# authenticated, both gates happen to let the close through. The site does not
+# pass -A (see start.sh), which is why it was the thing that broke.
+#
+# Without -A, axil_connect() returns 0, so libaxil.c does not set DF_CONNECTED
+# either, and DF_AUTHENTICATED is never set by anything else. axil_disconnect()
+# was gated on DF_CONNECTED in axil_close() and then on DF_AUTHENTICATED inside
+# axil_disconnect(), so neither gate let this close through: the PTY, the child
+# shell, and the mux_state entry keyed by this fd all outlived the connection.
+# The kernel then reuses the fd for the next connection -- an ordinary HTTP
+# request -- and axil_tty_input() finds the leaked shell, writes the request into
+# the PTY and returns -1 so axil never dispatches it. The client gets its own
+# request echoed back through the line discipline (each CRLF becoming CRLFCRLF),
+# a terminal reset sequence, and the shell's reaction to being fed a request.
+s54_kids() {
+	s54_pids=$(pgrep -P "$s54_pid" 2>/dev/null)
+	s54_n=0
+	for s54_p in $s54_pids; do
+		s54_st=$(ps -o stat= -p "$s54_p" 2>/dev/null)
+		case "$s54_st" in
+		Z* | "") ;;                    # zombie, or already gone
+		*) s54_n=$((s54_n + 1)) ;;
+		esac
+	done
+	echo "$s54_n"
+}
+
+s54_port=$((port + 5))
+s54_log="$tmpdb/s54.log"
+s54_out="$tmpdb/s54.out"
+
+# No -A here, and a private store so this boot cannot collide with the fixtures
+# the rest of the suite shares.
+AXIL_ND_DB="$tmpdb/s54.db" axil -d -p "$s54_port" -m ./lib/axil-nd >"$s54_log" 2>&1 &
+s54_pid=$!
+# Never leak this server: every FAIL below exits, and without this the port
+# stays held by an orphan that breaks later runs.
+trap 'kill -9 "$s54_pid" 2>/dev/null' EXIT
+s54_settle=50
+while [ $s54_settle -gt 0 ]; do
+	grep -qF "Done." "$s54_log" 2>/dev/null && nc -z 127.0.0.1 "$s54_port" 2>/dev/null && break
+	s54_settle=$((s54_settle - 1))
+	sleep 0.05
+done
+[ $s54_settle -eq 0 ] && { echo "FAIL: S5.4 no-autoauth axil did not become ready" >&2; kill -9 "$s54_pid" 2>/dev/null; exit 1; }
+
+s54_key=$(head -c 16 /dev/urandom | base64 | tr -d '
+')
+s54_accept_expect=$(printf '%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11' "$s54_key" \
+	| openssl dgst -sha1 -binary | base64)
+
+exec 8<>/dev/tcp/127.0.0.1/$s54_port
+# No Cookie, so nothing authenticates this connection.
+printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n' \
+	"$s54_port" "$s54_key" >&8
+
+s54_resp=""
+while IFS= read -r -t3 line <&8; do
+	line="${line%$'\r'}"
+	s54_resp="$s54_resp
+$line"
+	[ -z "$line" ] && break
+done
+echo "$s54_resp" | grep -qF "101" \
+	|| { echo "FAIL: S5.4 no 101 for unauthenticated GET /tty upgrade" >&2; exit 1; }
+s54_got=$(echo "$s54_resp" | grep -i "sec-websocket-accept" | sed 's/.*: *//' | tr -d '\r\n ')
+[ "$s54_got" = "$s54_accept_expect" ] \
+	|| { echo "FAIL: S5.4 accept mismatch: got '$s54_got' want '$s54_accept_expect'" >&2; exit 1; }
+
+: >"$s54_out"
+stdbuf -i0 -o0 cat <&8 >"$s54_out" &
+s54_cat_pid=$!
+sleep 0.2
+
+# NAWS is what auto-spawns the login shell on this route, so the PTY and its child
+# exist without ever sending a command.
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&8
+sleep 0.3
+printf '\x82\x93\x00\x00\x00\x00echo ND_S54_OK_123\n' >&8
+
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa "ND_S54_OK" "$s54_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "ND_S54_OK" "$s54_out" \
+	|| { echo "FAIL: S5.4: no shell on the unauthenticated terminal, test proves nothing" >&2; exit 1; }
+
+s54_before=$(s54_kids)
+[ "$s54_before" -ge 1 ] \
+	|| { echo "FAIL: S5.4: shell reported ND_S54_OK but is not a live child of axil" >&2; exit 1; }
+
+kill -9 $s54_cat_pid 2>/dev/null || true
+wait $s54_cat_pid 2>/dev/null || true
+exec 8<&-
+
+# The shell is a direct child of the axil process, so its survival is the leak
+# itself and is worth asserting directly rather than inferred from a response.
+#
+# Count only *live* children. axil never waitpid()s a PTY child (the single
+# waitpid() in the tree covers command exec, not the shell), so a shell that was
+# correctly killed lingers as a zombie and still shows up in pgrep -P. A zombie
+# holds no PTY master and no descriptors -- it cannot read a later connection's
+# bytes -- so it is not the condition under test.
+tries=40
+while [ $tries -gt 0 ]; do
+	[ "$(s54_kids)" -lt "$s54_before" ] && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+s54_after=$(s54_kids)
+[ "$s54_after" -lt "$s54_before" ] || {
+	echo "FAIL: S5.4: PTY shell outlived its unauthenticated connection ($s54_before -> $s54_after live children); its fd-keyed state would attach to a later request" >&2
+	exit 1
+}
+
+# And the symptom: plain HTTP requests landing on the recycled fd must come back
+# as real HTTP responses.
+s54_reqs=20
+while [ $s54_reqs -gt 0 ]; do
+	s54_http=$(printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n' "$s54_port" \
+		| nc -w2 127.0.0.1 "$s54_port" 2>/dev/null)
+	echo "$s54_http" | grep -qF "200 OK" || {
+		echo "FAIL: S5.4: request on a recycled fd is not a 200" >&2
+		printf '%s\n' "$s54_http" | head -5 >&2
+		exit 1
+	}
+	echo "$s54_http" | grep -qa '?2004' && {
+		echo "FAIL: S5.4: terminal reset leaked into an HTTP response" >&2
+		exit 1
+	}
+	echo "$s54_http" | grep -qa 'command not found' && {
+		echo "FAIL: S5.4: leaked shell executed the HTTP request" >&2
+		exit 1
+	}
+	s54_reqs=$((s54_reqs - 1))
+done
+
+kill -9 $s54_pid 2>/dev/null || true
+wait $s54_pid 2>/dev/null || true
+
+if [ -n "${AXIL_S54_VERBOSE:-}" ]; then
+	echo "S5.4: no-autoauth axil live children $s54_before -> $s54_after, 20 recycled-fd requests clean" >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Persistence regression: the store must survive an orderly shutdown and a

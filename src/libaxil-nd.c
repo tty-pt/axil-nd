@@ -259,6 +259,16 @@ XY_IMPL(int, on_axil_parse,
     return nread;
   }
 
+  /* HTTP requests pass through untouched -- no telnet scan, no slide, no RAW
+   * classification. Everything below assumes a terminal byte stream, but a
+   * request body may legally contain 0xFF: axil_tty_input() would read it as
+   * IAC, the slide would delete the request head sitting in front of it, and
+   * the RAW check would answer a POST with the telnet banner (SECURITY.md
+   * S5.5). A raw stream never opens with "METHOD SP", and WebSocket payloads
+   * are handled above, so this changes nothing for either of them. */
+  if (is_http_method((const char *)input))
+    return nread;
+
   /* axil-tty gets first refusal on the raw path too. Two reasons: strip_telnet()
    * below discards the NAWS payload, and a raw telnet guest negotiates its
    * window size on connect, before any `sh` — same as a WS client. It also
