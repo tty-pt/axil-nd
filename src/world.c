@@ -930,8 +930,28 @@ nd_player_login(int fd, char *user)
 		nd_io_attach(fd, player_ref);
 	}
 
+	/* axil_auth() is called for what it DOES, not for what it returns: it
+	 * records the passwd entry and flips DF_AUTHENTICATED, which cmd_proc's
+	 * auth gate requires before any command runs. Its return is ADVISORY and
+	 * means "this name has no passwd entry", not "not authenticated" --
+	 * axil.h: "Returns 0 on success, 1 if the name is unknown to the system
+	 * (the connection is still marked authenticated)", and "The 0/1 return is
+	 * ADVISORY ... A caller that wants to reject an unknown name must check
+	 * for itself".
+	 *
+	 * Reading that 1 as a rejection silently degraded every site login: every
+	 * axil-auth-registered account has no passwd entry -- getpwnam() fails
+	 * for all of them -- so the login bailed out here, BEFORE
+	 * mcp_auth_success/mcp_actions/do_view. A site user got a working
+	 * connection but never received AUTH_SUCCESS, their room view, or their
+	 * action table at login. An account with a session cookie is
+	 * authenticated -- auth() only gets here with REMOTE_USER set, which
+	 * axil's platform auth populates from that session or from -A -- and the
+	 * privilege fallback for a name with no passwd entry runs as the server's
+	 * own identity, never uid 0 (axil.h), so completing the login grants
+	 * nothing extra. Keep it visible, though: the name is not a system user. */
 	if (axil_auth(fd, user))
-		return NOTHING;
+		WARN("'%s': no passwd entry; authenticated by session only\n", user);
 
 	mcp_auth_success(player_ref);
 	mcp_actions(player_ref);

@@ -206,8 +206,26 @@ XY_IMPL(int, on_axil_connect, socket_t, fd)
    * rejection all the way through (disconnecting an unknown-OS name
    * outright) is a separate policy question, not addressed here -- this
    * fix's scope is the crash only. */
-  if (!player_ref || player_ref == NOTHING)
-    return 0; /* mcp_auth_fail already emitted, or axil_auth() rejected it */
+  if (!player_ref || player_ref == NOTHING) {
+    /* A decline is invisible to axil's upgrade path -- axil_ws_upgrade takes
+     * no teardown action when no hook claims the connection -- so without
+     * this the descriptor and its TCP socket stay open indefinitely (the
+     * pre-fix behaviour: `ws_init` in the log, then silence, no disconnect
+     * ever). The client that probed it held a live, silent connection for
+     * its whole timeout, one fd per probe. Close it: the close frame first
+     * (a spec-correct peer then terminates its own side), then the full
+     * teardown so the socket does not linger for peers that ignore the frame.
+     * axil_close() inside this hook is safe: it runs the disconnect hooks
+     * (nd's own nd_disconnect tolerates a missing entry, axil-tty's tolerates
+     * a missing pty since S5.4) and the post-hook `d->flags |= DF_CONNECTED`
+     * lands on a zeroed slot that descr_new() memsets on reuse.
+     *
+     * The reachable case is an unauthenticated /nd upgrade: no REMOTE_USER, so
+     * auth() already sent mcp_auth_fail and returned 0. */
+    axil_ws_close(fd);
+    axil_close(fd);
+    return 0;
+  }
   nd_io_attach(fd, player_ref);
 
   nd_demo_announce(player_ref);
