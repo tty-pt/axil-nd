@@ -44,7 +44,7 @@ void eng_map_where(pos_t p, unsigned thing);
 
 #define ROOM_COST 80
 
-unsigned owner_hd = -1, sl_hd = -1;
+unsigned owner_hd = -1;
 
 typedef void op_a_t(unsigned player_ref, enum exit e);
 typedef int op_b_t(unsigned player_ref, struct cmd_dir cd);
@@ -57,7 +57,6 @@ typedef struct {
 } op_t;
 unsigned g_player_ref;
 OBJ *g_player;
-extern struct nd nd;
 static unsigned *biome_map;
 
 enum exit e_map[] = {
@@ -1108,21 +1107,6 @@ oecho(char *format, ...) {
 	va_end(args);
 }
 
-// st plugin dir follows the world db location (world_db(): AXIL_ND_DB
-// override else STD_DB) so the engine boots in-tree.
-static void
-st_dir(char *buf, size_t len)
-{
-	const char *db = world_db();
-	const char *slash = strrchr(db, '/');
-	size_t n = slash ? (size_t)(slash - db) : 0;
-
-	if (n >= len)
-		n = len - 1;
-	memcpy(buf, db, n);
-	buf[n] = '\0';
-}
-
 /* ---------------------------------------------------------------------------
  * Region rows (ST.md §7.2 as amended by §22.1).
  *
@@ -1171,8 +1155,8 @@ st_rec_register(void)
 	return rec;
 }
 
-/* One-field owner read. st_high_shift does up to 65 of these per call and
- * must not copy a whole row each time (§22.1). */
+/* One-field owner read. Up to 65 regions can cover one position and each
+ * probe must not copy a whole row (§22.1). */
 unsigned
 st_owner(uint64_t id, uint8_t plen)
 {
@@ -1369,45 +1353,6 @@ st_region_of_player(unsigned player_ref, uint64_t *id, uint8_t *plen)
 	return XY_OK;
 }
 
-// load a spacetime shared library and put it in effect
-static void
-st_open(struct st_key st_key, int owner)
-{
-	char filename[BUFSIZ], dir[BUFSIZ];
-
-	uint64_t short_key = st_key.key >> st_key.shift;
-	st_dir(dir, sizeof(dir));
-	snprintf(filename, sizeof(filename), "%s/st/%u/%llu/libnd.so", dir, st_key.shift, short_key);
-	void *sl = dlopen(filename, RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
-
-	if (!sl)
-		syslog(LOG_ERR, "dlopen error for %d, %s: %s", owner, filename, dlerror());
-	else {
-		dlerror();
-		syslog(LOG_INFO, "dlopen %d, %s", owner, filename);
-		struct nd *ind = dlsym(sl, "nd");
-		if (ind)
-			*ind = nd;
-		else
-			fprintf(stderr, "%u's st module didn't link agains libnd\n", owner);
-		corm_put(sl_hd, &st_key, &sl);
-	}
-
-	/* hash_put(owner_hd, &st_key, sizeof(st_key), &owner, sizeof(owner)); */
-}
-
-void
-st_put(unsigned owner_ref, uint64_t key, unsigned shift) {
-	char buf[BUFSIZ], dir[BUFSIZ];
-	struct st_key st_key = st_key_new(key, shift);
-	st_dir(dir, sizeof(dir));
-	size_t len = snprintf(buf, sizeof(buf), "%s/st/%u/", dir, shift);
-	mkdir(buf, 0750);
-	snprintf(buf + len, sizeof(buf) - len, "%llu", key >> shift);
-	mkdir(buf, 0750);
-	st_open(st_key, owner_ref);
-}
-
 /* Boot restore (ST.md §7.6, §22.2): snapshot every row, sort by plen
  * ascending, then claim and load. The sort is load-bearing, not tidy:
  * corm_iter order is unspecified, and xy_claim_at attaches to the nearest
@@ -1513,203 +1458,6 @@ st_init(void) {
 		}
 	}
 	free(rows);
-}
-
-void st_dlclose(void) {
-	unsigned c = corm_iter(sl_hd, NULL, 0);
-	const void *kp, *vp;
-	struct st_key key;
-	void *sl;
-
-	while (corm_next(&kp, &vp, c)) {
-		key = *(const struct st_key *)kp;
-		sl = *(void **)vp;
-		dlclose(sl);
-	}
-}
-
-typedef void (*st_run_cb)(unsigned player_ref);
-
-/* The legacy (key, shift) spelling, adapted to (id, plen). `key` is a prefix
- * value in the HIGH bits with `shift` low bits to discard, so the region is
- * id = key with the low `shift` bits cleared, plen = 64 - shift. shift == 64
- * is the cosmos (0, 0); shift > 64 is rejected rather than shifting by it,
- * which the old st_key_new did as `key >> shift` -- undefined behaviour the
- * new path never touches (§2.4). */
-static int
-st_shift_region(uint64_t key, unsigned shift, uint64_t *id, uint8_t *plen)
-{
-	if (shift > 64)
-		return -1;
-	if (shift >= 64) {
-		*id = 0;
-		*plen = ST_PLEN_ROOT;
-		return 0;
-	}
-	*id = key & (~(uint64_t)0 << shift);
-	*plen = (uint8_t)(64 - shift);
-	return 0;
-}
-
-int
-st_get(uint64_t key, unsigned shift) {
-	uint64_t id;
-	uint8_t plen;
-
-	if (st_shift_region(key, shift, &id, &plen) != 0)
-		return -1;
-	return (int)st_owner(id, plen);
-}
-
-inline static int
-_st_can(int ref, uint64_t key, unsigned shift) {
-	uint64_t id;
-	uint8_t plen;
-
-	if (st_shift_region(key, shift, &id, &plen) != 0)
-		return 0;
-	return st_can((unsigned)ref, id, plen);
-}
-
-static long int
-st_high_shift(unsigned player_ref, uint64_t position)
-{
-	int ref = player_ref;
-
-	if (_st_can(ref, 0, 64))
-		return 64;
-
-	for (int i = 63; i >= 0; i--)
-		if (_st_can(ref, position, i))
-			return i;
-
-	return -1;
-}
-
-inline static int
-_st_run(unsigned player_ref, char *symbol, uint64_t key, unsigned shift) {
-	struct st_key st_key = st_key_new(key, shift);
-	void *sl;
-
-	const void *__bv = corm_get(sl_hd, &st_key);
-	if (!__bv)
-		return 0;
-
-	sl = *(void **)__bv;
-	st_run_cb cb = (st_run_cb) dlsym(sl, symbol);
-
-	if (!cb)
-		return 0;
-
-	(*cb)(player_ref);
-	return 1;
-}
-
-void
-eng_st_run(unsigned player_ref, char *symbol) {
-	OBJ player;
-	/* System calls pass NOTHING/-1 (e.g. mod_init before any player
-	 * exists); there is no record to read, so start zeroed. A real ref
-	 * must exist: miss is a bug and CBUGs. Never fall through to garbage:
-	 * the old corm_get + if left player uninitialized on miss. */
-	memset(&player, 0, sizeof(player));
-	if (player_ref != NOTHING && player_ref != (unsigned)-1)
-		corm_get_copy(obj_hd, &player_ref, &player);
-	uint64_t position = eng_map_mwhere(player.location), mask = 0;
-	int i;
-	g_player_ref = player_ref;
-
-	_st_run(player_ref, symbol, 0, 64);
-
-	for (i = 63; i >= 0; i--)
-		mask |= _st_run(player_ref, symbol, position, i) << i;
-
-	syslog(LOG_INFO, "eng_st_run %s %llx", symbol, mask);
-}
-
-void
-do_stchown(int fd, int argc, char *argv[]) {
-	unsigned player_ref = eng_fd_player(fd);
-
-	if (argc < 2) {
-		nd_writef(player_ref, "Requires at least an argument\n");
-		return;
-	}
-
-	unsigned who_ref = player_get(argv[1]);
-
-	if (who_ref == NOTHING) {
-		nd_writef(player_ref, "Invalid target\n");
-		return;
-	}
-
-	OBJ who;
-	corm_get_copy(obj_hd, &who_ref, &(who));
-
-	if (!(who.flags & OF_PLAYER)) {
-		nd_writef(player_ref, "Invalid target\n");
-		return;
-	}
-
-	OBJ player;
-	corm_get_copy(obj_hd, &player_ref, &(player));
-
-	uint64_t position = argc > 2
-		? strtoull(argv[3], NULL, 10)
-		: eng_map_mwhere(player.location);
-
-	long int high_shift = st_high_shift(player_ref, position);
-
-	unsigned shift = argc < 3 ? high_shift : strtoul(argv[2], NULL, 10);
-
-	long long unsigned key = shift > 63 ? 0 : position;
-
-	if (high_shift < shift) {
-		nd_writef(player_ref, "Permission denied\n");
-		return;
-	}
-
-	st_put(who_ref, key, shift);
-	nd_writef(player_ref, "Set shift %d ownership to %s\n", shift, who.name);
-}
-
-void
-do_streload(int fd, int argc, char *argv[]) {
-	unsigned player_ref = eng_fd_player(fd);
-	OBJ player;
-	corm_get_copy(obj_hd, &player_ref, &(player));
-
-	uint64_t position = argc > 2
-		? strtoull(argv[2], NULL, 10)
-		: eng_map_mwhere(player.location);
-
-	long int high_shift = st_high_shift(player_ref, position);
-
-	unsigned shift = argc < 2 ? high_shift : strtoul(argv[1], NULL, 10);
-
-	long long unsigned key = shift > 63 ? 0 : position;
-
-	struct st_key st_key = st_key_new(key, shift);
-	unsigned owner;
-	void *sl;
-
-	const void *__bv = corm_get(owner_hd, &st_key);
-	if (!__bv || *(const unsigned *)__bv != player_ref)
-	{
-		nd_writef(player_ref, "Permission denied\n");
-		return;
-	}
-	owner = *(const unsigned *)__bv;
-
-	const void *__bv2 = corm_get(sl_hd, &st_key);
-	if (!__bv2) {
-		nd_writef(player_ref, "Not open\n");
-		return;
-	}
-	sl = *(void **)__bv2;
-
-	dlclose(sl);
-	st_open(st_key, owner);
 }
 
 /* ---------------------------------------------------------------------------

@@ -133,9 +133,7 @@ close_all(int i)
 	corm_close(dplayer_hd);
 	corm_close(fds_hd);
 
-	st_dlclose();
 	corm_close(owner_hd);
-	corm_close(sl_hd);
 
 	corm_close(vtf_hd);
 	corm_close(situc_hd);
@@ -335,9 +333,10 @@ shared_init(void)
 	nd_hds[HD_ELEMENT] = element_hd;
 	nd_hds[HD_HD] = hd_hd;
 
-	/* The legacy `struct nd` vtable goes away in Phase 3; until then it has
-	 * to agree with nd_hds[], so fill it from the same values rather than
-	 * repeating the mapping. */
+	/* The `struct nd` vtable has to agree with nd_hds[], so fill it from the
+	 * same values rather than repeating the mapping. The st_run slot went
+	 * away with the retired sl_hd dlopen table in Phase 3 (§27); st_teleport
+	 * stays, wired to eng_st_teleport. */
 	nd.hds[HD_FD] = fds_hd;
 	nd.hds[HD_SKEL] = skel_hd;
 	nd.hds[HD_DROP] = drop_hd;
@@ -371,7 +370,6 @@ shared_init(void)
 	nd.map_get = eng_map_get;
 
 	nd.st_teleport = eng_st_teleport;
-	nd.st_run = eng_st_run;
 
 	nd.wts_plural = plural;
 
@@ -449,7 +447,6 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	unsigned drop_type = corm_reg(sizeof(DROP));
 	unsigned element_type = corm_reg(sizeof(element_t));
 	unsigned biome_type = corm_reg(sizeof(unsigned) * BIOME_MAX);
-	unsigned st_type = corm_reg(sizeof(struct st_key));
 	unsigned ai_type = corm_reg(sizeof(action_t));
 	unsigned pair_type = corm_reg(sizeof(unsigned) * 2);
 	unsigned vtf_type = corm_reg(sizeof(vtf_t));
@@ -472,7 +469,6 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 			0xFFFF, CM_RECORD(st_rec));
 	if (owner_hd == CM_MISS)
 		WARN("nd_world_init: region table unavailable, planets disabled\n");
-	sl_hd = corm_open(db, "sl", st_type, CM_PTR, 0xFFFF, 0);
 
 	vtf_hd = corm_open(NULL, "vtf", CM_U32, vtf_type, 0xFF, CM_AINDEX);
 	situc_hd = corm_open(NULL, NULL, pair_type, CM_PTR, 0xFF, 0);
@@ -626,7 +622,8 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 
 		/* The cosmos row (0, 0), owned by root. This is what makes the first
 		 * player the super-moderator: `planet` demands cosmos ownership
-		 * for a new claim, and st_high_shift answers 64 for its owner.
+		 * for a new claim, and st_can(player, 0, ST_PLEN_ROOT) answers 1
+		 * for its owner.
 		 * The old seed wrote a binary st_key {0,0} -- shift 0, i.e. plen
 		 * 64, a single cell -- which was never the cosmos at all (§22). */
 		struct st_rec cosmos;
@@ -639,11 +636,13 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 
 	objects_init();
 
+	/* Restored boots re-run every persisted set's xy_install; fresh boots
+	 * need nothing here because nd_mods_load() (from xy_install, after this
+	 * returns) installs mods.load. The old eng_st_run(-1, "mod_init") walked
+	 * the retired sl_hd dlopen table, which is empty on a fresh DB -- a
+	 * no-op that looked load-bearing. */
 	if (existed)
 		mod_load_all();
-	else {
-		eng_st_run(-1, "mod_init");
-	}
 
 	srand(getpid());
 
@@ -769,12 +768,6 @@ struct cmd_slot cmds[] = {
 	}, {
 		.name = "select",
 		.cb = &do_select,
-	}, {
-		.name = "stchown",
-		.cb = &do_stchown,
-	}, {
-		.name = "streload",
-		.cb = &do_streload,
 	}, {
 		.name = "planet",
 		.cb = &do_planet,

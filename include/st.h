@@ -57,11 +57,6 @@ typedef struct {
 	coord_t dim, dis;
 } exit_t;
 
-struct st_key {
-	uint64_t key;
-	unsigned shift;
-} __attribute__((packed));
-
 extern unsigned long long day_tick;
 extern unsigned short day_n;
 extern double tick;
@@ -187,10 +182,6 @@ static inline unsigned st_world_of(uint64_t id)
 }
 
 void st_init(void);
-void st_dlclose(void);
-void eng_st_run(unsigned player_ref, char *symbol);
-void do_stchown(int fd, int argc, char *argv[]);
-void do_streload(int fd, int argc, char *argv[]);
 void do_planet(int fd, int argc, char *argv[]);
 void do_planets(int fd, int argc, char *argv[]);
 void do_here(int fd, int argc, char *argv[]);
@@ -206,8 +197,8 @@ void do_release(int fd, int argc, char *argv[]);
  * corm_record_type_id(). Idempotent. */
 uint32_t st_rec_register(void);
 
-/* One-field read of the owner -- st_high_shift does up to 65 of these per call
- * and must not copy a whole 784-byte row each time (§22.1). */
+/* One-field read of the owner -- up to 65 regions can cover one position and
+ * this must not copy a whole 784-byte row for each probe (§22.1). */
 unsigned st_owner(uint64_t id, uint8_t plen);
 int st_can(unsigned ref, uint64_t id, uint8_t plen);
 int st_row_get(uint64_t id, uint8_t plen, struct st_rec *out);
@@ -230,41 +221,6 @@ int st_mod_del(uint64_t id, uint8_t plen, const char *name);
  * pos_t bytes as a uint64 rather than Morton-encoding them (§22.4). */
 int st_region_of_player(unsigned player_ref, uint64_t *id, uint8_t *plen);
 
-extern unsigned sl_hd, owner_hd;
-
-/* Legacy shift-spelling key, still spoken by the stchown/streload commands and
- * the transient `sl` handle table (§22.8). NOT the region table's key any more:
- * st_row_key above replaced it, because a CM_RECORD corm map requires
- * ktype == CM_STR and this is a packed binary struct (§22.1).
- *
- * Note st_key_new takes a POSITION and stores its PREFIX, and that `shift` is
- * the low-bit count, so a region at plen L has shift 64-L. The old st_open()
- * shifted an already-shifted value a second time (§2.4); nothing in the new
- * path re-shifts. */
-static inline struct st_key
-st_key_new(uint64_t key, unsigned shift) {
-	struct st_key st_key;
-	memset(&st_key, 0, sizeof(st_key));
-	st_key.key = key >> shift;
-	st_key.shift = shift;
-	return st_key;
-}
-
-static inline int sthd_get(unsigned hd, void *value, uint64_t key, unsigned shift) {
-	struct st_key st_key = st_key_new(key, shift);
-	const void *__v = corm_get(hd, &st_key);
-	if (__v) {
-		memcpy(value, __v, corm_type_len(corm_get_vtype(hd)));
-		return 1;
-	}
-	return 0;
-}
-
-static inline void sthd_put(unsigned hd, uint64_t key, unsigned shift, void *value) {
-	struct st_key st_key = st_key_new(key, shift);
-	corm_put(hd, &st_key, value);
-}
-
-void st_put(unsigned owner_ref, uint64_t key, unsigned shift);
+extern unsigned owner_hd;
 
 #endif

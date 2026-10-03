@@ -1104,16 +1104,6 @@ killaxil $planet_pid_c; planet_pid_c=
 
 # ---------------------------------------------------------------------------
 # ST.md §27 -- Phase 3 gate: anchored dispatch + delegation.
-
-# ND_ONLY=scope skips every earlier section and runs just the Phase 3 gate.
-# The earlier sections boot four daemons and are where the known ~1-in-4
-# "boot B re-created the player" flake lives (it reproduces at HEAD with all
-# Phase 3 changes stashed), so iterating on Phase 3 through the whole script
-# wastes most of the run on an unrelated coin flip.
-if [ "${ND_ONLY:-}" = scope ]; then
-	echo "ND_ONLY=scope: running the Phase 3 gate alone" >&2
-	exec 4>&-
-fi
 #
 # Phase 2 proved a planet PERSISTS a module set. It never proved the set
 # RUNS: until this section, nd_events.c dispatched every event with a bare

@@ -420,7 +420,7 @@ void
 xy_install(void)
 {
   /* boot the real engine first: opens the store, seeds the world,
-   * registers the SIC adapters (mod_load_all/st_run only on a live db). */
+   * registers the SIC adapters (mod_load_all only on a live db). */
   if (nd_world_init(0, NULL))
     fprintf(stderr, "nd_world_init failed\n");
   nd_register_commands();

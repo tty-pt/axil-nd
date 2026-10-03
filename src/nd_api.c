@@ -36,7 +36,6 @@ void eng_map_where(pos_t p, unsigned thing);
 int eng_map_delete(unsigned what);
 unsigned eng_map_get(pos_t p);
 void eng_st_teleport(unsigned player_ref, uint64_t pos);
-void eng_st_run(unsigned player_ref, char *symbol);
 char *plural(char *singular);
 int eng_obj_exists(unsigned ref);
 unsigned eng_object_new(OBJ *obj);
@@ -203,12 +202,6 @@ XY_IMPL(unsigned, map_get, coord_t *, p)
 XY_IMPL(int, st_teleport, unsigned, player_ref, uint64_t, pos)
 {
 	eng_st_teleport(player_ref, pos);
-	return 0;
-}
-
-XY_IMPL(int, st_run, unsigned, player_ref, char *, symbol)
-{
-	eng_st_run(player_ref, symbol);
 	return 0;
 }
 

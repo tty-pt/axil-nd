@@ -183,7 +183,6 @@ XY_DECL(unsigned, map_get, coord_t *, p);
 /* ------------------------------------------------------------------- st */
 
 XY_DECL(int, st_teleport, unsigned, player_ref, uint64_t, pos);
-XY_DECL(int, st_run, unsigned, player_ref, char *, symbol);
 
 /* ------------------------------------------------------------------ wts */
 

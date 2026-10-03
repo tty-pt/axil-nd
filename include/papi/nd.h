@@ -28,7 +28,6 @@ struct nd {
 
 	/* st */
 	st_teleport_t *st_teleport;
-	st_run_t *st_run;
 
 	/* wts */
 	wts_plural_t *wts_plural;
