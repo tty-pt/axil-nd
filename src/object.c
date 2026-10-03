@@ -282,14 +282,38 @@ eng_object_move(unsigned what_ref, unsigned where_ref)
 
 	/* test for special cases */
 	if (where_ref == NOTHING) {
-		unsigned first_ref;
-
-		unsigned c = corm_iter(contents_hd, &what_ref, CM_RANGE);
-		const void *kp, *vp;
-		while (corm_next(&kp, &vp, c)) {
-			what_ref = *(const unsigned *)kp;
-			first_ref = *(const unsigned *)vp;
-			eng_object_move(first_ref, NOTHING);
+		/* Collect-then-delete, in passes: the old code deleted inside the
+		 * corm_next loop, mutating the index under its own cursor, and it
+		 * trusted every pair. A STALE pair -- an object the index still
+		 * files here after a move dropped only the live one -- then deleted
+		 * a live object: "room 5 at 0 0 0 1" aborted boot B by deleting
+		 * quirinpa out from under the session, because room 2's contents
+		 * still listed a player standing in room 5. So each candidate is
+		 * verified against its row: gone rows and rows filed elsewhere get
+		 * the pair dropped, not the object deleted. A self-pair would
+		 * recurse forever, so it is dropped too. Every pass removes at
+		 * least one pair, so this terminates. */
+		for (;;) {
+			unsigned kids[64];
+			unsigned nkids = 0;
+			unsigned c = corm_iter(contents_hd, &what_ref, CM_RANGE);
+			const void *kp, *vp;
+			while (corm_next(&kp, &vp, c) && nkids < 64)
+				kids[nkids++] = *(const unsigned *)vp;
+			corm_fin(c);
+			if (!nkids)
+				break;
+			for (unsigned i = 0; i < nkids; i++) {
+				unsigned child_ref = kids[i];
+				const OBJ *child = corm_get(obj_hd, &child_ref);
+				if (!child || child->location != what_ref ||
+				    child_ref == what_ref) {
+					del_dup_value(contents_hd, what_ref,
+					    child_ref);
+					continue;
+				}
+				eng_object_move(child_ref, NOTHING);
+			}
 		}
 
 		switch (what.type) {
