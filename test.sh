@@ -1583,4 +1583,157 @@ killaxil $scope_pid_b; scope_pid_b=
 
 exec 4<&-
 
+# --- S6: ematch ref resolution (NO_WIZ.md §14) -----------------------------
+# eng_obj_exists() returned `corm_get(...) == NULL` -- TRUE when the object is
+# ABSENT. eng_ematch_absolute() is its one internal caller, so the inversion
+# made every branch of that function behave backwards: a real, existing ref
+# tested false and was discarded as NOTHING, while an absent ref tested true
+# and was handed back as a match. eng_ematch_at() then took over, and because
+# its contents scan assigned `tmp_ref` on every iteration and returned it
+# unconditionally, "no match" surfaced as "the last object iterated in the
+# room". Together these made `teleport #<ref> here` silently move a bystander
+# (measured: the dolphin) and made any player-typed `teleport #<absent>` abort
+# the daemon via corm_get_copy on a row that does not exist.
+#
+# Both sockets get their OWN transcript. PLANET_TXT is cumulative for fd 7 and
+# is wiped by the sections above; an assertion that a line is ABSENT needs a
+# transcript that provably only holds this command's output.
+mp=$((20000 + RANDOM % 8000))
+mpdb=$(mktemp -d)
+mpla="$mpdb/a.log"
+mp_owner_txt="$mpdb/owner.txt"
+mp_guest_txt="$mpdb/guest.txt"
+: > "$mp_owner_txt"
+: > "$mp_guest_txt"
+
+AXIL_ND_DB="$mpdb/w.db" axil -d -A -p "$mp" -m ./lib/axil-nd >"$mpla" 2>&1 &
+mp_pid=$!
+wait_up "$mpla" "$mp" || { echo "FAIL: S6 ematch boot did not init" >&2; exit 1; }
+
+# Per-fd send+drain, so each side's transcript is that command's output alone.
+mpcmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+# Poll one fd's own transcript, draining that fd while waiting.
+mpwait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+# Strip the colour and the CR so a marker can be matched as plain text.
+mpclean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+
+mp_guest="ndmatch$$"
+exec 7<>/dev/tcp/127.0.0.1/$mp
+mpcmd 7 "$mp_owner_txt" "connect $user"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$mpla" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S6 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$mp
+mpcmd 8 "$mp_guest_txt" "connect $mp_guest"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$mp_guest'" "$mpla" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S6 guest login not seen" >&2; exit 1; }
+
+# The owner carves a world room so "here" is a real room, not the shared void
+# (NPCs share the void, and a void assertion would prove nothing about which
+# object moved). do_room prints `room <ref> at <x> <y> <z> <w>` after it has
+# entered the caller there, so that line -- not eng_enter's bare "Teleported" --
+# is the marker, and `status`'s `at <ref>` is the proof of where the caller
+# actually ended up.
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "room 0 0 0 1"
+mpwait 7 "$mp_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S6 owner could not carve a world room (tail: $(mpclean "$mp_owner_txt" | tail -3))" >&2; exit 1; }
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "status"
+mpwait 7 "$mp_owner_txt" ") type " \
+	|| { echo "FAIL: S6 owner status never answered (tail: $(mpclean "$mp_owner_txt" | tail -3))" >&2; exit 1; }
+mp_room_ref=$(mpclean "$mp_owner_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+[ -n "$mp_room_ref" ] \
+	|| { echo "FAIL: S6 could not parse the carved room ref from status (tail: $(mpclean "$mp_owner_txt" | head -2))" >&2; exit 1; }
+
+# The guest ref is parsed in-band from the guest's OWN status line,
+# `name (<ref>) type 1 ...`. Refs are not stable across runs (a room carved
+# later can get a lower ref than a player), so this must never be hardcoded.
+: > "$mp_guest_txt"
+mpcmd 8 "$mp_guest_txt" "status"
+mpwait 8 "$mp_guest_txt" ") type " \
+	|| { echo "FAIL: S6 guest status never answered (tail: $(mpclean "$mp_guest_txt" | tail -3))" >&2; exit 1; }
+mp_guest_ref=$(mpclean "$mp_guest_txt" \
+	| sed -n "s/^$mp_guest (\([0-9][0-9]*\)) type .*/\1/p" | head -1)
+[ -n "$mp_guest_ref" ] \
+	|| { echo "FAIL: S6 could not parse the guest ref from its status (tail: $(mpclean "$mp_guest_txt" | head -2))" >&2; exit 1; }
+
+# --- 1. `teleport #<valid ref> here` actually moves the guest ----------------
+# Pre-fix the guest was never found: eng_obj_exists reported every existing ref
+# as absent, so eng_ematch_absolute discarded it and eng_ematch_at returned
+# whichever object it happened to iterate last.
+: > "$mp_owner_txt"; : > "$mp_guest_txt"
+mpcmd 7 "$mp_owner_txt" "teleport #$mp_guest_ref here"
+mpwait 8 "$mp_guest_txt" "wrenching" \
+	|| { echo "FAIL: S6 'teleport #$mp_guest_ref here' did not move the guest (owner: $(mpclean "$mp_owner_txt" | tail -3) / guest: $(mpclean "$mp_guest_txt" | tail -3))" >&2; exit 1; }
+
+# The guest must now be standing in the owner's carved room, not the void.
+: > "$mp_guest_txt"
+mpcmd 8 "$mp_guest_txt" "status"
+mpwait 8 "$mp_guest_txt" ") type " \
+	|| { echo "FAIL: S6 guest status never answered after the teleport (tail: $(mpclean "$mp_guest_txt" | tail -3))" >&2; exit 1; }
+mp_guest_at=$(mpclean "$mp_guest_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+[ "$mp_guest_at" = "$mp_room_ref" ] \
+	|| { echo "FAIL: S6 guest is at '$mp_guest_at', expected the carved room '$mp_room_ref'" >&2; exit 1; }
+
+# --- 2. `teleport #<absent ref>` must not kill the daemon ------------------
+# Measured pre-fix: SIGABRT from corm_get_copy on a nonexistent row. eng_obj_exists
+# claimed such a ref existed, so it reached the copy.
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "teleport #1823110 here"
+# Liveness FIRST, so a regression reports as the crash it is instead of as a
+# missing message. A dead daemon writes nothing, which would otherwise satisfy
+# no marker and read as a phrasing problem.
+if ! kill -0 $mp_pid 2>/dev/null; then
+	echo "FAIL: S6 'teleport #<absent> here' killed the daemon (tail: $(tail -3 "$mpla"))" >&2
+	exit 1
+fi
+mpwait 7 "$mp_owner_txt" "don't know what you mean" \
+	|| { echo "FAIL: S6 'teleport #<absent> here' gave no NOMATCH refusal" >&2
+	     echo "  raw transcript: $(cat -v "$mp_owner_txt" | tr '\n' '|')" >&2
+	     echo "  cleaned:        $(mpclean "$mp_owner_txt" | tr '\n' '|')" >&2
+	     exit 1; }
+kill -0 $mp_pid 2>/dev/null \
+	|| { echo "FAIL: S6 'teleport #<absent> here' killed the daemon" >&2; exit 1; }
+
+# The socket still works, i.e. the daemon is genuinely alive and not a zombie.
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "status"
+mpwait 7 "$mp_owner_txt" ") type " \
+	|| { echo "FAIL: S6 daemon stopped answering after an absent-ref teleport (tail: $(mpclean "$mp_owner_txt" | tail -3))" >&2; exit 1; }
+mp_owner_at=$(mpclean "$mp_owner_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+[ "$mp_owner_at" = "$mp_room_ref" ] \
+	|| { echo "FAIL: S6 the absent-ref teleport moved the owner to '$mp_owner_at'" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $mp_pid
+rm -rf "$mpdb"
+
 echo "axil-nd ok"

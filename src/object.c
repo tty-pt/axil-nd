@@ -23,7 +23,20 @@ char std_db_ok[BUFSIZ];
 unsigned obj_hd, contents_hd, obs_hd;
 
 int eng_obj_exists(unsigned ref) {
-	return corm_get(obj_hd, &ref) == NULL;
+	/* "Exists" means present. This was `== NULL`, i.e. TRUE when the row was
+	 * ABSENT, which inverted its one internal caller
+	 * (eng_ematch_absolute, match.c): every real ref tested false and was
+	 * discarded as NOTHING, while every absent ref tested true and was handed
+	 * back as a match -- so `teleport #<anything>` fell through to
+	 * eng_ematch_at's contents scan and, on a row that does not exist,
+	 * corm_get_copy aborted the daemon. Measured: `teleport #1823110` killed
+	 * the process with SIGABRT (heap corruption, which
+	 * signal(SIGSEGV, close_all) does not catch).
+	 *
+	 * No module calls this -- nd.obj_exists is the only export and nothing in
+	 * the tree or the probes uses it -- so flipping the sense here is a fix,
+	 * not a compatibility break. */
+	return corm_get(obj_hd, &ref) != NULL;
 }
 
 static void
