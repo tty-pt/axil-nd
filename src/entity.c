@@ -23,7 +23,12 @@ unsigned eng_me_get(void) {
 }
 
 ENT eng_ent_get(unsigned ref) {
-	ENT ent;
+	ENT ent = { 0 };  /* Zero the whole struct: callers read .flags
+	                   * unconditionally, and an unreturned branch used to
+	                   * hand them uninitialized stack memory -- which is how
+	                   * EF_WIZARD came to be "always false" only by luck. A
+	                   * missing row must read as a featureless entity, not
+	                   * as whatever was on the stack. */
 	const void *__v = corm_get(ent_hd, &ref);
 	if (__v)
 		ent = *(const ENT *)__v;
@@ -64,11 +69,18 @@ eng_enter(unsigned player_ref, unsigned loc_ref, enum exit e)
 	nd_evt_after_enter(player_ref);
 }
 
+/* Every actor pays from their own purse. The EF_WIZARD clause that used to
+ * make wizards pay for free is gone with the flag (ST.md §27.6(1)): nothing
+ * ever set it, and "the ruler of a region pays other people's bills" has no
+ * region to attach to, so there is no scoped version worth having. */
 int
 eng_payfor(unsigned who_ref, OBJ *who, unsigned cost)
 {
-	if (eng_ent_get(who_ref).flags & EF_WIZARD)
-		return 1;
+	/* who_ref is unused now, and stays in the signature because this is the
+	 * public module entry point (nd_api.c:303, nd.payfor) -- a module's idea
+	 * of who is paying is still worth passing even though the answer is always
+	 * "who". */
+	(void)who_ref;
 
 	if (who->value >= cost) {
 		who->value -= cost;
@@ -91,14 +103,6 @@ eng_controls(unsigned who_ref, unsigned what_ref)
 		who_ref = who.owner;
 
 	corm_get_copy(obj_hd, &what_ref, &(what));
-
-	/* Wizard eng_controls everything */
-	if (eng_ent_get(who_ref).flags & EF_WIZARD) {
-		if(what.owner == ROOT && who_ref == ROOT)
-			return 0;
-		else
-			return 1;
-	}
 
 	/* owners control their own stuff */
 	return (who_ref == what.owner);
@@ -160,7 +164,11 @@ eng_look_at(unsigned player_ref, unsigned loc_ref)
 	if (loc.type == TYPE_ROOM)
 		view(player_ref);
 
-        if (loc_ref != player_ref && loc.type == TYPE_ENTITY && !(eplayer.flags & EF_WIZARD))
+        /* Not looking inside somebody else. This is exactly what ran before
+         * ST.md §27.6(1): the old clause was !(flags & EF_WIZARD) and nothing
+         * ever set EF_WIZARD, so the guard was unconditionally true and
+         * *nobody* could see inside another entity. */
+        if (loc_ref != player_ref && loc.type == TYPE_ENTITY)
                 return;
 
 	// use callbacks for mcp like this versus telnet

@@ -85,17 +85,16 @@ void
 do_owned(int fd, int argc __attribute__((unused)), char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd), victim_ref, oi_ref;
-	char *name = argv[1];
 	int total = 0;
 
-	if ((eng_ent_get(player_ref).flags & EF_WIZARD) && *name) {
-		victim_ref = player_get(name);
-		if (victim_ref == NOTHING) {
-			nd_writef(player_ref, NOMATCH_MESSAGE);
-			return;
-		}
-	} else
-		victim_ref = player_ref;
+	/* argv goes away with the region gate; the named form needs it back. */
+	(void)argv;
+
+/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
+ * it, so this gate was already unconditionally taken. Left explicit rather
+ * than deleted so the suite still passes for the same reason it passed
+ * before -- the region gate lands in the next commit. */
+	victim_ref = player_ref;
 
 	OBJ victim, oi;
 	corm_get_copy(obj_hd, &victim_ref, &(victim));

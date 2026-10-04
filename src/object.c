@@ -393,10 +393,13 @@ do_clone(int fd, int argc __attribute__((unused)), char *argv[])
 	unsigned player_ref = eng_fd_player(fd), thing_ref;
 	char *name = argv[1];
 
-	if (!(eng_ent_get(player_ref).flags & EF_WIZARD) || !*name || !ok_name(name)) {
-		nd_writef(player_ref, CANTDO_MESSAGE);
-		return;
-	}
+/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
+ * it, so this gate was already unconditionally taken. Left explicit rather
+ * than deleted so the suite still passes for the same reason it passed
+ * before -- the region gate lands in the next commit. */
+	nd_writef(player_ref, CANTDO_MESSAGE);
+	eng_nd_flush(player_ref);
+	return;
 	
 	if (
 			(thing_ref = eng_ematch_absolute(name)) == NOTHING
@@ -469,10 +472,18 @@ do_create(int fd, int argc __attribute__((unused)), char *argv[])
 	if (argc > 2)
 		v = strtoull(argv[3], NULL, 10);
 
-	if (!(pflags & EF_WIZARD) || *name == '\0' || !ok_name(name)) {
-		nd_writef(player_ref, "You can't do that.\n");
-		return;
-	}
+	/* pflags and name are unused while the gate is unconditional; both come
+	 * back with the region gate. */
+	(void)pflags;
+	(void)name;
+
+/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
+ * it, so this gate was already unconditionally taken. Left explicit rather
+ * than deleted so the suite still passes for the same reason it passed
+ * before -- the region gate lands in the next commit. */
+	nd_writef(player_ref, "You can't do that.\n");
+	eng_nd_flush(player_ref);
+	return;
 
 	OBJ player;
 	corm_get_copy(obj_hd, &player_ref, &(player));
@@ -512,11 +523,16 @@ void
 do_chown(int fd, int argc __attribute__((unused)), char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd), owner_ref, thing_ref;
-	int wizard = eng_ent_get(player_ref).flags & EF_WIZARD;
 	char *name = argv[1];
 	char *newowner = argv[2];
 
-	if (!*name || (thing_ref = eng_ematch_all(player_ref, name)) == NOTHING) {
+	/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone and nothing ever set
+	 * it, so this was already 0 -- i.e. the containment rule below always
+	 * applied. Kept as a named 0 rather than deleted, so the containment logic
+	 * stays readable and the region gate is a one-line change. */
+	int wizard = 0;
+
+	if (!*name || !*newowner || (thing_ref = eng_ematch_all(player_ref, name)) == NOTHING) {
 		nd_writef(player_ref, NOMATCH_MESSAGE);
 		return;
 	}

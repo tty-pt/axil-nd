@@ -72,8 +72,12 @@ do_ban(int fd, int argc __attribute__((unused)), char *argv[]) {
 	unsigned player_ref = eng_fd_player(fd), victim_ref;
 	char *name = argv[1];
 
-	if (!(eng_ent_get(player_ref).flags & EF_WIZARD))
-		goto error;
+/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
+ * it, so this gate was already unconditionally taken. Left explicit rather
+ * than deleted so the suite still passes for the same reason it passed
+ * before -- the region gate lands in the next commit. */
+	(void)name;
+	goto error;
 
 	victim_ref = player_get(name);
 

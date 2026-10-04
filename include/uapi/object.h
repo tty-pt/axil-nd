@@ -35,9 +35,14 @@ typedef struct {
 	unsigned char floor;
 } ROO;
 
+/* EF_WIZARD (8) was deleted: it was never set by any code path, so every
+ * st_is_wiz() gate on it was dead code. Authority is now scoped to a region
+ * (see ST.md §27.6(1) and NO_WIZ.md). Bit 8 is deliberately left unallocated
+ * rather than reserved -- no persisted flag outgrew it, and a free bit that
+ * nothing sets is indistinguishable from a reserved one until someone reads
+ * the gap as an invitation. */
 enum entity_flags {
 	EF_SHOP = 4,
-	EF_WIZARD = 8,
 	EF_BAN = 16,
 };
 

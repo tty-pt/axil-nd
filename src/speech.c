@@ -59,10 +59,13 @@ do_wall(int fd, int argc, char *argv[])
 	char buf[BUFFER_LEN];
 	char *message = argscat(argc, argv);
 
-	if (!(eng_ent_get(player_ref).flags & EF_WIZARD)) {
-		nd_writef(player_ref, CANTDO_MESSAGE);
-		return;
-	}
+/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
+ * it, so this gate was already unconditionally taken. Left explicit rather
+ * than deleted so the suite still passes for the same reason it passed
+ * before -- the region gate lands in the next commit. */
+	nd_writef(player_ref, CANTDO_MESSAGE);
+	eng_nd_flush(player_ref);
+	return;
 
 	corm_get_copy(obj_hd, &player_ref, &(player));
 	snprintf(buf, sizeof(buf), "%s shouts: %s", player.name, message);

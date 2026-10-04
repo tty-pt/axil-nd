@@ -201,6 +201,34 @@ uint32_t st_rec_register(void);
  * this must not copy a whole 784-byte row for each probe (§22.1). */
 unsigned st_owner(uint64_t id, uint8_t plen);
 int st_can(unsigned ref, uint64_t id, uint8_t plen);
+
+/* The one authorization rule for region-scoped commands: you may act in a
+ * region you rule, and the cosmos ruler may act in ANY region. Was static
+ * until ST.md §27.6(1), when the nine dead EF_WIZARD gates were re-pointed at
+ * region ownership and needed it from four other translation units. Reach is
+ * deliberately unchanged: exact owner, or cosmos owner. */
+int st_can_region(unsigned player_ref, uint64_t id, uint8_t plen);
+
+/* Prefix containment, the identity xy_region_at() documents: (oid,oplen)
+ * covers (iid,iplen) iff oplen <= iplen and masking iid to oplen yields oid.
+ * Pure arithmetic -- no tree walk, no ancestor chain, no row reads. */
+int st_region_covers(uint64_t o_id, uint8_t o_plen, uint64_t i_id,
+	uint8_t i_plen);
+
+/* Is (id,plen) inside the actor's authority? Always: the selected region and
+ * everything under it. With no selection (sel_id == ST_PLEN_ROOT sentinel for
+ * "unspecified" -- see st_cmd_region) the union of every region the actor owns.
+ * Note the cosmos row is (0,0), which covers the whole address space, so an
+ * actor who rules the cosmos is world-wide for free, with no special case. */
+int st_in_scope(unsigned actor, uint64_t sel_id, uint8_t sel_plen,
+	uint64_t id, uint8_t plen);
+
+/* Region containing an arbitrary object: walk containment to the first mapped
+ * room, then its morton code. Returns 0 (and leaves the out-params alone)
+ * when the walk dead-ends or finds no mapped room -- which reads as "not in
+ * scope" at every caller, the conservative answer: nobody rules the void. */
+int st_region_of_obj(unsigned ref, uint64_t *id, uint8_t *plen);
+
 int st_row_get(uint64_t id, uint8_t plen, struct st_rec *out);
 void st_row_put(uint64_t id, uint8_t plen, const struct st_rec *rec);
 void st_row_del(uint64_t id, uint8_t plen);

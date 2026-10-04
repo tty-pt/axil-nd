@@ -1470,8 +1470,8 @@ st_init(void) {
  * `modlist [world]`. Without one, the caller's position-derived region is
  * used. `here` is always position-derived.
  *
- * The gate on every mutating command is region ownership (or EF_WIZARD),
- * never the module list itself: the list is the enabled set, and loadmod is
+ * The gate on every mutating command is region ownership, never the module
+ * list itself: the list is the enabled set, and loadmod is
  * the ruler's act of adding to it, so gating loadmod on membership would
  * deadlock an empty planet (§22.5). The code gate an outer ruler imposes is
  * xy_deny, enforced inside libxylem at load time.
@@ -1483,12 +1483,6 @@ st_init(void) {
  * row is written, the log shows it) but never answers (§5.3).
  * --------------------------------------------------------------------------- */
 
-static int
-st_is_wiz(unsigned player_ref)
-{
-	return (eng_ent_get(player_ref).flags & EF_WIZARD) != 0;
-}
-
 /* The one authorization rule for the region-tree primitives (`room`, `deny`):
  * you may act in a region you rule, and the cosmos ruler may act in ANY region.
  *
@@ -1499,16 +1493,19 @@ st_is_wiz(unsigned player_ref)
  * the actor that can carve the first room out of a fresh world, exactly as
  * do_planet already requires cosmos ownership for a new planet claim.
  *
- * The wizard override is kept because EF_WIZARD is consulted all over the
- * engine, but note that NOTHING in the port ever SETS it, so it is currently
- * unreachable and this reduces to "owner of the region, or cosmos ruler". See
- * §27.6 -- that dead gate is a port bug, not a design choice.
+ * There is no wizard override here, and there never was one in practice: the
+ * EF_WIZARD clause that used to sit at the top was unreachable (nothing in the
+ * port ever set the flag), so deleting it left this function's reach
+ * bit-identical. ST.md §27.6(1), NO_WIZ.md §3.
+ *
+ * Keep the reach narrow on purpose. The three loadmod/unloadmod/release callers
+ * below gate on st_can() exactly, NOT on this function -- widening them to the
+ * cosmos ruler would hand one player authority over every planet's module set,
+ * which no decision asked for.
  */
-static int
+int
 st_can_region(unsigned player_ref, uint64_t id, uint8_t plen)
 {
-	if (st_is_wiz(player_ref))
-		return 1;
 	if (st_can(player_ref, id, plen))
 		return 1;
 	return st_can(player_ref, 0, ST_PLEN_ROOT);
@@ -1616,19 +1613,17 @@ do_planet(int fd, int argc, char *argv[])
 	id = st_planet_id((unsigned)w);
 
 	have = st_row_get(id, plen, &rec);
-	if (have && rec.owner != player_ref && rec.owner != NOTHING &&
-	    !st_is_wiz(player_ref)) {
+	if (have && rec.owner != player_ref && rec.owner != NOTHING) {
 		st_owner_name(rec.owner, oname, sizeof(oname));
 		nd_writef(player_ref, "Planet %lu is already claimed by %s\n",
 			w, oname);
 		eng_nd_flush(player_ref);
 		return;
 	}
-	/* A new claim is a cosmos-level decision: only the cosmos ruler (or a
-	 * wizard) may carve a planet out of it. A reclaim only needs the row
-	 * to be unclaimed or the override above. */
-	if (!have && !st_can(player_ref, 0, ST_PLEN_ROOT) &&
-	    !st_is_wiz(player_ref)) {
+	/* A new claim is a cosmos-level decision: only the cosmos ruler may
+	 * carve a planet out of it. A reclaim only needs the row to be
+	 * unclaimed or the actor's own. */
+	if (!have && !st_can(player_ref, 0, ST_PLEN_ROOT)) {
 		nd_writef(player_ref, "Permission denied\n");
 		eng_nd_flush(player_ref);
 		return;
@@ -1926,7 +1921,7 @@ do_loadmod(int fd, int argc, char *argv[])
 		eng_nd_flush(player_ref);
 		return;
 	}
-	if (!st_can(player_ref, id, plen) && !st_is_wiz(player_ref)) {
+	if (!st_can(player_ref, id, plen)) {
 		nd_writef(player_ref, "Permission denied\n");
 		eng_nd_flush(player_ref);
 		return;
@@ -1982,7 +1977,7 @@ do_unloadmod(int fd, int argc, char *argv[])
 		eng_nd_flush(player_ref);
 		return;
 	}
-	if (!st_can(player_ref, id, plen) && !st_is_wiz(player_ref)) {
+	if (!st_can(player_ref, id, plen)) {
 		nd_writef(player_ref, "Permission denied\n");
 		eng_nd_flush(player_ref);
 		return;
@@ -2056,7 +2051,7 @@ do_release(int fd, int argc, char *argv[])
 	id = st_planet_id((unsigned)w);
 	plen = ST_PLEN_WORLD;
 
-	if (!st_can(player_ref, id, plen) && !st_is_wiz(player_ref)) {
+	if (!st_can(player_ref, id, plen)) {
 		nd_writef(player_ref, "Permission denied\n");
 		eng_nd_flush(player_ref);
 		return;

@@ -777,7 +777,17 @@ AXIL_ND_DB="$tmpdb/s54.db" axil -d -p "$s54_port" -m ./lib/axil-nd >"$s54_log" 2
 s54_pid=$!
 # Never leak this server: every FAIL below exits, and without this the port
 # stays held by an orphan that breaks later runs.
-trap 'kill -9 "$s54_pid" 2>/dev/null' EXIT
+#
+# This must be a SUPERSET of the trap at the top, not a replacement for it.
+# `trap ... EXIT` overwrites wholesale, so the short form used to drop the
+# mods.load restore, the tmpdir removal and every other daemon kill: a single
+# FAIL here left a live axil holding $port AND left the tracked mods.load
+# carrying a duplicate ../axil-nd-testprobe/testprobe line for every later run
+# to inherit. Measured while landing ST.md §27.6(1): a cold-start FAIL here
+# leaked `axil -d -A -p <port>` and dirtied mods.load; the next run then booted
+# testprobe twice. The scope section below re-declares the full trap for
+# exactly this reason -- do the same here.
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 s54_settle=50
 while [ $s54_settle -gt 0 ]; do
 	grep -qF "Done." "$s54_log" 2>/dev/null && nc -z 127.0.0.1 "$s54_port" 2>/dev/null && break
