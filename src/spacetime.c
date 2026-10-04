@@ -1503,12 +1503,50 @@ st_init(void) {
  * cosmos ruler would hand one player authority over every planet's module set,
  * which no decision asked for.
  */
+/* "May this actor act anywhere in (id,plen)?"
+ *
+ * One loop over every ancestor width instead of "exact owner, else cosmos",
+ * because the decision says a ruler governs what is UNDER them, not only what
+ * they are. Masking (id,plen) down to width w yields the ancestor region id at
+ * that width, so the candidate set is exactly {ancestors of (id,plen)}, and the
+ * two cases the old shape special-cased are just the two ends of it: w == plen
+ * is exact ownership, w == 0 is the cosmos, whose row covers the whole address
+ * space.
+ *
+ * Widths 32 and 48 cannot hold a row today, so they are two wasted corm probes
+ * per call. They are here rather than omitted because they are the difference
+ * between "ancestor ownership" as a stated rule and as an accident of the
+ * current tree depth: the day a row lands at 32, this keeps working with no
+ * edit, and the omission would be a silent behaviour change nobody would catch.
+ *
+ * w > plen is skipped because a region cannot be its own ancestor's ancestor:
+ * narrowing to a width the query does not span would invent a region that
+ * does not contain the thing being asked about. */
 int
 st_can_region(unsigned player_ref, uint64_t id, uint8_t plen)
 {
-	if (st_can(player_ref, id, plen))
-		return 1;
-	return st_can(player_ref, 0, ST_PLEN_ROOT);
+	static const uint8_t widths[] = {
+		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
+	};
+	uint64_t mask;
+	size_t i;
+
+	/* A prefix width above 64 is not a region. ST_SEL_UNSET is 255, so a
+	 * caller that forgot to resolve "unspecified" lands here rather than
+	 * masking by a nonsense width. */
+	if (plen > ST_PLEN_CELL)
+		return 0;
+
+	for (i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+		uint8_t w = widths[i];
+
+		if (w > plen)
+			continue;
+		mask = w ? (~0ULL << (64 - w)) : 0ULL;
+		if (st_can(player_ref, id & mask, w))
+			return 1;
+	}
+	return 0;
 }
 
 /* The region a pos_t falls in: the same derivation as st_region_of_player
@@ -1531,6 +1569,139 @@ st_region_of_pos(coord_t *pos, uint64_t *id, uint8_t *plen)
 	*id = rid;
 	*plen = w;
 	return XY_OK;
+}
+
+/* Prefix containment, exactly as xy_region_at() documents it: (oid,oplen)
+ * covers (iid,iplen) iff oplen <= iplen and masking iid down to oplen bits
+ * yields oid. Pure arithmetic -- no tree walk, no ancestor chain, no row
+ * reads -- which is why this is the test the ban guard uses rather than a
+ * region lookup: given a destination morton code, "is it under the banned
+ * region" is five mask-and-compare operations.
+ *
+ * plen == 0 needs the shift-by-64 guard: ~0ULL << 64 is undefined, and the
+ * cosmos is exactly the case where it would bite. Masking to 0 bits yields 0,
+ * so the root covers everything, which is the whole of "the cosmos ruler is
+ * world-wide" and needs no special case at either end of this function. */
+int
+st_region_covers(uint64_t o_id, uint8_t o_plen, uint64_t i_id, uint8_t i_plen)
+{
+	uint64_t mask;
+
+	if (o_plen > i_plen)
+		return 0;
+	mask = o_plen ? (~0ULL << (64 - o_plen)) : 0ULL;
+	return (i_id & mask) == o_id;
+}
+
+/* Is (id,plen) inside the actor's authority?
+ *
+ * With an explicit selection this is just containment: the selected region and
+ * everything under it. With no selection it is the union of every region the
+ * actor owns, walked from the persisted rows -- NOT st_can_region, which would
+ * let one planet claim the whole address space through the cosmos fallback and
+ * turn "my regions" into "everywhere".
+ *
+ * The cosmos row is (0,0), and (0,0) covers every point, so an actor who rules
+ * the cosmos passes every query here without a special case. That is the one
+ * place world-wide authority comes from, and it is a consequence of the
+ * containment rule rather than a clause bolted on.
+ *
+ * sel_plen 0 with sel_id 0 is ambiguous -- it is both "the cosmos" and "no
+ * selection" -- so callers pass ST_SEL_UNSET to mean the latter. */
+int
+st_in_scope(unsigned actor, uint64_t sel_id, uint8_t sel_plen, uint64_t id,
+	uint8_t plen)
+{
+	unsigned c;
+	const void *kp, *vp;
+
+	if (sel_plen != ST_SEL_UNSET)
+		return st_region_covers(sel_id, sel_plen, id, plen);
+
+	if (!st_have_hd())
+		return 0;
+	c = corm_iter(owner_hd, NULL, 0);
+	while (corm_next(&kp, &vp, c)) {
+		const char *key = kp;
+		const struct st_rec *rec = vp;
+		uint64_t rid;
+		uint8_t rplen;
+
+		if (st_row_key_parse(key, &rid, &rplen) != 0)
+			continue;  /* the ":owner" sidecars, and any legacy key */
+		if (rec->plen != rplen || rec->owner != actor)
+			continue;
+		if (st_region_covers(rid, rplen, id, plen)) {
+			corm_fin(c);
+			return 1;
+		}
+	}
+	corm_fin(c);
+	return 0;
+}
+
+/* Region containing an arbitrary object, by walking containment up to the
+ * first room.
+ *
+ * Only rooms are ever mapped (w_hd's sole writer is map_put from st_room_at),
+ * so "walk until TYPE_ROOM" is the shortest correct path and needs no
+ * positional knowledge about items or entities. Depth is capped against
+ * entity cycles -- two entities each holding the other would otherwise spin.
+ *
+ * An UNMAPPED room resolves to its void coordinates, (0,0,0,0), which is in
+ * the cosmos. That is not §27.1's forbidden move. §27.1 is about event
+ * anchoring and asks "does this event have a specific anchor?"; its answer for
+ * an unmapped room is "no", which falls through to a global dispatch from the
+ * root -- the cosmos. This function asks a different question, "whose authority
+ * covers this object", and for the void the honest answer is the same region
+ * §27.1's fallback lands in. What §27.1 forbids is mistaking the void for a
+ * specific PLANET, and this does not: it reports the root, or fails if even the
+ * root row is gone.
+ *
+ * It matters that the void is not "no region". Players log in into an unmapped
+ * room, so treating that as unresolvable would put every player who has not yet
+ * been moved somewhere under nobody's authority -- a region ruler could not
+ * teleport them out, and eng_controls would refuse every command that resolves
+ * them by name. The void is part of the cosmos and the cosmos ruler governs it.
+ *
+ * Returns XY_ERR_NOTFOUND only when the walk genuinely dead-ends: ref 0 /
+ * NOTHING, a location with no OBJ row, or no room within the depth cap. Every
+ * caller treats that as "not in scope", which is the conservative direction --
+ * an object nobody can locate is an object nobody controls. */
+int
+st_region_of_obj(unsigned ref, uint64_t *id, uint8_t *plen)
+{
+	unsigned cur = ref;
+	int depth;
+
+	if (!id || !plen)
+		return XY_ERR_INVALID;
+
+	for (depth = 0; depth < 8; depth++) {
+		OBJ o;
+
+		if (cur == 0 || cur == NOTHING)
+			return XY_ERR_NOTFOUND;
+		/* corm_get_copy returns void, so probe with corm_get first. */
+		if (!corm_get(obj_hd, &cur))
+			return XY_ERR_NOTFOUND;
+		memset(&o, 0, sizeof(o));
+		corm_get_copy(obj_hd, &cur, &o);
+		if (o.type == TYPE_ROOM) {
+			pos_t pos;
+
+			/* No eng_map_has() gate: an unmapped room means the void
+			 * (eng_map_where's own comment says "unmapped room:
+			 * void/limbo coords"), and the void is the cosmos. See
+			 * the note above on why that is not §27.1's trap. */
+			eng_map_where(pos, cur);
+			/* pos, not &pos: pos_t is coord_t[4], so the name already
+			 * decays to coord_t *, which is what the helper takes. */
+			return st_region_of_pos(pos, id, plen);
+		}
+		cur = o.location;
+	}
+	return XY_ERR_NOTFOUND;
 }
 
 /* The ruler's display name for a row header: the OBJ name when the ref still

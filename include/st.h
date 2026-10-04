@@ -92,6 +92,14 @@ int st_v(unsigned player_ref, const char *dir);
 #define ST_PLEN_WORLD 16   /* one world -- a planet */
 #define ST_PLEN_CELL  64   /* one cell */
 
+/* "No region was selected", as a plen. Distinct from ST_PLEN_ROOT on purpose:
+ * (0,0) names the cosmos, a real region with a real owner, and collapsing the
+ * two would make an explicit `... world 0` indistinguishable from omitting the
+ * argument -- which matters because st_in_scope() treats them differently
+ * (cosmos = that one region; unset = every region the actor rules). 255 is not
+ * a legal plen (a prefix width is 0..64), so it cannot collide. */
+#define ST_SEL_UNSET  255
+
 #define ND_ST_MAX_MODS 32
 #define ND_ST_MOD_NAME 24
 
@@ -203,10 +211,15 @@ unsigned st_owner(uint64_t id, uint8_t plen);
 int st_can(unsigned ref, uint64_t id, uint8_t plen);
 
 /* The one authorization rule for region-scoped commands: you may act in a
- * region you rule, and the cosmos ruler may act in ANY region. Was static
- * until ST.md §27.6(1), when the nine dead EF_WIZARD gates were re-pointed at
- * region ownership and needed it from four other translation units. Reach is
- * deliberately unchanged: exact owner, or cosmos owner. */
+ * region you rule, or in anything under a region you rule. Was static until
+ * ST.md §27.6(1), when the nine dead EF_WIZARD gates were re-pointed at region
+ * ownership and needed it from four other translation units.
+ *
+ * "Ruler above it" is spelled out rather than left implicit: the candidate
+ * ancestor widths are walked explicitly, so a row appearing at plen 32 or 48
+ * is honoured the day it exists instead of being silently ignored. Today only
+ * widths 0 (cosmos) and 16 (planet) can hold a row, so exact-owner and the
+ * cosmos fallback are the same two iterations. */
 int st_can_region(unsigned player_ref, uint64_t id, uint8_t plen);
 
 /* Prefix containment, the identity xy_region_at() documents: (oid,oplen)
@@ -215,18 +228,28 @@ int st_can_region(unsigned player_ref, uint64_t id, uint8_t plen);
 int st_region_covers(uint64_t o_id, uint8_t o_plen, uint64_t i_id,
 	uint8_t i_plen);
 
-/* Is (id,plen) inside the actor's authority? Always: the selected region and
- * everything under it. With no selection (sel_id == ST_PLEN_ROOT sentinel for
- * "unspecified" -- see st_cmd_region) the union of every region the actor owns.
- * Note the cosmos row is (0,0), which covers the whole address space, so an
- * actor who rules the cosmos is world-wide for free, with no special case. */
+/* Is (id,plen) inside the actor's authority? With an explicit selection
+ * (sel_plen != ST_SEL_UNSET): the selected region and everything under it.
+ * With no selection: the union of every region the actor owns. Note the cosmos
+ * row is (0,0), which covers the whole address space, so an actor who rules the
+ * cosmos is world-wide for free, with no special case.
+ *
+ * sel_plen == 0 with sel_id == 0 is a real region (the cosmos), so it cannot
+ * double as "unspecified" -- hence ST_SEL_UNSET. */
 int st_in_scope(unsigned actor, uint64_t sel_id, uint8_t sel_plen,
 	uint64_t id, uint8_t plen);
 
-/* Region containing an arbitrary object: walk containment to the first mapped
- * room, then its morton code. Returns 0 (and leaves the out-params alone)
- * when the walk dead-ends or finds no mapped room -- which reads as "not in
- * scope" at every caller, the conservative answer: nobody rules the void. */
+/* Region containing an arbitrary object: walk containment up to the first
+ * room, then take that room's morton code. An UNMAPPED room yields the void
+ * (0,0,0,0), which is in the cosmos -- players log in into unmapped rooms, so
+ * calling that "unresolvable" would put every such player under nobody's
+ * authority. See the long note in src/spacetime.c.
+ *
+ * Returns non-zero (and leaves the out-params alone) only when the walk
+ * genuinely dead-ends: ref 0/NOTHING, a location with no OBJ row, or no room
+ * within the depth cap. That reads as "not in scope" at every caller, which is
+ * the conservative direction: an object nobody can locate is an object nobody
+ * controls. */
 int st_region_of_obj(unsigned ref, uint64_t *id, uint8_t *plen);
 
 int st_row_get(uint64_t id, uint8_t plen, struct st_rec *out);
