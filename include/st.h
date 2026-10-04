@@ -222,6 +222,17 @@ int st_can(unsigned ref, uint64_t id, uint8_t plen);
  * cosmos fallback are the same two iterations. */
 int st_can_region(unsigned player_ref, uint64_t id, uint8_t plen);
 
+/* Who governs (id,plen): the deepest ancestor row that has an owner, walking
+ * the same widths as st_can_region in the opposite direction. NOTHING means no
+ * ancestor has a row -- "unclaimed", which is a different refusal from "ruled
+ * by somebody else". */
+unsigned st_region_ruler(uint64_t id, uint8_t plen);
+
+/* The shared region refusal: names the ruler (or says the area is unclaimed)
+ * and flushes. Every gate in ST.md §27.6(1) returns through this so the
+ * wording and the flush are not re-derived six times. */
+void st_refuse_region(unsigned player_ref, uint64_t id, uint8_t plen);
+
 /* Prefix containment, the identity xy_region_at() documents: (oid,oplen)
  * covers (iid,iplen) iff oplen <= iplen and masking iid to oplen yields oid.
  * Pure arithmetic -- no tree walk, no ancestor chain, no row reads. */
@@ -271,6 +282,60 @@ int st_mod_del(uint64_t id, uint8_t plen, const char *name);
  * xy_region_at. Deliberately NOT eng_map_mwhere -- that reinterprets the 8
  * pos_t bytes as a uint64 rather than Morton-encoding them (§22.4). */
 int st_region_of_player(unsigned player_ref, uint64_t *id, uint8_t *plen);
+
+/* Region bans (ST.md §27.6(1) §7): a separate persisted table keyed
+ * (player, id, plen), enforced at every eng_enter() arrival. The value is the
+ * banning ruler's ref, so unban can re-check authority. */
+extern unsigned ban_hd;
+
+/* Opens the ban table on db. The table must open HERE, at boot alongside
+ * the other engine tables: measured (Oct 2026) that a table opened later in
+ * the process's life (lazy open on first ban) persists through explicit
+ * mid-life `save` but loses its rows at SIGTERM shutdown, while a
+ * boot-opened table survives save, shutdown, and reboot alike. A failed open
+ * degrades to unenforced bans, the same shape as a missing region table. */
+int st_ban_init(const char *db);
+
+/* One-time boot migration: any entity still carrying the retired EF_BAN bit
+ * becomes a root-wide (0,0) row, and the bit is cleared so the migration does
+ * not repeat. Without it an upgrade silently drops every ban ever issued. */
+void st_ban_migrate(void);
+
+/* Is player excluded from (id,plen)? Probes the ban table for the player's
+ * row at that exact region. Returns non-zero with (*ban_id, *ban_plen) set to
+ * the banning row on a hit. */
+int st_ban_at(unsigned player_ref, uint64_t id, uint8_t plen,
+	uint64_t *ban_id, uint8_t *ban_plen);
+
+/* Is code (a destination morton) under any of player's bans? Masks the code
+ * down to each of the 5 widths and probes; the mask IS the containment test,
+ * so no region lookup is needed. Returns non-zero with the banning row set. */
+int st_ban_check(unsigned player_ref, uint64_t code,
+	uint64_t *ban_id, uint8_t *ban_plen);
+
+/* Write / remove one row. st_ban_del returns non-zero iff a row existed. */
+void st_ban_put(unsigned player_ref, uint64_t id, uint8_t plen,
+	unsigned banner);
+int st_ban_del(unsigned player_ref, uint64_t id, uint8_t plen);
+
+/* Exact-row lookup with the stored banner: non-zero with *banner set on a
+ * hit. The banner is what lets unban re-check authority (banner or current
+ * region ruler may lift). */
+int st_ban_lookup(unsigned player_ref, uint64_t id, uint8_t plen,
+	unsigned *banner);
+
+/* The shared ban refusal: names the banned region and flushes. */
+void st_ban_refuse(unsigned player_ref, uint64_t id, uint8_t plen);
+
+/* Name a banned place ("world N", "everywhere", "this region") for ban/unban
+ * confirmations and refusals -- one spelling everywhere. */
+void st_ban_place(uint64_t id, uint8_t plen, char *buf, size_t len);
+
+/* A command's region selector: argv[world_arg] names a world outright, and
+ * without it the caller's position-derived region is returned. This is the one
+ * parsing dialect for an explicit world selector. */
+int st_cmd_region(unsigned player_ref, int argc, char *argv[], int world_arg,
+	uint64_t *id, uint8_t *plen);
 
 extern unsigned owner_hd;
 

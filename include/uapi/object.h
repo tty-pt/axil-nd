@@ -43,8 +43,13 @@ typedef struct {
  * the gap as an invitation. */
 enum entity_flags {
 	EF_SHOP = 4,
-	EF_BAN = 16,
 };
+
+/* EF_BAN (16) was deleted next: the ban table supersedes the bit (ST.md
+ * §27.6(1) §7, NO_WIZ.md). Bit 16 is left unallocated for the same reason as
+ * bit 8 above. The boot migration (st_ban_migrate) still READS legacy rows
+ * carrying 16 -- it uses the EF_BAN_LEGACY literal in spacetime.c, not this
+ * enum -- so an upgrade converts old bans instead of dropping them. */
 
 enum base_actions {
 	ACT_LOOK = 1,

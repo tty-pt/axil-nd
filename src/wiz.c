@@ -2,9 +2,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/resource.h>
+#include <ttypt/xy.h>
 
 #include "config.h"
+#include "st.h"
 #include "uapi/entity.h"
 #include "uapi/match.h"
 #include "player.h"
@@ -87,39 +90,102 @@ error:
 }
 
 void
-do_ban(int fd, int argc __attribute__((unused)), char *argv[]) {
+do_ban(int fd, int argc, char *argv[]) {
 	unsigned player_ref = eng_fd_player(fd), victim_ref;
-	char *name = argv[1];
+	uint64_t id = 0;
+	uint8_t plen = ST_PLEN_ROOT;
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
+	char place[64];
+	OBJ victim;
 
-/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
- * it, so this gate was already unconditionally taken. Left explicit rather
- * than deleted so the suite still passes for the same reason it passed
- * before -- the region gate lands in the next commit. */
-	(void)name;
-	goto error;
-
+	if (!*name) {
+		nd_writef(player_ref, "Usage: ban <player> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
 	victim_ref = player_get(name);
-
 	if (victim_ref == NOTHING) {
 		nd_writef(player_ref, NOMATCH_MESSAGE);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (victim_ref == ROOT) {
+		nd_writef(player_ref, CANTDO_MESSAGE);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	corm_get_copy(obj_hd, &victim_ref, &(victim));
+	if (victim.type != TYPE_ENTITY) {
+		nd_writef(player_ref, CANTDO_MESSAGE);
+		eng_nd_flush(player_ref);
 		return;
 	}
 
-	if (victim_ref == ROOT)
-		goto error;
+	/* argv[2] names a world outright; without it, the caller's own region.
+	 * One selector dialect, shared with wall (st_cmd_region). */
+	if (st_cmd_region(player_ref, argc, argv, 2, &id, &plen) != XY_OK) {
+		nd_writef(player_ref, "Usage: ban <player> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_can_region(player_ref, id, plen)) {
+		st_refuse_region(player_ref, id, plen);
+		return;
+	}
 
+	st_ban_put(victim_ref, id, plen, player_ref);
+	st_ban_place(id, plen, place, sizeof(place));
+	nd_writef(player_ref, "Banned %s from %s.\n", victim.name, place);
+	nd_writef(victim_ref, "You have been banned from %s.\n", place);
+	eng_nd_flush(player_ref);
+	eng_nd_flush(victim_ref);
+}
+
+void
+do_unban(int fd, int argc, char *argv[]) {
+	unsigned player_ref = eng_fd_player(fd), victim_ref, banner = NOTHING;
+	uint64_t id = 0;
+	uint8_t plen = ST_PLEN_ROOT;
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
+	char place[64];
 	OBJ victim;
+
+	if (!*name) {
+		nd_writef(player_ref, "Usage: unban <player> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	victim_ref = player_get(name);
+	if (victim_ref == NOTHING) {
+		nd_writef(player_ref, NOMATCH_MESSAGE);
+		eng_nd_flush(player_ref);
+		return;
+	}
 	corm_get_copy(obj_hd, &victim_ref, &(victim));
 
-	if (victim.type != TYPE_ENTITY)
-		goto error;
+	if (st_cmd_region(player_ref, argc, argv, 2, &id, &plen) != XY_OK) {
+		nd_writef(player_ref, "Usage: unban <player> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	st_ban_place(id, plen, place, sizeof(place));
+	if (!st_ban_lookup(victim_ref, id, plen, &banner)) {
+		nd_writef(player_ref, "%s is not banned from %s.\n",
+			victim.name, place);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	/* The original banner or anyone ruling the region now may lift it: a
+	 * ban must not outlive the authority that could remove it, and a new
+	 * ruler must not be stuck with the old ruler's bans. */
+	if (banner != player_ref && !st_can_region(player_ref, id, plen)) {
+		st_refuse_region(player_ref, id, plen);
+		return;
+	}
 
-	ENT evictim = eng_ent_get(victim_ref);
-	evictim.flags |= EF_BAN;
-	eng_ent_set(player_ref, &evictim);
-	nd_writef(victim_ref, "You have been banned.\n");
-	eng_nd_close(victim_ref);
-	return;
-error:
-	nd_writef(player_ref, CANTDO_MESSAGE);
+	st_ban_del(victim_ref, id, plen);
+	nd_writef(player_ref, "Unbanned %s from %s.\n", victim.name, place);
+	nd_writef(victim_ref, "You have been unbanned from %s.\n", place);
+	eng_nd_flush(player_ref);
+	eng_nd_flush(victim_ref);
 }

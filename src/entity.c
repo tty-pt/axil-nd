@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <ttypt/corm.h>
 
 #include "config.h"
@@ -10,6 +11,7 @@
 #include "params.h"
 #include "st.h"
 #include "uapi/io.h"
+#include "uapi/map.h"
 #include "uapi/match.h"
 #include "view.h"
 
@@ -47,6 +49,25 @@ void
 eng_enter(unsigned player_ref, unsigned loc_ref, enum exit e)
 {
 	OBJ player;
+	pos_t destpos;
+	uint64_t hit_id = 0;
+	uint8_t hit_plen = ST_PLEN_ROOT;
+
+	/* The single funnel for all four arrival paths (movement, teleport,
+	 * module/vim teleport, room): a ban bites here, on arrival, never at
+	 * login. The destination's morton masked to each width IS the
+	 * containment test, so no region lookup is needed. Items teleported by
+	 * a ruler bypass this (wiz.c) -- correctly, since only players are
+	 * excludable. Refuse BEFORE any output: the caller may already have
+	 * announced the move (do_teleport's "wrenching"), and the ban notice
+	 * reads as the arrival failing, not as silence. */
+	eng_map_where(destpos, loc_ref);
+	if (st_ban_check(player_ref, pos_morton(destpos), &hit_id,
+			&hit_plen)) {
+		st_ban_refuse(player_ref, hit_id, hit_plen);
+		return;
+	}
+
 	corm_get_copy(obj_hd, &player_ref, &(player));
 	unsigned old_loc_ref = player.location;
 
@@ -93,6 +114,9 @@ eng_payfor(unsigned who_ref, OBJ *who, unsigned cost)
 int
 eng_controls(unsigned who_ref, unsigned what_ref)
 {
+	uint64_t wid = 0;
+	uint8_t wplen = ST_PLEN_ROOT;
+
 	if (what_ref == NOTHING)
 		return 0;
 
@@ -104,8 +128,36 @@ eng_controls(unsigned who_ref, unsigned what_ref)
 
 	corm_get_copy(obj_hd, &what_ref, &(what));
 
-	/* owners control their own stuff */
-	return (who_ref == what.owner);
+	/* Ownership of any kind still applies, including puppet ownership. ROOT
+	 * and NOTHING are deliberately not ownership here: ref 1 is both ROOT
+	 * and the first player, so reading ROOT as an owner would make the first
+	 * player own every ROOT-owned room. Those fall through to rulership. */
+	if (what.owner != ROOT && what.owner != NOTHING &&
+			what.owner == who_ref)
+		return 1;
+	if (what.owner == ROOT || what.owner == NOTHING) {
+		if (st_region_of_obj(what_ref, &wid, &wplen) != 0)
+			return 0;
+		return st_can_region(who_ref, wid, wplen);
+	}
+
+	/* An owner that is a different player keeps authority over possessions.
+	 * Another player may be inspected in-region, but their inventory may
+	 * not be taken through region authority. */
+	if (corm_get(obj_hd, &what.owner)) {
+		OBJ owner;
+
+		memset(&owner, 0, sizeof(owner));
+		corm_get_copy(obj_hd, &what.owner, &(owner));
+		if (owner.type == TYPE_ENTITY) {
+			if (what.type != TYPE_ENTITY)
+				return 0;
+			if (st_region_of_obj(what_ref, &wid, &wplen) != 0)
+				return 0;
+			return st_can_region(who_ref, wid, wplen);
+		}
+	}
+	return 0;
 }
 
 #define BUFF(...) buf_l += snprintf(&buf[buf_l], BUFSIZ - buf_l, __VA_ARGS__)
@@ -164,12 +216,19 @@ eng_look_at(unsigned player_ref, unsigned loc_ref)
 	if (loc.type == TYPE_ROOM)
 		view(player_ref);
 
-        /* Not looking inside somebody else. This is exactly what ran before
-         * ST.md §27.6(1): the old clause was !(flags & EF_WIZARD) and nothing
-         * ever set EF_WIZARD, so the guard was unconditionally true and
-         * *nobody* could see inside another entity. */
-        if (loc_ref != player_ref && loc.type == TYPE_ENTITY)
-                return;
+	/* Looking inside another entity needs regional authority over that
+	 * entity's region. Ownership is not consulted here: eng_controls is the
+	 * authority test for acting on the object, while this is the narrower
+	 * test for observing inside it. */
+	if (loc_ref != player_ref && loc.type == TYPE_ENTITY) {
+		uint64_t lid = 0;
+		uint8_t lplen = ST_PLEN_ROOT;
+
+		if (st_region_of_obj(loc_ref, &lid, &lplen) != 0)
+			return;
+		if (!st_can_region(player_ref, lid, lplen))
+			return;
+	}
 
 	// use callbacks for mcp like this versus telnet
 	unsigned c = corm_iter(contents_hd, &loc_ref, CM_RANGE);
@@ -196,18 +255,23 @@ eng_look_at(unsigned player_ref, unsigned loc_ref)
 					"%s\r\n", eng_unparse(thing_ref));
 	}
 
-        buf[buf_l] = '\0';
-        nd_twritef(player_ref, "Contents: %s", buf);
+	buf[buf_l] = '\0';
+	/* Trailing newline, like every other look line: an empty inventory
+	 * leaves buf empty, and without the newline the "Contents: " fragment
+	 * has no line terminator on the wire -- same framing trap as wall's
+	 * shout (speech.c). A reader polling with a timeout discards the
+	 * unterminated tail, so the delivery happened but could never match. */
+	nd_twritef(player_ref, "Contents: %s\n", buf);
 }
 
 #define ADAM_SKEL_REF 0
 
 void
-do_look_at(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
+do_look_at(int fd, int argc, char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd), thing_ref;
 	OBJ player, thing;
-	char *name = argv[1];
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
 
 	if (*name == '\0') {
 		corm_get_copy(obj_hd, &player_ref, &(player));
@@ -221,6 +285,7 @@ do_look_at(int fd, int argc __attribute__((unused)), char *argv[] __attribute__(
 		  )
 	{
 		nd_writef(player_ref, NOMATCH_MESSAGE);
+		eng_nd_flush(player_ref);
 		return;
 	}
 
@@ -232,6 +297,7 @@ do_look_at(int fd, int argc __attribute__((unused)), char *argv[] __attribute__(
 		break;
 	}
 	eng_look_at(player_ref, thing_ref);
+	eng_nd_flush(player_ref);
 }
 
 int

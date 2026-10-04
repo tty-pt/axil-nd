@@ -23,10 +23,28 @@ static inline char * biome_bg(unsigned i) {
 	if (i >= BIOME_MAX) /* unmapped/limbo tiles: render void, never OOB */
 		i = 0;
 
-	SKEL skel;
-	corm_get_copy(skel_hd, &biome_map[i], &(skel));
+	/* Both halves of this read the row rather than trusting it: a biome with
+	 * no skel row leaves skel zeroed by the copy's miss, and a row from an
+	 * older build can carry a colour outside the eight ansi_bg[] slots. The
+	 * copy is bounded by the source string, not by sizeof(ret): ansi_bg
+	 * entries are 6-byte literals like "\033[40m" and memcpy-ing 16 bytes out
+	 * of one read 10 bytes past the literal (ASan, src/view.c:29). */
+	SKEL skel = { 0 };
 	biome_skel_t *biome_skel = (biome_skel_t *) skel.data;
-	memcpy(ret, ansi_bg[biome_skel->bg], sizeof(ret));
+	enum color bg = BLACK;
+	const char *src;
+	size_t n;
+
+	if (corm_get_copy(skel_hd, &biome_map[i], &(skel)),
+	    biome_skel->bg <= WHITE)
+		bg = biome_skel->bg;
+
+	src = ansi_bg[bg];
+	n = strlen(src);
+	if (n >= sizeof(ret))
+		n = sizeof(ret) - 1;
+	memcpy(ret, src, n);
+	ret[n] = 0;
 	return ret;
 }
 

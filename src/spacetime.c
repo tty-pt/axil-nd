@@ -1549,6 +1549,52 @@ st_can_region(unsigned player_ref, uint64_t id, uint8_t plen)
 	return 0;
 }
 
+/* Who governs (id,plen)? The same ancestor walk as st_can_region, but it
+ * answers with the owner instead of a yes/no, and it stops at the FIRST
+ * ancestor that has a row -- deepest wins, so a cell inside a ruled planet
+ * names the planet's ruler and not the cosmos ruler who also, technically,
+ * covers it.
+ *
+ * This exists because "you may not" is not an answer a player can act on: the
+ * whole point of naming the ruler on a refusal (the do_room template) is to
+ * tell them who to ask. Returning the shallowest owner would name the cosmos
+ * ruler for every refusal on the planet, which is true and useless.
+ *
+ * Returns NOTHING when no ancestor has a row, i.e. the region is unclaimed --
+ * distinct from "claimed by ref 0". st_can_region returning 0 with
+ * st_region_ruler returning NOTHING means nobody rules here; with a real owner
+ * it means somebody else does, which is the case a refusal must name. */
+unsigned
+st_region_ruler(uint64_t id, uint8_t plen)
+{
+	static const uint8_t widths[] = {
+		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
+	};
+	/* Same widths as st_can_region, but walked deepest-first: the array is
+	 * ascending, so it is walked in reverse. Reversing one array and not the
+	 * other is the kind of thing that silently answers the wrong question, so
+	 * both are derived from this one list below rather than each naming their
+	 * own. */
+	uint64_t mask;
+	size_t i;
+
+	if (plen > ST_PLEN_CELL)
+		return NOTHING;
+
+	for (i = sizeof(widths) / sizeof(widths[0]); i-- > 0; ) {
+		uint8_t w = widths[i];
+
+		if (w > plen)
+			continue;
+		mask = w ? (~0ULL << (64 - w)) : 0ULL;
+		unsigned owner = st_owner(id & mask, w);
+
+		if (owner != NOTHING)
+			return owner;
+	}
+	return NOTHING;
+}
+
 /* The region a pos_t falls in: the same derivation as st_region_of_player
  * (pos_t through pos_morton, then the deepest covering region), for a position
  * that is not necessarily where anybody stands. */
@@ -1704,6 +1750,176 @@ st_region_of_obj(unsigned ref, uint64_t *id, uint8_t *plen)
 	return XY_ERR_NOTFOUND;
 }
 
+/* Region bans (ST.md §27.6(1) §7). Keys are fixed-width strings
+ * "PPPPPPPPPP:IIIIIIIIIIIIIIII:PP" (player, hex id, plen): zero-padded so
+ * lexicographic order IS (player, id, plen) order, keeping one player's rows
+ * contiguous for range scans. A builtin CM_STR key. Exact-key put/get/del
+ * are all any caller uses. */
+#define BAN_KEY_LEN 32
+
+static void
+st_ban_key(char *k, size_t len, unsigned player, uint64_t id, uint8_t plen)
+{
+	snprintf(k, len, "%010u:%016llx:%02u", player,
+		(unsigned long long)id, plen);
+}
+
+unsigned ban_hd = (unsigned)-1;
+static const char *ban_db = NULL;
+
+static int
+st_ban_have(void)
+{
+	return ban_hd != (unsigned)-1 && ban_hd != CM_MISS;
+}
+
+int
+st_ban_init(const char *db)
+{
+	ban_db = db;
+	ban_hd = corm_open(db, "region_ban", CM_STR, CM_U32, 0xFFFF, 0);
+	if (!st_ban_have())
+		WARN("st_ban_init: ban table unavailable, bans unenforced\n");
+	return st_ban_have();
+}
+
+void
+st_ban_put(unsigned player_ref, uint64_t id, uint8_t plen, unsigned banner)
+{
+	char k[BAN_KEY_LEN];
+
+	if (!st_ban_have())
+		return;
+	st_ban_key(k, sizeof(k), player_ref, id, plen);
+	corm_put(ban_hd, k, &banner);
+}
+
+int
+st_ban_lookup(unsigned player_ref, uint64_t id, uint8_t plen,
+	unsigned *banner)
+{
+	char k[BAN_KEY_LEN];
+	const void *v;
+
+	if (!st_ban_have())
+		return 0;
+	st_ban_key(k, sizeof(k), player_ref, id, plen);
+	v = corm_get(ban_hd, k);
+	if (!v)
+		return 0;
+	if (banner)
+		*banner = *(const unsigned *)v;
+	return 1;
+}
+
+int
+st_ban_del(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	unsigned banner;
+
+	if (!st_ban_lookup(player_ref, id, plen, &banner))
+		return 0;
+	{
+		char k[BAN_KEY_LEN];
+
+		st_ban_key(k, sizeof(k), player_ref, id, plen);
+		corm_del(ban_hd, k);
+	}
+	return 1;
+}
+
+int
+st_ban_at(unsigned player_ref, uint64_t id, uint8_t plen,
+	uint64_t *ban_id, uint8_t *ban_plen)
+{
+	if (!st_ban_lookup(player_ref, id, plen, NULL))
+		return 0;
+	if (ban_id)
+		*ban_id = id;
+	if (ban_plen)
+		*ban_plen = plen;
+	return 1;
+}
+
+int
+st_ban_check(unsigned player_ref, uint64_t code,
+	uint64_t *ban_id, uint8_t *ban_plen)
+{
+	static const uint8_t widths[] = {
+		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
+	};
+	size_t i;
+
+	if (!st_ban_have())
+		return 0;
+	for (i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+		uint64_t mask = widths[i] ? (~0ULL << (64 - widths[i])) : 0ULL;
+
+		if (st_ban_at(player_ref, code & mask, widths[i],
+				ban_id, ban_plen))
+			return 1;
+	}
+	return 0;
+}
+
+/* The retired EF_BAN bit, kept as a literal for the migration read below.
+ * The enum member is gone (ST.md §27.6(1) §7 supersedes the bit with this
+ * table); nothing sets bit 16 anymore, so any row still carrying it is a ban
+ * from before the upgrade. */
+#define EF_BAN_LEGACY 16
+
+void
+st_ban_migrate(void)
+{
+	unsigned c;
+	const void *kp, *vp;
+
+	if (!st_ban_have())
+		return;
+	c = corm_iter(ent_hd, NULL, 0);
+	while (corm_next(&kp, &vp, c)) {
+		unsigned ref = *(const unsigned *)kp;
+		ENT e = *(const ENT *)vp;
+
+		if (!(e.flags & EF_BAN_LEGACY))
+			continue;
+		/* Banner unknown for legacy bans: NOTHING, which no live ref can
+		 * collide with. Region rulers can still unban through the region
+		 * rule; nobody can claim to be the original banner. */
+		if (!st_ban_have())
+			continue;
+		st_ban_put(ref, 0, ST_PLEN_ROOT, NOTHING);
+		e.flags &= ~EF_BAN_LEGACY;
+		eng_ent_set(ref, &e);
+	}
+	corm_fin(c);
+}
+
+/* Name a banned place for messages: the world number when it has one, the
+ * honest "everywhere" for a cosmos ban, "this region" otherwise. Shared by
+ * the ban/unban confirmations and the entry refusal so the place never has
+ * three spellings. */
+void
+st_ban_place(uint64_t id, uint8_t plen, char *buf, size_t len)
+{
+	if (plen == ST_PLEN_ROOT)
+		snprintf(buf, len, "everywhere");
+	else if (plen == ST_PLEN_WORLD)
+		snprintf(buf, len, "world %u", st_world_of(id));
+	else
+		snprintf(buf, len, "this region");
+}
+
+void
+st_ban_refuse(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	char place[64];
+
+	st_ban_place(id, plen, place, sizeof(place));
+	nd_writef(player_ref, "You are banned from %s.\n", place);
+	eng_nd_flush(player_ref);
+}
+
 /* The ruler's display name for a row header: the OBJ name when the ref still
  * resolves, otherwise the bare number. corm_get_copy returns void, so
  * existence is tested first -- a released owner's ref must not print garbage. */
@@ -1719,6 +1935,30 @@ st_owner_name(unsigned owner_ref, char *buf, size_t len)
 	} else {
 		snprintf(buf, len, "%u", owner_ref);
 	}
+}
+
+/* The one refusal message every region gate uses, so "why" never depends on
+ * which command you typed. do_room already had this shape inline; it is here
+ * so the six gates do not each invent a wording, and because naming the ruler
+ * is only possible if the caller can ask who the ruler is.
+ *
+ * Flushes: every gate that calls this returns immediately afterwards, and
+ * nd_writef buffers per fd until the NEXT command (io.c), so an unflushed
+ * refusal is indistinguishable from silence -- which is how five of the six
+ * commands managed to look like no-ops for so long (ST.md §27.6(1)). */
+void
+st_refuse_region(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	char oname[64];
+	unsigned ruler = st_region_ruler(id, plen);
+
+	if (ruler == NOTHING)
+		nd_writef(player_ref, "Permission denied (this area is unclaimed)\n");
+	else {
+		st_owner_name(ruler, oname, sizeof(oname));
+		nd_writef(player_ref, "Permission denied (ruled by %s)\n", oname);
+	}
+	eng_nd_flush(player_ref);
 }
 
 static void
@@ -1741,7 +1981,7 @@ st_row_header(unsigned player_ref, uint64_t id, uint8_t plen,
 /* argv[world_arg] names a world outright; without it, the caller's
  * position-derived region. Returns XY_OK with (*id, *plen) set, or a
  * negative XY_ERR_* with nothing set. */
-static int
+int
 st_cmd_region(unsigned player_ref, int argc, char *argv[], int world_arg,
 	uint64_t *id, uint8_t *plen)
 {

@@ -2,6 +2,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <ttypt/corm.h>
@@ -11,6 +15,8 @@
 #include "noise.h"
 #include "params.h"
 #include "player.h"
+#include "st.h"
+#include "uapi/skel.h"
 #include "uapi/entity.h"
 #include "uapi/io.h"
 #include "uapi/map.h"
@@ -401,19 +407,13 @@ ok_name(const char *name)
 }
 
 void
-do_clone(int fd, int argc __attribute__((unused)), char *argv[])
+do_clone(int fd, int argc, char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd), thing_ref;
-	char *name = argv[1];
+	uint64_t tid = 0;
+	uint8_t tplen = ST_PLEN_ROOT;
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
 
-/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
- * it, so this gate was already unconditionally taken. Left explicit rather
- * than deleted so the suite still passes for the same reason it passed
- * before -- the region gate lands in the next commit. */
-	nd_writef(player_ref, CANTDO_MESSAGE);
-	eng_nd_flush(player_ref);
-	return;
-	
 	if (
 			(thing_ref = eng_ematch_absolute(name)) == NOTHING
 			&& (thing_ref = eng_ematch_mine(player_ref, name)) == NOTHING
@@ -421,6 +421,18 @@ do_clone(int fd, int argc __attribute__((unused)), char *argv[])
 	   )
 	{
 		nd_writef(player_ref, NOMATCH_MESSAGE);
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* Region of the cloned object, then source control: cloning what is in
+	 * scope is not the same as controlling the source. Both have to pass. */
+	if (st_region_of_obj(thing_ref, &tid, &tplen) != 0) {
+		st_refuse_region(player_ref, 0, ST_PLEN_ROOT);
+		return;
+	}
+	if (!st_in_scope(player_ref, 0, ST_SEL_UNSET, tid, tplen)) {
+		st_refuse_region(player_ref, tid, tplen);
 		return;
 	}
 
@@ -429,6 +441,7 @@ do_clone(int fd, int argc __attribute__((unused)), char *argv[])
 
 	if(!eng_controls(player_ref, thing_ref)) {
 		nd_writef(player_ref, CANTDO_MESSAGE);
+		eng_nd_flush(player_ref);
 		return;
 	}
 
@@ -453,6 +466,11 @@ do_clone(int fd, int argc __attribute__((unused)), char *argv[])
 			{
 				ENT eclone = eng_ent_get(clone_ref);
 				eclone.home = eng_ent_get(thing_ref).home;
+				/* NOTHING, not zero: objects_init documents a missing
+				 * last_observed as NOTHING, and the eng_look_at
+				 * same-room guard depends on it. Zero is ref 0, a real
+				 * row, and would read as "last seen in object 0". */
+				eclone.last_observed = NOTHING;
 				eng_ent_set(clone_ref, &eclone);
 			}
 			break;
@@ -461,51 +479,113 @@ do_clone(int fd, int argc __attribute__((unused)), char *argv[])
 	clone.type = thing.type;
 
 	corm_put(obj_hd, &clone_ref, &clone);
+	/* A clone is a birth like any other: without nd_evt_add no module
+	 * initializes its rows (nd-mortal's mortal row, nd-spell's caster row),
+	 * and the next world tick reads the absence as data. Measured: a cloned
+	 * human segfaulted the daemon in nd-spell's debuf_notify two ticks
+	 * later, via mortal_update on a missing mortal row. nd_evt_clone fires
+	 * too, but no module implements on_clone -- it announces, it does not
+	 * initialize. The birth value is the source's own value, the same thing
+	 * eng_object_add hands on_add for a created object. */
+	nd_evt_add(clone_ref, clone.type, clone.value);
 	nd_evt_clone(thing_ref, clone_ref);
 	eng_object_move(clone_ref, player_ref);
+	eng_nd_flush(player_ref);
 }
 
 void
-do_create(int fd, int argc __attribute__((unused)), char *argv[])
+do_create(int fd, int argc, char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd),
-		 ref, pflags, skid;
-	uint64_t v;
-	char *name;
+		 ref;
+	unsigned long long skid;
+	unsigned long long value = 0;
+	uint64_t cid = 0;
+	uint8_t cplen = ST_PLEN_ROOT;
+	uint64_t v = 0;
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
+	char *skid_text = (argc > 2 && argv[2]) ? argv[2] : "";
+	char *value_text = (argc > 3 && argv[3]) ? argv[3] : "";
+	char *end = NULL;
 	OBJ obj;
 
-	if (argc < 2) {
+	if (!*name || !*skid_text || !ok_name(name)) {
 		nd_writef(player_ref, "Syntax: create name skel_id [v]\n");
+		eng_nd_flush(player_ref);
 		return;
 	}
 
-	pflags = eng_ent_get(player_ref).flags;
-	name = argv[1];
-	skid = strtoull(argv[2], NULL, 10);
-	if (argc > 2)
-		v = strtoull(argv[3], NULL, 10);
+	skid = 0;
+	errno = 0;
+	if (*skid_text == '-' || isspace((unsigned char)*skid_text)) {
+		nd_writef(player_ref, "Syntax: create name skel_id [v]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	skid = strtoull(skid_text, &end, 10);
+	if (errno || !end || *end || skid > UINT_MAX) {
+		nd_writef(player_ref, "Syntax: create name skel_id [v]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (*value_text) {
+		if (*value_text == '-' ||
+				isspace((unsigned char)*value_text)) {
+			nd_writef(player_ref, "Syntax: create name skel_id [v]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		errno = 0;
+		value = strtoull(value_text, &end, 10);
+		if (errno || !end || *end) {
+			nd_writef(player_ref, "Syntax: create name skel_id [v]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		v = (uint64_t)value;
+	}
 
-	/* pflags and name are unused while the gate is unconditional; both come
-	 * back with the region gate. */
-	(void)pflags;
-	(void)name;
+	/* The new object lands in the creator's inventory, so there is no target
+	 * placement to authorize. The honest scope is the region the creator is
+	 * standing in, checked against the union of regions they rule. */
+	if (st_region_of_player(player_ref, &cid, &cplen) != 0) {
+		st_refuse_region(player_ref, 0, ST_PLEN_ROOT);
+		return;
+	}
+	if (!st_in_scope(player_ref, 0, ST_SEL_UNSET, cid, cplen)) {
+		st_refuse_region(player_ref, cid, cplen);
+		return;
+	}
 
-/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone, and nothing ever set
- * it, so this gate was already unconditionally taken. Left explicit rather
- * than deleted so the suite still passes for the same reason it passed
- * before -- the region gate lands in the next commit. */
-	nd_writef(player_ref, "You can't do that.\n");
-	eng_nd_flush(player_ref);
-	return;
+	/* A missing skeleton must not reach eng_object_add: it copies the row
+	 * without checking, so an absent row would seed the new object from
+	 * uninitialized stack memory. A room skeleton must not reach it either:
+	 * the TYPE_ROOM branch reads `v` as a `struct bio *`, which a command
+	 * line cannot truthfully supply. Rooms are made with `room`. */
+	SKEL skel;
+	unsigned skid_ref = (unsigned)skid;
+	if (!corm_get(skel_hd, &skid_ref)) {
+		nd_writef(player_ref, NOMATCH_MESSAGE);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	memset(&skel, 0, sizeof(skel));
+	corm_get_copy(skel_hd, &skid_ref, &skel);
+	if (skel.type == TYPE_ROOM) {
+		nd_writef(player_ref, "Rooms are made with `room`, not `create`.\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
 
 	OBJ player;
 	corm_get_copy(obj_hd, &player_ref, &(player));
 
-	ref = eng_object_add(&obj, skid, player_ref, v, 0);
+	ref = eng_object_add(&obj, (unsigned)skid, player_ref, v, 0);
 	obj.owner = player.owner;
 
 	corm_put(obj_hd, &ref, &obj);
 	nd_writef(player_ref, "Created.\n");
+	eng_nd_flush(player_ref);
 }
 
 void
@@ -533,20 +613,31 @@ do_name(int fd, int argc __attribute__((unused)), char *argv[])
 }
 
 void
-do_chown(int fd, int argc __attribute__((unused)), char *argv[])
+do_chown(int fd, int argc, char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd), owner_ref, thing_ref;
-	char *name = argv[1];
-	char *newowner = argv[2];
+	uint64_t tid = 0;
+	uint8_t tplen = ST_PLEN_ROOT;
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
+	char *newowner = (argc > 2 && argv[2]) ? argv[2] : "";
 
-	/* INTERMEDIATE (ST.md §27.6(1)): EF_WIZARD is gone and nothing ever set
-	 * it, so this was already 0 -- i.e. the containment rule below always
-	 * applied. Kept as a named 0 rather than deleted, so the containment logic
-	 * stays readable and the region gate is a one-line change. */
-	int wizard = 0;
-
-	if (!*name || !*newowner || (thing_ref = eng_ematch_all(player_ref, name)) == NOTHING) {
+	if (!*name || !*newowner ||
+			(thing_ref = eng_ematch_all(player_ref, name)) == NOTHING) {
 		nd_writef(player_ref, NOMATCH_MESSAGE);
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* Ownership can only move inside the actor's authority. This gate comes
+	 * before the old containment/entity rules: those say whether the move is
+	 * shaped correctly, while the region says whether this actor may touch
+	 * the object at all. */
+	if (st_region_of_obj(thing_ref, &tid, &tplen) != 0) {
+		st_refuse_region(player_ref, 0, ST_PLEN_ROOT);
+		return;
+	}
+	if (!st_can_region(player_ref, tid, tplen)) {
+		st_refuse_region(player_ref, tid, tplen);
 		return;
 	}
 
@@ -560,16 +651,18 @@ do_chown(int fd, int argc __attribute__((unused)), char *argv[])
 	corm_get_copy(obj_hd, &thing_ref, &(thing));
 
 	if (thing.type == TYPE_ENTITY ||
-			(!wizard && ((thing.type == TYPE_ROOM && player.location != thing_ref)
-				     || (thing.type != TYPE_ROOM && thing.location != player_ref ))))
+			((thing.type == TYPE_ROOM && player.location != thing_ref)
+				     || (thing.type != TYPE_ROOM && thing.location != player_ref )))
 		goto error;
 
 	thing.owner = owner_ref;
 	corm_put(obj_hd, &thing_ref, &thing);
+	eng_nd_flush(player_ref);
 	return;
 
 error:
 	nd_writef(player_ref, CANTDO_MESSAGE);
+	eng_nd_flush(player_ref);
 }
 
 void

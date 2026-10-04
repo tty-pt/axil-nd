@@ -101,10 +101,11 @@ typedef struct {
 
 /* Mirrors uapi/object.h's enum entity_flags. EF_WIZARD (8) is gone there and
  * must stay gone here: modules compile against this copy, so a module still
- * naming EF_WIZARD would be testing a flag nothing sets. ST.md §27.6(1). */
+ * naming EF_WIZARD would be testing a flag nothing sets. ST.md §27.6(1).
+ * EF_BAN (16) is gone for the same reason: the ban table supersedes the bit
+ * (ST.md §27.6(1) §7). */
 enum entity_flags {
 	EF_SHOP = 4,
-	EF_BAN = 16,
 };
 
 enum base_actions {

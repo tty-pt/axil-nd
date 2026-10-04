@@ -91,6 +91,7 @@ void do_say(int fd, int argc, char *argv[]);
 void do_select(int fd, int argc, char *argv[]);
 void do_status(int fd, int argc, char *argv[]);
 void do_teleport(int fd, int argc, char *argv[]);
+void do_unban(int fd, int argc, char *argv[]);
 void do_room(int fd, int argc, char *argv[]);
 void do_deny(int fd, int argc, char *argv[]);
 void do_toad(int fd, int argc, char *argv[]);
@@ -122,49 +123,39 @@ world_db(void)
 	return db && *db ? db : "std.db";
 }
 
+/* Shutdown: flush, save, leave. NO corm_close() anywhere in this path, and
+ * that is the whole point (measured Oct 2026, after the ban table made the
+ * pre-existing bug deterministic).
+ *
+ * libcorm saves every file-backed map from a library destructor at process
+ * exit (corm.h:181). Closing the maps first does not make that save a no-op:
+ * it makes it destructive, because the save then recomputes the store's size
+ * from what is left in corm's file cache and rewrites the file at that size.
+ * With every map closed the cache holds the file and nothing else, so the
+ * walk emitted corm's 16-byte header and the next boot found an empty world.
+ * The exact shape of the damage varied with what else was still open (16, 1184,
+ * 1600, 2000, 2400, 3200 bytes across runs), which is why this read as a
+ * nondeterministic flake instead of a bug.
+ *
+ * Symptom chain, all measured on this tree: `save` mid-run wrote a correct
+ * 8229-byte image; the following SIGTERM rewrote the same file as 3200 bytes
+ * of seeds with no player, no region and no ban; boot B then restored nothing
+ * ("st_restore: region id=0x0 plen=0" and nothing else) and the S8 reboot
+ * gate failed with "ban did not survive the reboot". The planet gate failed
+ * the same way, as "lost planet 1's surviving module" with a 16-byte db.
+ *
+ * Every path into here ends in process exit -- on_axil_exit() on a clean
+ * shutdown, the SIGSEGV handler otherwise -- so freeing maps here bought
+ * nothing and cost the store. Leaving them open makes our save and libcorm's
+ * exit save write the same image, both with every map intact. */
 void
 close_all(int i)
 {
 	map_sync();
+	mod_close();
 	corm_save();
 
-	mod_close();
-
-	corm_close(dplayer_hd);
-	corm_close(fds_hd);
-
-	corm_close(owner_hd);
-
-	corm_close(vtf_hd);
-	corm_close(situc_hd);
-	corm_close(sica_hd);
-	corm_close(sican_hd);
-	corm_close(bcp_hd);
-	corm_close(hd_hd);
-
-	corm_close(action_hd);
-	corm_close(type_hd);
-	corm_close(ent_hd);
-	corm_close(player_hd);
-	corm_close(obj_hd);
-	corm_close(contents_hd);
-	corm_close(obs_hd);
-	map_close(0);
-
-	corm_close(skel_hd);
-	corm_close(drop_hd);
-	corm_close(adrop_hd);
-	corm_close(element_hd);
-	corm_close(wts_hd);
-	corm_close(awts_hd);
-	corm_close(biome_hd);
-
-	corm_close(mod_hd);
-	corm_close(mod_id_hd);
-
 	closelog();
-	if (!i)
-		corm_save();
 	sync();
 	if (i)
 		exit(i);
@@ -520,6 +511,10 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	mod_id_hd = corm_open(db, "module_id", CM_U32, CM_PTR, 0xFF, CM_AINDEX);
 	mod_hd = corm_open(NULL, "mod", CM_STR, CM_U32, 0xFF, 0);
 
+	/* The ban table opens here, at boot with the other engine tables (see
+	 * st_ban_init): a table opened later loses its rows at shutdown. */
+	st_ban_init(db);
+
 	/* obj_hd persists, so room 0 distinguishes fresh from existing. Decided
 	 * once here, before any seeding puts below; every !existed guard in
 	 * this function reads it. */
@@ -636,6 +631,13 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 
 	objects_init();
 
+	/* Retired-bit migration runs on EVERY boot, not just fresh ones: an
+	 * existing store may still carry EF_BAN from before the ban table
+	 * existed, and without this those bans would silently vanish on
+	 * upgrade. st_ban_migrate is idempotent (it clears the bit as it
+	 * goes), so re-running on a clean store is a no-op scan. */
+	st_ban_migrate();
+
 	/* Restored boots re-run every persisted set's xy_install; fresh boots
 	 * need nothing here because nd_mods_load() (from xy_install, after this
 	 * returns) installs mods.load. The old eng_st_run(-1, "mod_init") walked
@@ -729,6 +731,9 @@ struct cmd_slot cmds[] = {
 	}, {
 		.name = "teleport",
 		.cb = &do_teleport,
+	}, {
+		.name = "unban",
+		.cb = &do_unban,
 	}, {
 		.name = "wall",
 		.cb = &do_wall,
@@ -920,13 +925,11 @@ nd_player_login(int fd, char *user)
 
 		nd_evt_new_player(player_ref);
 	} else {
-		ENT eplayer = eng_ent_get(player_ref);
-
-		if (eplayer.flags & EF_BAN) {
-			nd_writef(player_ref, "You are banned.\n");
-			return 0;
-		}
-
+		/* Entry-only enforcement (ST.md §27.6(1) §7): login is always
+		 * allowed, and a ban bites on arrival instead. "Excluded from
+		 * region R" is meaningless for a login that spawns into the
+		 * void, and a login refusal would turn a cosmos-wide ban into a
+		 * permanent lockout. */
 		nd_io_attach(fd, player_ref);
 	}
 

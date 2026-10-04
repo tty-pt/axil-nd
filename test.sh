@@ -1736,4 +1736,452 @@ exec 8<&-
 killaxil $mp_pid
 rm -rf "$mpdb"
 
+# ---------------------------------------------------------------------------
+# --- S7: region ownership gates (NO_WIZ.md §5 + §6) ---------------------------
+# ---------------------------------------------------------------------------
+# EF_WIZARD is gone, so every gate that used to read `!(flags & EF_WIZARD)`
+# became an unconditional denial. Authority is now derived from the st region
+# rows: a gate asks st_can_region()/st_in_scope() and a refusal NAMES the ruler.
+#
+# The only two-player authority assertion that is constructible here is
+# owner-yes / guest-no, and NO_WIZ.md §13.7 says why there is no other: a
+# non-cosmos ruler cannot be created (do_planet needs cosmos authority to claim
+# a new planet, do_release deletes the row instead of clearing the owner, no
+# transfer command exists), so in a fresh store the first player owns cosmos
+# (0,0) -- which covers the whole address space -- and every other player rules
+# nothing at all. The owner half is therefore the positive boundary and the
+# guest half is the negative one; there is no third party to be negative
+# against. Selector-scoped wall/ban narrow the same boundary without needing a
+# second ruler.
+#
+# Refs are parsed in-band from `status` on the socket that owns them: a room
+# carved after login can get a LOWER ref than a player, so nothing here is
+# hardcoded. Same per-fd transcripts as S6 -- an assertion that a line is
+# ABSENT needs a transcript holding only this command's output.
+w7=$((20000 + RANDOM % 8000))
+w7db=$(mktemp -d)
+w7la="$w7db/a.log"
+w7_owner_txt="$w7db/owner.txt"
+w7_guest_txt="$w7db/guest.txt"
+: > "$w7_owner_txt"
+: > "$w7_guest_txt"
+
+AXIL_ND_DB="$w7db/w.db" axil -d -A -p "$w7" -m ./lib/axil-nd >"$w7la" 2>&1 &
+w7_pid=$!
+wait_up "$w7la" "$w7" || { echo "FAIL: S7 boot did not init" >&2; exit 1; }
+
+w7cmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+w7wait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+w7clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+# One command per socket, transcript wiped first, so the file provably holds
+# only this command's output and an absence assertion means something.
+w7run() { : > "$2"; w7cmd "$1" "$2" "$3"; }
+w7ref() { w7clean "$1" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1; }
+
+w7_guest="ndwiz$$"
+exec 7<>/dev/tcp/127.0.0.1/$w7
+w7cmd 7 "$w7_owner_txt" "connect $user"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$w7la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S7 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$w7
+w7cmd 8 "$w7_guest_txt" "connect $w7_guest"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$w7_guest'" "$w7la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S7 guest login not seen" >&2; exit 1; }
+
+# Both refs, from each socket's own status line: `name (<ref>) type 1 ...`.
+w7run 8 "$w7_guest_txt" "status"
+w7wait 8 "$w7_guest_txt" ") type " || { echo "FAIL: S7 guest status (tail: $(w7clean "$w7_guest_txt" | tail -3))" >&2; exit 1; }
+w7_guest_ref=$(w7ref "$w7_guest_txt")
+[ -n "$w7_guest_ref" ] || { echo "FAIL: S7 no guest ref (tail: $(w7clean "$w7_guest_txt" | head -2))" >&2; exit 1; }
+w7run 7 "$w7_owner_txt" "status"
+w7wait 7 "$w7_owner_txt" ") type " || { echo "FAIL: S7 owner status (tail: $(w7clean "$w7_owner_txt" | tail -3))" >&2; exit 1; }
+w7_owner_ref=$(w7ref "$w7_owner_txt")
+[ -n "$w7_owner_ref" ] || { echo "FAIL: S7 no owner ref (tail: $(w7clean "$w7_owner_txt" | head -2))" >&2; exit 1; }
+
+# The refusal every gate shares: st_refuse_region() names the ruler of the
+# region the TARGET is in, so the guest's refusals all name the owner. Asserted
+# as the fixed prefix plus the owner's real name, which is the whole point --
+# a gate that printed a bare "You can't do that." would fail here.
+w7_refused() {
+	local fd=$1 file=$2 label=$3
+	grep -qaF "Permission denied (ruled by $user" "$file" \
+		&& return 0
+	echo "FAIL: $label: expected a refusal naming $user; got: $(w7clean "$file" | tr '\n' '|' | tail -c 200)" >&2
+	exit 1
+}
+
+# --- 1. `create`: the guest rules nothing, the owner rules the cosmos ---------
+# Object refs for the section are derived by diffing the owner's own listing
+# before and after: `create` names the new object after its SKELETON, not after
+# the requested name (pre-existing behaviour, out of scope), so the requested
+# name never appears on the wire. Tokens are `(#N)` ref markers, one per line,
+# sorted for comm.
+w7tokens() { w7clean "$1" | grep -o '(#[0-9][0-9]*)' | sort -u; }
+w7run 7 "$w7_owner_txt" "owned"
+w7wait 7 "$w7_owner_txt" "objects found" || { echo "FAIL: S7 owner listing never answered (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7tokens "$w7_owner_txt" > "$w7db/before.txt"
+w7run 8 "$w7_guest_txt" "create guestpebble 0"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest create did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest create"
+
+w7run 7 "$w7_owner_txt" "create ownerpebble 0"
+w7wait 7 "$w7_owner_txt" "Created" || { echo "FAIL: S7 owner create refused (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# Skeleton IDs are checked before touching the object table. Skid 0 is the
+# seeded human/entity skeleton; skid 1 is the seeded void room skeleton, whose
+# creation path reads the numeric `v` argument as a `struct bio *` and faults
+# on zero (measured: the pre-guard form segfaulted the S7 daemon here).
+# Modules may add further skeletons at boot, so the absent case uses UINT_MAX,
+# which cannot be allocated in this store.
+w7run 7 "$w7_owner_txt" "create badroom 1"
+w7wait 7 "$w7_owner_txt" "Rooms are made with" || { echo "FAIL: S7 room skeleton was not rejected safely (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$w7_pid" 2>/dev/null \
+	|| { echo "FAIL: S7 room skeleton killed the daemon" >&2; exit 1; }
+w7run 7 "$w7_owner_txt" "create noskel 4294967295"
+w7wait 7 "$w7_owner_txt" "don't know what you mean" || { echo "FAIL: S7 absent skeleton was not rejected safely (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$w7_pid" 2>/dev/null \
+	|| { echo "FAIL: S7 absent skeleton killed the daemon" >&2; exit 1; }
+
+# --- 2. `clone`: guest refused, owner may clone their own ---------------------
+# The guest cannot resolve the owner's inventory by name, so the negative half
+# uses the object's absolute ref: `#<ref>` resolves globally and leaves only
+# the region gate to answer.
+w7run 7 "$w7_owner_txt" "owned"
+w7wait 7 "$w7_owner_txt" "objects found" || { echo "FAIL: S7 owner re-listing never answered (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7tokens "$w7_owner_txt" > "$w7db/after.txt"
+w7_pebble_ref=$(comm -13 "$w7db/before.txt" "$w7db/after.txt" | sed 's/(#//;s/)//' | head -1)
+[ -n "$w7_pebble_ref" ] || { echo "FAIL: S7 create left no new object" >&2; exit 1; }
+[ "$(comm -13 "$w7db/before.txt" "$w7db/after.txt" | wc -l)" = "1" ] \
+	|| { echo "FAIL: S7 create left more than one new object" >&2; exit 1; }
+w7run 8 "$w7_guest_txt" "clone #$w7_pebble_ref"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest clone did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest clone"
+
+# `clone` answers with silence on success, so the owner's listing proves it:
+# exactly one new `(#N)` token must appear after the clone.
+w7cmd 7 "$w7_owner_txt" "clone #$w7_pebble_ref"
+w7run 7 "$w7_owner_txt" "owned"
+w7wait 7 "$w7_owner_txt" "objects found" || { echo "FAIL: S7 owner post-clone listing never answered (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7tokens "$w7_owner_txt" > "$w7db/cloned.txt"
+[ "$(comm -13 "$w7db/after.txt" "$w7db/cloned.txt" | wc -l)" = "1" ] \
+	|| { echo "FAIL: S7 owner clone left no new object (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 3. `chown` negative half + the room the rest of S7 needs ------------------
+w7run 8 "$w7_guest_txt" "chown #$w7_pebble_ref me"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest chown did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest chown"
+
+# The owner carves a world room (`room` creates-or-finds AND enters) whose ref
+# the teleport and chown proofs below both need. It is still ROOT-owned here;
+# the ownership transfer to the guest comes AFTER the teleport proof, because
+# §6.1 case 3 refuses region authority over a player-owned non-entity -- once
+# the guest owns this room, not even the cosmos ruler may teleport anyone
+# INTO it. That ordering is load-bearing, not incidental.
+w7run 7 "$w7_owner_txt" "room 0 0 0 1"
+w7wait 7 "$w7_owner_txt" " at 0 0 0 1" || { echo "FAIL: S7 owner could not carve a room (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_room_ref=$(w7clean "$w7_owner_txt" | sed -n 's/^room \([0-9][0-9]*\) at .*/\1/p' | head -1)
+[ -n "$w7_room_ref" ] || { echo "FAIL: S7 no carved room ref (tail: $(w7clean "$w7_owner_txt" | head -5))" >&2; exit 1; }
+w7run 8 "$w7_guest_txt" "owned"
+w7wait 8 "$w7_guest_txt" "objects found" || { echo "FAIL: S7 guest listing never answered (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7clean "$w7_guest_txt" | grep -qaF "(#$w7_room_ref)" \
+	|| { echo "FAIL: S7 carved room not listed before chown" >&2; exit 1; }
+
+# --- 4. §6.1 eng_controls: the guest cannot move the owner -------------------
+# The victim is an entity owned by somebody else, so the gate falls through to
+# st_can_region(who, region_of(victim)). The owner is in the carved world room
+# and the guest is in the void; the owner rules both regions through the
+# cosmos and the guest rules neither. S6 already proved the owner's half
+# (owner teleports the guest); this is the negative half, and it must refuse
+# WITHOUT killing the daemon.
+w7run 8 "$w7_guest_txt" "teleport #$w7_owner_ref here"
+w7wait 8 "$w7_guest_txt" "can't do that" \
+	|| { echo "FAIL: S7 guest teleport did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$w7_pid" 2>/dev/null \
+	|| { echo "FAIL: S7 guest teleport killed the daemon" >&2; exit 1; }
+
+# The owner still CAN move the guest into the still-ROOT-owned room -- a gate
+# that refuses everyone would pass the negative half alone.
+w7run 7 "$w7_owner_txt" "teleport #$w7_guest_ref here"
+w7wait 8 "$w7_guest_txt" "wrenching" \
+	|| { echo "FAIL: S7 owner lost the ability to teleport the guest (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 5. `chown` positive half: the owner CAN move the room to the guest ------
+# The pebble is an entity and entities cannot change hands (the old
+# entity-vs-object rule), so this transfers the carved room instead. Ownership
+# is observed through `owned`, whose rows are filtered by the victim's owner
+# field: before the transfer the room is ROOT-owned and listed, after it the
+# room belongs to the guest ref and drops out of the guest's own listing.
+# `chown` answers with silence on success, so the owner's `status` sequences
+# it: a status answer proves the chown was processed before the guest re-lists.
+: > "$w7_owner_txt"
+w7cmd 7 "$w7_owner_txt" "chown #$w7_room_ref $w7_guest"
+w7cmd 7 "$w7_owner_txt" "status"
+w7wait 7 "$w7_owner_txt" ") type " || { echo "FAIL: S7 owner status never answered after chown (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7run 8 "$w7_guest_txt" "owned"
+w7wait 8 "$w7_guest_txt" "objects found" || { echo "FAIL: S7 guest re-listing never answered (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7clean "$w7_guest_txt" | grep -qaF "(#$w7_room_ref)" \
+	&& { echo "FAIL: S7 owner chown did not move the room" >&2; exit 1; }
+
+# --- 6. `owned <name>`: the silent fall-through is gone ------------------------
+# do_owned used to print the CALLER'S OWN list plus "N objects found" when a
+# non-ruler passed a name -- misleading, not a refusal, so this asserts the
+# named refusal and not merely "something was printed".
+w7run 8 "$w7_guest_txt" "owned $user"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest owned did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest owned"
+w7clean "$w7_guest_txt" | grep -qaF "objects found" \
+	&& { echo "FAIL: S7 guest 'owned \$user' still fell through to a listing" >&2; exit 1; }
+
+# The no-arg form is unchanged: it is the caller's own inventory and has no
+# region to authorize against. Proved for both sides so the gate cannot be
+# "fixing" the refusal by breaking self-inspection.
+w7run 8 "$w7_guest_txt" "owned"
+w7wait 8 "$w7_guest_txt" "objects found" || { echo "FAIL: S7 guest lost no-arg owned (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 7. `wall`: selector + delivery ------------------------------------------
+# `wall all <msg>` names the cosmos explicitly, so only its ruler passes the
+# authority check. The guest rules nothing, including the cosmos, and is
+# therefore refused; a cosmos selection is not a way to smuggle "everywhere"
+# past the gate.
+w7run 8 "$w7_guest_txt" "wall all hello 3"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest wall did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest wall"
+
+# The owner's wall must reach the GUEST and say so with the speaker's name.
+# `wall all hello 3` has to stay ONE message: the message is built from the
+# words after the selector, so a bare "3" must not be swallowed as a world
+# number. (The guest is in the carved room by now, but the delivery proof uses
+# `all` anyway: it is the selector with the widest authority demand.)
+w7run 7 "$w7_owner_txt" "wall all hello 3"
+w7wait 8 "$w7_guest_txt" "shouts:  hello 3" \
+	|| { echo "FAIL: S7 owner wall did not reach the guest (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7clean "$w7_guest_txt" | grep -qaF "$user shouts:" \
+	|| { echo "FAIL: S7 wall did not name the speaker" >&2; exit 1; }
+
+# --- 8. §6.2 eng_look_at: the owner may look inside the guest ----------------
+# Reached with `look #<ref>`, NOT a name: do_look_at's ematch chain has no
+# eng_ematch_player, so a bare name silently falls back to the caller and the
+# assertion would be testing the wrong object entirely.
+w7run 7 "$w7_owner_txt" "look #$w7_guest_ref"
+w7wait 7 "$w7_owner_txt" "Contents:" \
+	|| { echo "FAIL: S7 owner could not look inside the guest (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# The guest may NOT look inside the owner. Before the grant this was
+# unconditionally true for EVERYONE, so there was no positive half anywhere;
+# the owner's look above is the grant and this is the boundary.
+w7run 8 "$w7_guest_txt" "look #$w7_owner_ref"
+w7wait 8 "$w7_guest_txt" "Contents:" \
+	&& { echo "FAIL: S7 guest looked inside the owner: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200)" >&2; exit 1; }
+# Silence is not proof, so the guest must be asked something that always
+# answers and the daemon must still be there.
+w7run 8 "$w7_guest_txt" "status"
+w7wait 8 "$w7_guest_txt" ") type " \
+	|| { echo "FAIL: S7 guest died after the guarded look" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $w7_pid
+rm -rf "$w7db"
+
+# ---------------------------------------------------------------------------
+# --- S8: region bans (NO_WIZ.md §7) -------------------------------------------
+# ---------------------------------------------------------------------------
+# Ban is a per-region exclusion row, not a global bit: (player, id, plen) in a
+# separate persisted `ban` table, enforced at every eng_enter() arrival. The
+# owner half is RED (today `ban` is an unconditional CANTDO and `teleport`
+# ignores bans entirely); the world-2 leak check is the boundary that a
+# global-ban implementation would fail.
+#
+# Same two-socket, per-fd-transcript discipline as S7. Refs are re-parsed after
+# the reboot: row keys persist, but nothing here hardcodes one.
+b8=$((20000 + RANDOM % 8000))
+b8db=$(mktemp -d)
+b8la="$b8db/a.log"
+b8_owner_txt="$b8db/owner.txt"
+b8_guest_txt="$b8db/guest.txt"
+: > "$b8_owner_txt"
+: > "$b8_guest_txt"
+
+AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
+b8_pid=$!
+wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot did not init" >&2; exit 1; }
+
+b8cmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+b8wait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+b8clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+b8run() { : > "$2"; b8cmd "$1" "$2" "$3"; }
+
+b8_guest="ndban$$"
+exec 7<>/dev/tcp/127.0.0.1/$b8
+b8cmd 7 "$b8_owner_txt" "connect $user"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b8
+b8cmd 8 "$b8_guest_txt" "connect $b8_guest"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b8_guest'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 guest login not seen" >&2; exit 1; }
+
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 guest status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8_guest_ref=$(b8clean "$b8_guest_txt" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1)
+[ -n "$b8_guest_ref" ] || { echo "FAIL: S8 no guest ref" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "room 0 0 0 1"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S8 owner could not carve world 1 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 1. `ban <guest> 1`: banned from world 1, and told so ----------------------
+b8run 7 "$b8_owner_txt" "ban $b8_guest 1"
+b8wait 7 "$b8_owner_txt" "Banned $b8_guest from world 1" \
+	|| { echo "FAIL: S8 ban did not confirm (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 2. the ban bites on arrival, naming the region --------------------------
+# The owner CAN move the guest (controls passes) but eng_enter refuses the
+# arrival: the guest must stay where they are, told why, daemon alive.
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 guest pre-ban status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8_guest_at=$(b8clean "$b8_guest_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "banned from world 1" \
+	|| { echo "FAIL: S8 banned arrival was not refused (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$b8_pid" 2>/dev/null \
+	|| { echo "FAIL: S8 banned teleport killed the daemon" >&2; exit 1; }
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 guest post-ban status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+[ "$(b8clean "$b8_guest_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)" = "$b8_guest_at" ] \
+	|| { echo "FAIL: S8 banned guest moved despite the ban" >&2; exit 1; }
+
+# --- 3. the ban does not leak sideways: world 2 is still open -----------------
+b8run 7 "$b8_owner_txt" "room 0 0 0 2"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S8 owner could not carve world 2 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "wrenching" \
+	|| { echo "FAIL: S8 world-2 teleport refused (the ban leaked sideways) (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 4. `unban` restores: world 1 opens again ----------------------------------
+b8run 7 "$b8_owner_txt" "room 0 0 0 1"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S8 owner could not return to world 1 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "unban $b8_guest 1"
+b8wait 7 "$b8_owner_txt" "Unbanned $b8_guest from world 1" \
+	|| { echo "FAIL: S8 unban did not confirm (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "wrenching" \
+	|| { echo "FAIL: S8 post-unban teleport refused (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 5. the ban survives a reboot ----------------------------------------------
+b8run 7 "$b8_owner_txt" "ban $b8_guest 1"
+b8wait 7 "$b8_owner_txt" "Banned $b8_guest from world 1" \
+	|| { echo "FAIL: S8 re-ban did not confirm (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8cmd 7 "$b8_owner_txt" "save"
+sleep 0.3
+exec 7<&-
+exec 8<&-
+killaxil $b8_pid
+b8sz=$(stat -c %s "$b8db/w.db" 2>/dev/null || echo 0)
+[ "${b8sz:-0}" -gt 0 ] || { echo "FAIL: S8 store empty before reboot" >&2; exit 1; }
+AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
+b8_pid=$!
+wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot B did not init" >&2; exit 1; }
+exec 7<>/dev/tcp/127.0.0.1/$b8
+b8cmd 7 "$b8_owner_txt" "connect $user"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 boot B owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b8
+b8cmd 8 "$b8_guest_txt" "connect $b8_guest"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b8_guest'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 boot B guest login not seen" >&2; exit 1; }
+# Refs persist (row keys), but re-parse anyway: nothing here is hardcoded.
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 boot B guest status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8_guest_ref=$(b8clean "$b8_guest_txt" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1)
+[ -n "$b8_guest_ref" ] || { echo "FAIL: S8 boot B no guest ref" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "room 0 0 0 1"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S8 boot B owner could not enter world 1 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "banned from world 1" \
+	|| { echo "FAIL: S8 ban did not survive the reboot (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$b8_pid" 2>/dev/null \
+	|| { echo "FAIL: S8 post-reboot teleport killed the daemon" >&2; exit 1; }
+
+# --- 6. `unban` needs authority too: the guest cannot lift their own ban ------
+b8run 8 "$b8_guest_txt" "unban $b8_guest 1"
+b8wait 8 "$b8_guest_txt" "Permission denied" \
+	|| { echo "FAIL: S8 guest unban did not answer (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "banned from world 1" \
+	|| { echo "FAIL: S8 guest unban lifted the ban (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $b8_pid
+rm -rf "$b8db"
+
 echo "axil-nd ok"
