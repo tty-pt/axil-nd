@@ -1966,20 +1966,24 @@ w7run 8 "$w7_guest_txt" "owned"
 w7wait 8 "$w7_guest_txt" "objects found" || { echo "FAIL: S7 guest lost no-arg owned (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
 
 # --- 7. `wall`: selector + delivery ------------------------------------------
-# `wall all <msg>` names the cosmos explicitly, so only its ruler passes the
+# `wall cosmos <msg>` names the cosmos explicitly, so only its ruler passes the
 # authority check. The guest rules nothing, including the cosmos, and is
 # therefore refused; a cosmos selection is not a way to smuggle "everywhere"
 # past the gate.
-w7run 8 "$w7_guest_txt" "wall all hello 3"
+#
+# CMD_REGION.md §5: the selector dialect is one bare world number or the
+# `cosmos` keyword, shared with modlist/ban/deny. The old `all` keyword is gone,
+# so this leg moved with it -- the intent is unchanged, only the spelling is.
+w7run 8 "$w7_guest_txt" "wall cosmos hello 3"
 w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest wall did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
 w7_refused 8 "$w7_guest_txt" "guest wall"
 
 # The owner's wall must reach the GUEST and say so with the speaker's name.
-# `wall all hello 3` has to stay ONE message: the message is built from the
+# `wall cosmos hello 3` has to stay ONE message: the message is built from the
 # words after the selector, so a bare "3" must not be swallowed as a world
 # number. (The guest is in the carved room by now, but the delivery proof uses
-# `all` anyway: it is the selector with the widest authority demand.)
-w7run 7 "$w7_owner_txt" "wall all hello 3"
+# `cosmos` anyway: it is the selector with the widest authority demand.)
+w7run 7 "$w7_owner_txt" "wall cosmos hello 3"
 w7wait 8 "$w7_guest_txt" "shouts:  hello 3" \
 	|| { echo "FAIL: S7 owner wall did not reach the guest (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
 w7clean "$w7_guest_txt" | grep -qaF "$user shouts:" \
@@ -2183,5 +2187,465 @@ exec 7<&-
 exec 8<&-
 killaxil $b8_pid
 rm -rf "$b8db"
+
+# ---------------------------------------------------------------------------
+# --- S9: default target region + one selector dialect (CMD_REGION.md) --------
+# ---------------------------------------------------------------------------
+# Seven commands can name a region -- wall, ban, unban, loadmod, unloadmod,
+# modlist, deny. Before this section six shared st_cmd_region() and `wall` had a
+# private `all`/`world <n>` dialect, so with no argument `wall` bypassed the
+# shared parser entirely (speech.c's direct st_region_of_player). Once a player
+# can choose a default region, two commands meaning the same thing would resolve
+# differently -- and `wall` would be the one ignoring the setting.
+#
+# The fix: one dialect (bare world number or `cosmos`) at a fixed argv position,
+# one default resolution (explicit -> default target -> position), and the
+# default stored in ENT as (target_id, target_plen).
+#
+# Same two-socket, per-fd-transcript discipline as S7/S8. Four legs are ABSENCE
+# assertions, so every one of them uses a freshly wiped transcript (b9run) --
+# PLANET_TXT-style cumulative files make an absence check meaningless.
+b9=$((20000 + RANDOM % 8000))
+b9db=$(mktemp -d)
+b9la="$b9db/a.log"
+b9_owner_txt="$b9db/owner.txt"
+b9_guest_txt="$b9db/guest.txt"
+: > "$b9_owner_txt"
+: > "$b9_guest_txt"
+
+AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m ./lib/axil-nd >"$b9la" 2>&1 &
+b9_pid=$!
+wait_up "$b9la" "$b9" || { echo "FAIL: S9 boot did not init" >&2; exit 1; }
+
+b9cmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+b9wait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+b9clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+# One command per socket, transcript wiped first, so the file provably holds
+# only this command's output and an absence assertion means something.
+b9run() { : > "$2"; b9cmd "$1" "$2" "$3"; }
+b9ref() { b9clean "$1" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1; }
+# Silence is not proof (NO_WIZ.md §13.3): an absence assertion is only credible
+# if the daemon is still there to have answered. Both sides get a liveness probe
+# that always produces output.
+b9alive() {
+	kill -0 "$b9_pid" 2>/dev/null \
+		|| { echo "FAIL: S9 daemon died ($1)" >&2; exit 1; }
+}
+b9refused() {
+	local fd=$1 file=$2 label=$3
+	grep -qaF "Permission denied" "$file" && return 0
+	echo "FAIL: $label: expected a refusal; got: $(b9clean "$file" | tr '\n' '|' | tail -c 200)" >&2
+	exit 1
+}
+
+b9_guest="ndtgt$$"
+exec 7<>/dev/tcp/127.0.0.1/$b9
+b9cmd 7 "$b9_owner_txt" "connect $user"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b9
+b9cmd 8 "$b9_guest_txt" "connect $b9_guest"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b9_guest'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 guest login not seen" >&2; exit 1; }
+
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 guest status (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9_guest_ref=$(b9ref "$b9_guest_txt")
+[ -n "$b9_guest_ref" ] || { echo "FAIL: S9 no guest ref" >&2; exit 1; }
+
+# A real, CLAIMED region in each world, and a real room in it.
+#
+# `room 0 0 0 N` on its own is NOT enough, and this cost a full probe cycle to
+# find: do_room never calls xy_claim_at, so carving a room at world N leaves the
+# world-N REGION absent and xy_region_at falls back to the root. Every player
+# then reads as (0,0) -- the cosmos -- no matter which world they stand in, and
+# a wall to world 1, a wall to world 2 and a wall to the cosmos become
+# indistinguishable. Only `planet N` claims the region (xy_claim_at at
+# spacetime.c:2112). Measured: without the claims, `here` printed
+# "id=0x0000000000000000 plen=0" for both players after every move.
+#
+# The owner rules the cosmos, so claiming these worlds is permitted. World 5 is
+# deliberately NOT claimed: leg 6 uses "a selected region with no row" as its
+# discriminator, and it cannot do that if the world exists.
+b9run 7 "$b9_owner_txt" "planet 1"
+b9wait 7 "$b9_owner_txt" "planet 1 established" \
+	|| { echo "FAIL: S9 could not claim world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "planet 2"
+b9wait 7 "$b9_owner_txt" "planet 2 established" \
+	|| { echo "FAIL: S9 could not claim world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "planet 3"
+b9wait 7 "$b9_owner_txt" "planet 3 established" \
+	|| { echo "FAIL: S9 could not claim world 3 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "planet 4"
+b9wait 7 "$b9_owner_txt" "planet 4 established" \
+	|| { echo "FAIL: S9 could not claim world 4 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And a real room in each: an unmapped position resolves to the void, which is
+# the cosmos -- so "here" would prove nothing (NO_WIZ.md §14.4).
+b9run 7 "$b9_owner_txt" "room 0 0 0 1"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S9 owner could not carve world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not carve world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Park the guest in world 2. Every later leg moves them, and each move is
+# verified, so no leg can pass by accident on the wrong starting position.
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 could not place the guest in world 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Both sides must now read as world 2, not the cosmos. `here` prints the region
+# row header; this is the assertion that makes every leg below meaningful.
+b9run 7 "$b9_owner_txt" "here"
+b9wait 7 "$b9_owner_txt" "plen=16" \
+	|| { echo "FAIL: S9 owner is not in a world region (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 8 "$b9_guest_txt" "here"
+b9wait 8 "$b9_guest_txt" "plen=16" \
+	|| { echo "FAIL: S9 guest is not in a world region (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 1. RED: the default beats the position ----------------------------------
+# The owner sets default = world 1 while standing in world 2, and the guest is
+# moved to world 1. A bare `wall` must then reach the guest in the DEFAULT
+# region and not the position. Before the change `wall` was position-derived, so
+# it would go the other way -- this leg is the compatibility guarantee for
+# players who never run `target` AND the proof that the default is honoured.
+b9run 7 "$b9_owner_txt" "target 1"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 1" \
+	|| { echo "FAIL: S9 target 1 did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "Default target region: world 1" \
+	|| { echo "FAIL: S9 target did not report the default (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Move the guest to world 1, then put the owner back in world 2. The default
+# stays world 1 throughout, so the two sides are now genuinely different.
+b9run 7 "$b9_owner_txt" "room 0 0 0 1"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S9 owner could not return to world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 could not move the guest to world 1 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not go to world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 8 "$b9_guest_txt" "here"
+b9wait 8 "$b9_guest_txt" "plen=16" \
+	|| { echo "FAIL: S9 guest left the world-region tree (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall defaulted to the target"
+b9alive "leg 1 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  defaulted to the target" \
+	|| { echo "FAIL: S9 bare wall did not reach the guest in the DEFAULT region (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 2. an explicit selector beats the default -------------------------------
+# With default = world 1, `wall 2 <msg>` must go to world 2. The guest is in
+# world 1, so the absence of the message in their transcript is the proof that
+# the explicit argument won.
+b9run 7 "$b9_owner_txt" "wall 2 explicit beats default"
+b9alive "leg 2 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 guest status after leg 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "explicit beats default" \
+	&& { echo "FAIL: S9 explicit 'wall 2' reached the guest in world 1 (default won over the explicit selector)" >&2; exit 1; }
+b9alive "leg 2 absence"
+
+# --- 3. `target none` restores position-derived behaviour ---------------------
+# This is the compatibility leg: after clearing, a bare `wall` follows the owner
+# instead of the old default. It is also what proves leg 1 was the DEFAULT being
+# honoured and not simply "world 1 is where the guest happened to be".
+b9run 7 "$b9_owner_txt" "target none"
+b9wait 7 "$b9_owner_txt" "Default target region cleared" \
+	|| { echo "FAIL: S9 target none did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "No default target region set" \
+	|| { echo "FAIL: S9 bare target did not report the cleared default (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Positive half: join the guest in world 1. Without a default the command follows
+# the owner's feet, so a position-derived wall reaches the co-located guest.
+b9run 7 "$b9_owner_txt" "room 0 0 0 1"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S9 owner could not join world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall back to the position"
+b9alive "leg 3 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  back to the position" \
+	|| { echo "FAIL: S9 cleared default did not fall back to the owner's position (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Absence half: leave the guest in world 1, stand in world 2. The same cleared
+# state must now NOT reach them -- which is also the proof that leg 1's delivery
+# was the default, not the position (the positions here are the same as leg 1's).
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not return to world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall position only"
+b9alive "leg 3 absence wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 guest status after leg 3 absence (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "position only" \
+	&& { echo "FAIL: S9 position-derived wall from world 2 reached the guest in world 1" >&2; exit 1; }
+b9alive "leg 3 absence"
+
+# --- 4. `target here` stores your CURRENT region, without naming it ------------
+# Not a number, not a second dialect: whatever st_region_of_player() resolves.
+# That is the deepest CLAIMED region -- a world here, the cosmos from the void --
+# not a cell. Only worlds are claimed (via `planet`), and recipients resolve to
+# world granularity, so a raw cell selector would cover nobody; storing one would
+# make `target here` a default that refuses everything it touches.
+# The owner is in world 2 (leg 3's absence half left them there).
+b9run 7 "$b9_owner_txt" "target here"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 2" \
+	|| { echo "FAIL: S9 target here did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "Default target region: world 2" \
+	|| { echo "FAIL: S9 target did not report the here-stored default (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# `here` prints the region row header, so the stored width IS assertable -- and
+# what it asserts is that this is a WORLD default, not the cell CMD_REGION.md
+# §6.1 promised. That promise does not survive st_region_of_player(): the
+# deepest claimed region is what you get, and only worlds are claimed.
+b9run 7 "$b9_owner_txt" "here"
+b9wait 7 "$b9_owner_txt" "plen=16" \
+	|| { echo "FAIL: S9 the owner is not in a world-sized region (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And it must ACT: the guest is in world 1, the owner's here-stored default is
+# world 2. Move the guest in and bare-wall.
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 could not bring the guest to world 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall here means here"
+b9alive "leg 4 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  here means here" \
+	|| { echo "FAIL: S9 here-stored default did not reach the guest (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 5. a default grants nothing ---------------------------------------------
+# The guest rules no region, so `target 2` must be refused at SET time, naming
+# the ruler. This is the point of validating in `target` rather than at use
+# time: a default the player cannot use is a setting that looks like it works
+# and then refuses every command.
+b9run 8 "$b9_guest_txt" "target 2"
+b9alive "leg 5 target"
+b9refused 8 "$b9_guest_txt" "guest target 2"
+# And the guest's own bare wall is still refused, i.e. the failed `target` left
+# nothing behind that could be used.
+b9run 8 "$b9_guest_txt" "wall guest should be refused"
+b9alive "leg 5 wall"
+b9refused 8 "$b9_guest_txt" "guest wall"
+
+# --- 6. the change reached the SHARED parser, not just do_wall ---------------
+# `modlist` shares st_cmd_region() with wall but not do_wall's argv handling. If
+# only do_wall had changed, a bare modlist would still be position-derived while
+# a bare wall honoured the default -- which is the exact drift this section
+# exists to prevent.
+#
+# The discriminator is modlist's OUTPUT, not a refusal. modlist is the only one
+# of the seven commands with no st_can_region gate at all (measured: do_wall,
+# do_ban, do_unban, do_loadmod, do_unloadmod and do_deny each have one;
+# do_modlist has none), so a refusal cannot be used -- the owner rules every
+# world it claimed and would be allowed either way. What differs is whether the
+# selected region HAS a row: world 5 is deliberately left unclaimed, so a
+# default naming world 5 answers "No such region" and a position-derived
+# selection in world 2 prints the row.
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not enter world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "modlist"
+b9alive "leg 6 modlist baseline"
+b9clean "$b9_owner_txt" | grep -qaF "No such region" \
+	&& { echo "FAIL: S9 world 2 should have a region row (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Default = the unclaimed world 5. Bare modlist must consult it.
+b9run 7 "$b9_owner_txt" "target 5"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 5" \
+	|| { echo "FAIL: S9 target 5 did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "modlist"
+b9alive "leg 6 modlist with default"
+b9clean "$b9_owner_txt" | grep -qaF "No such region" \
+	|| { echo "FAIL: S9 bare modlist used the owner's POSITION, not the default target (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Default cleared: the same command at the same position must now answer from
+# the position. The pair is the whole proof -- position alone would print the row
+# both times, and a default-only implementation would print neither.
+b9run 7 "$b9_owner_txt" "target none"
+b9wait 7 "$b9_owner_txt" "Default target region cleared" \
+	|| { echo "FAIL: S9 leg 6 clear did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "modlist"
+b9alive "leg 6 modlist position"
+b9clean "$b9_owner_txt" | grep -qaF "No such region" \
+	&& { echo "FAIL: S9 bare modlist did not fall back to the position (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And `deny` -- which shares the same st_cmd_region and IS gated -- must refuse
+# when the default names a region the caller cannot rule. This is the same
+# shared-parser path with an authority check on top.
+b9run 8 "$b9_guest_txt" "target 5"
+b9alive "leg 6 guest target"
+b9refused 8 "$b9_guest_txt" "guest target 5"
+
+# --- 7. `cosmos` is a keyword: (0,0) is NOT `world 0` ------------------------
+# st_planet_id(0) is (0<<48, 16) = (0, 16), the FIRST CHILD of the cosmos, a real
+# region id with no row and nothing under it. The cosmos is (0, 0) and covers
+# everything. So from an owner in world 4 to a guest in world 2, `wall 0` must
+# reach NOTHING (permitted -- the owner rules the cosmos -- but covering no
+# listener) while `wall cosmos` reaches the guest. Nothing else in the suite
+# distinguishes (0,0) from (0,16), which is why this leg gets its own treatment:
+# an implementation that collapsed them would pass every other leg.
+#
+# No void is needed and none is used: a reconnect restores the saved position,
+# so there is no path back to the unmapped start-room. The discriminator is
+# coverage, not the void.
+b9run 7 "$b9_owner_txt" "target none"
+b9wait 7 "$b9_owner_txt" "Default target region cleared" \
+	|| { echo "FAIL: S9 leg 7 clear did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Guest in world 2, owner in world 4. Both verified, so the coverage assertions
+# below cannot pass on the wrong positions.
+b9run 7 "$b9_owner_txt" "room 0 0 0 4"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 4" \
+	|| { echo "FAIL: S9 owner could not enter world 4 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "here"
+b9wait 7 "$b9_owner_txt" "plen=16" \
+	|| { echo "FAIL: S9 owner is not in a world region for leg 7 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 8 "$b9_guest_txt" "here"
+b9wait 8 "$b9_guest_txt" "plen=16" \
+	|| { echo "FAIL: S9 guest is not in a world region for leg 7 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# `wall 0` names (0,16): allowed, but the guest in world 2 is not under it.
+b9run 7 "$b9_owner_txt" "wall 0 world zero is not the cosmos"
+b9alive "leg 7 wall 0"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 leg 7 guest status after 'wall 0' (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "world zero is not the cosmos" \
+	&& { echo "FAIL: S9 'wall 0' reached world 2: (0,16) and (0,0) are not the same region" >&2; exit 1; }
+b9alive "leg 7 wall 0 absence"
+# `wall cosmos` names (0,0) and must reach the guest.
+b9run 7 "$b9_owner_txt" "wall cosmos the cosmos is reached"
+b9alive "leg 7 wall cosmos"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  the cosmos is reached" \
+	|| { echo "FAIL: S9 'wall cosmos' did not reach the guest (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Control: the guest is not deaf. A world-2 selector reaches them from world 4,
+# so the `wall 0` silence above is the SELECTOR, not the listener.
+b9run 7 "$b9_owner_txt" "wall 2 the guest can hear"
+b9alive "leg 7 wall 2"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  the guest can hear" \
+	|| { echo "FAIL: S9 control wall did not reach the guest (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 8. the default survives a reboot ----------------------------------------
+# Persistence needs a reboot test, NOT save-then-read: libcorm saves every
+# file-backed map from a destructor at process exit and used to recompute the
+# store size from what was still in its cache, rewriting the file smaller
+# (NO_WIZ.md §7.1). No in-process assertion could see that.
+b9run 7 "$b9_owner_txt" "target 2"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 2" \
+	|| { echo "FAIL: S9 pre-reboot target 2 did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9cmd 7 "$b9_owner_txt" "save"
+sleep 0.3
+exec 7<&-
+exec 8<&-
+killaxil $b9_pid
+b9sz=$(stat -c %s "$b9db/w.db" 2>/dev/null || echo 0)
+[ "${b9sz:-0}" -gt 0 ] || { echo "FAIL: S9 store empty before reboot" >&2; exit 1; }
+AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m ./lib/axil-nd >"$b9la" 2>&1 &
+b9_pid=$!
+wait_up "$b9la" "$b9" || { echo "FAIL: S9 boot B did not init" >&2; exit 1; }
+exec 7<>/dev/tcp/127.0.0.1/$b9
+b9_owner_txt="$b9db/owner2.txt"
+b9_guest_txt="$b9db/guest3.txt"
+: > "$b9_owner_txt"
+: > "$b9_guest_txt"
+b9cmd 7 "$b9_owner_txt" "connect $user"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 boot B owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b9
+b9cmd 8 "$b9_guest_txt" "connect $b9_guest"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b9_guest'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 boot B guest login not seen" >&2; exit 1; }
+# Refs persist (row keys) but re-parse anyway: nothing here is hardcoded.
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 boot B guest status (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9_guest_ref=$(b9ref "$b9_guest_txt")
+[ -n "$b9_guest_ref" ] || { echo "FAIL: S9 boot B no guest ref" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "Default target region: world 2" \
+	|| { echo "FAIL: S9 default target did not survive the reboot (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And it must still be ACTUALLY used, not just reported: the world-2 room already
+# exists from boot A, so both sides can be placed without carving.
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 boot B owner could not enter world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 boot B could not place the guest in world 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "room 0 0 0 4"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 4" \
+	|| { echo "FAIL: S9 boot B owner could not leave world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall survived the reboot"
+b9alive "leg 8 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  survived the reboot" \
+	|| { echo "FAIL: S9 post-reboot default did not act on the target region (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 9. the `wall` message boundary ------------------------------------------
+# `wall` is the only one of the seven whose first argument is also its first
+# word. `wall 3` ALONE is therefore the message "3", not a usage error and not
+# a selector -- which is exactly what `argc > 2` (not `argc > 1`) buys. The
+# guest is in world 2 and the owner has default = world 2, so a bare-ish wall
+# reaches them either way; what is asserted is the MESSAGE, not the destination.
+b9run 7 "$b9_owner_txt" "wall 3"
+b9alive "leg 9 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  3" \
+	|| { echo "FAIL: S9 'wall 3' was not delivered as the message \"3\" (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "Usage: wall" \
+	&& { echo "FAIL: S9 'wall 3' became a usage error" >&2; exit 1; }
+# And a bare `wall` with no message at all IS still a usage error, so the
+# boundary is not simply "wall never complains".
+b9run 7 "$b9_owner_txt" "wall"
+b9alive "leg 9 bare wall"
+b9wait 7 "$b9_owner_txt" "Usage: wall" \
+	|| { echo "FAIL: S9 bare 'wall' lost its usage error (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# A leading number WITH a message is a selector: the message must not contain
+# the number, and the guest in world 2 must not receive a world-2 selector that
+# they would in fact receive -- so this checks the message text instead.
+b9run 7 "$b9_owner_txt" "wall 2 selector then message"
+b9alive "leg 9 selector wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  selector then message" \
+	|| { echo "FAIL: S9 'wall 2 <msg>' mangled the message (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "shouts:  2 selector" \
+	&& { echo "FAIL: S9 the selector was swallowed into the message" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $b9_pid
+rm -rf "$b9db"
 
 echo "axil-nd ok"

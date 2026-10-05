@@ -121,8 +121,10 @@ do_ban(int fd, int argc, char *argv[]) {
 		return;
 	}
 
-	/* argv[2] names a world outright; without it, the caller's own region.
-	 * One selector dialect, shared with wall (st_cmd_region). */
+	/* CMD_REGION.md §5: argv[2] is a bare world number or `cosmos`, one dialect
+	 * shared with wall/deny/modlist/loadmod/unloadmod. Without it the caller's
+	 * DEFAULT TARGET region is used, or their position-derived region if they
+	 * have set none (st_target_or_position). */
 	if (st_cmd_region(player_ref, argc, argv, 2, &id, &plen) != XY_OK) {
 		nd_writef(player_ref, "Usage: ban <player> [world]\n");
 		eng_nd_flush(player_ref);
@@ -163,6 +165,11 @@ do_unban(int fd, int argc, char *argv[]) {
 	}
 	corm_get_copy(obj_hd, &victim_ref, &(victim));
 
+	/* CMD_REGION.md §5.5: same dialect and same default as ban. Pre-existing
+	 * wart, deliberately NOT changed here (it is a message change, not a
+	 * behaviour change, and CMD_REGION.md §5.5 makes it optional): a *parse*
+	 * failure prints the Usage line, which is wrong for a bare `unban <player>`
+	 * where there was no token to misparse. */
 	if (st_cmd_region(player_ref, argc, argv, 2, &id, &plen) != XY_OK) {
 		nd_writef(player_ref, "Usage: unban <player> [world]\n");
 		eng_nd_flush(player_ref);

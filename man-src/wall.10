@@ -1,14 +1,46 @@
-.TH WALL 10 "July 2024" "1.0" "Neverdark Manual"
+.TH WALL 10 "October 2026" "1.1" "Neverdark Manual"
 .SH NAME
-wall \- Create a wall
+wall \- Shout to everyone in a region
 .SH SYNOPSIS
-\fBw\fI[number]\fPdirection
+.B wall
+.RI [ region ]
+.I message
 .SH DESCRIPTION
 .PP
-This command is only available in character mode. It allows you to
-create a \fBwall\fP between the destination and preceding position.
+Everyone who can see you shouting, for every listener standing in the region
+you selected and in every subregion under it. Only a player who rules the
+selected region, or an ancestor of it, may shout to it; anyone else is refused
+and told who rules it.
+.PP
+The region is a bare world number (0\-65535) or the keyword \fBcosmos\fP \fB under
+exactly the same rules as every other region selector \fBban\fP, \fBmodlist\fP,
+\fBdeny\fP and the rest. Note that \fBworld 0\fP is \fBnot\fP the cosmos: world 0
+is the first subregion of the cosmos, and only the \fBcosmos\fP keyword names the
+root. If no region is given, the command uses your \fBdefault target region\fP
+(see \fBtarget\fP(10)), or the region you are standing in if you have set none.
+.PP
+.SS The leading token
+.PP
+A leading word is treated as a region selector only if it parses as one
+\fBand\fP something follows it. This command is the odd one out among the region
+commands: its first argument is also the first word of its payload. So:
+.PP
+.RS
+.nf
+wall 3                the message "3"
+wall 3 mice are down  world 3, message "mice are down"
+wall mice are down    your default target region, message "mice are down"
+.fi
+.RE
+.PP
+There is a matching misparse, and it is inherent rather than a defect:
+\fBwall cosmos is down\fP is read as the selector \fBcosmos\fP plus the message
+"is down", not as the single message "cosmos is down". Likewise
+\fBwall 3 blind mice is down\fP. Quoting is not available, so a message may not
+begin with a bare number or with the word \fBcosmos\fP unless you intend it as a
+selector. Requiring an explicit keyword prefix in front of every message would
+remove the misparse, at the cost of a private syntax this command no longer has.
 .SH SEE ALSO
-.BR walk,claim,unclaim,door,undoor,unwall (10)
+.BR target,ban,unban,modlist,loadmod,unloadmod,deny,here,say,pose (10)
 .SH AUTHOR
 quirinpa <quirinpa@tty.pt>
-

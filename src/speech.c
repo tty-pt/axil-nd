@@ -85,34 +85,44 @@ do_wall(int fd, int argc, char *argv[])
 	OBJ player;
 	char buf[BUFFER_LEN];
 	char *message;
-	char *scope = (argc > 1 && argv[1]) ? argv[1] : "";
 
-	/* One selector dialect, as specified: `wall world <n> <msg>`, `wall all
-	 * <msg>`, or `wall <msg>` in the caller's own region. `all` names the
-	 * cosmos explicitly. It is deliberately not ST_SEL_UNSET: an explicit
-	 * cosmos selection plus st_can_region means only the cosmos ruler can
-	 * use it, while ST_SEL_UNSET would have to mean "everywhere I rule"
-	 * somewhere else. */
-	if (strcmp(scope, "all") == 0) {
+	/* CMD_REGION.md §5: one selector dialect for all seven region commands --
+	 * a bare world number or the keyword `cosmos` -- replacing this command's
+	 * private `all` / `world <n>` keywords. The old keywords existed for a real
+	 * reason, recorded in NO_WIZ.md §5: wall_message() consumes argv[start..],
+	 * so `wall hello 3` has to be ONE message and a bare positional selector
+	 * would make the selector and the first word of the payload the same token.
+	 *
+	 * The resolution: a leading token is a selector ONLY if it parses as one AND
+	 * something follows it. That is what requiring a non-empty argv[2] buys --
+	 * `wall 3` alone is the message "3", the only reading that does not
+	 * degenerate into a usage error, and S9 leg 9 pins it.
+	 *
+	 * The "something follows" test is on the STRING, never on argc: axil
+	 * delivers a bare verb with argc >= 2 and an empty argv[1] (NO_WIZ.md §13.2),
+	 * and the trailing blank line the harness sends inflates argc further, so
+	 * `argc > 2` is true for `wall 3` with argv[2] == "". Measured: the argc
+	 * form printed "Usage: wall" for `wall 3` and S9 leg 9 caught it.
+	 *
+	 * Accepted misparse, inherent to a command whose first argument is also its
+	 * first word: `wall cosmos is down` reads as selector `cosmos` + message "is
+	 * down", and `wall 3 blind mice is down` likewise. Requiring a keyword
+	 * prefix always would be exactly the private dialect this removes. Noted in
+	 * man-src/wall.10.
+	 *
+	 * No shifted argv: the previous `st_cmd_region(argc - 1, argv + 1, 1, ...)`
+	 * frame is gone, so `world_arg` means one thing across all seven commands. */
+	if (argv[1] && *argv[1] && argv[2] && *argv[2]
+			&& st_cmd_world(argv[1], &sel_id, &sel_plen) == XY_OK) {
 		msg_start = 2;
-	} else if (strcmp(scope, "world") == 0) {
-		msg_start = 3;
-		if (st_cmd_region(player_ref, argc - 1, argv + 1, 1,
-				&sel_id, &sel_plen) != XY_OK) {
-			nd_writef(player_ref,
-				"Usage: wall [all | world <world>] <message>\n");
-			eng_nd_flush(player_ref);
-			return;
-		}
-	} else if (st_region_of_player(player_ref, &sel_id, &sel_plen)
+	} else if (st_target_or_position(player_ref, &sel_id, &sel_plen)
 			!= XY_OK) {
 		st_refuse_region(player_ref, 0, ST_PLEN_ROOT);
 		return;
 	}
 
 	if (msg_start >= argc || !argv[msg_start] || !*argv[msg_start]) {
-		nd_writef(player_ref,
-			"Usage: wall [all | world <world>] <message>\n");
+		nd_writef(player_ref, "Usage: wall [region] <message>\n");
 		eng_nd_flush(player_ref);
 		return;
 	}

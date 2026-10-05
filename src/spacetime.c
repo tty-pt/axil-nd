@@ -1978,24 +1978,94 @@ st_row_header(unsigned player_ref, uint64_t id, uint8_t plen,
 	}
 }
 
-/* argv[world_arg] names a world outright; without it, the caller's
- * position-derived region. Returns XY_OK with (*id, *plen) set, or a
- * negative XY_ERR_* with nothing set. */
+/* CMD_REGION.md §5.3: ONE region selector token, shared by every command that
+ * takes one plus `target`. `cosmos` is the root and is deliberately NOT
+ * `world 0`: st_planet_id(0) is (0, ST_PLEN_WORLD) = (0, 16), the first child of
+ * the cosmos, and libxylem is explicit that "(0,0) and (0,16) share" an id.
+ * Without this keyword the cosmos would be unreachable from these commands. */
+int
+st_cmd_world(const char *tok, uint64_t *id, uint8_t *plen)
+{
+	char *end = NULL;
+	unsigned long w;
+
+	if (!tok || !*tok || !id || !plen)
+		return XY_ERR_INVALID;
+	if (strcmp(tok, "cosmos") == 0) {
+		*id = 0;
+		*plen = ST_PLEN_ROOT;
+		return XY_OK;
+	}
+	/* The *end check rejects trailing junk. strtoul also tolerates leading
+	 * whitespace and a leading '+', which is harmless here: the caller's
+	 * tokens arrive already split on whitespace. */
+	w = strtoul(tok, &end, 10);
+	if (!end || end == tok || *end || w > 65535)
+		return XY_ERR_INVALID;
+	*id = st_planet_id((unsigned)w);
+	*plen = ST_PLEN_WORLD;
+	return XY_OK;
+}
+
+/* CMD_REGION.md §4.1: the sentinel is translated HERE and never returned. See
+ * st.h for why that discipline is load-bearing rather than tidiness. */
+int
+st_target_get(unsigned player_ref, uint64_t *id, uint8_t *plen)
+{
+	ENT e = eng_ent_get(player_ref);
+
+	if (e.target_plen == ST_SEL_UNSET)
+		return 0;
+	if (id)
+		*id = e.target_id;
+	if (plen)
+		*plen = e.target_plen;
+	return 1;
+}
+
+/* Read-modify-write, like every other ENT mutation in the engine: the row is
+ * re-read before the write, so no field is clobbered by a stale copy. */
+void
+st_target_set(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	ENT e = eng_ent_get(player_ref);
+
+	e.target_id = id;
+	e.target_plen = plen;
+	eng_ent_set(player_ref, &e);
+}
+
+void
+st_target_clear(unsigned player_ref)
+{
+	st_target_set(player_ref, 0, ST_SEL_UNSET);
+}
+
+/* CMD_REGION.md §4.3: THE default resolution. Explicit argument -> the player's
+ * default target -> the player's position. Seven commands route through this,
+ * which is the whole point: before it, `wall` resolved its no-argument case
+ * directly and would have ignored a setting the other six honoured. */
+int
+st_target_or_position(unsigned player_ref, uint64_t *id, uint8_t *plen)
+{
+	if (st_target_get(player_ref, id, plen))
+		return XY_OK;
+	return st_region_of_player(player_ref, id, plen);
+}
+
+/* argv[world_arg] names a region outright; without it the caller's default
+ * target region, or failing that their position-derived region. Returns XY_OK
+ * with (*id, *plen) set, or a negative XY_ERR_* with nothing set. */
 int
 st_cmd_region(unsigned player_ref, int argc, char *argv[], int world_arg,
 	uint64_t *id, uint8_t *plen)
 {
 	if (argc > world_arg && argv[world_arg] && *argv[world_arg]) {
-		char *end = NULL;
-		unsigned long w = strtoul(argv[world_arg], &end, 10);
-
-		if (!end || *end || w > 65535)
-			return XY_ERR_INVALID;
-		*id = st_planet_id((unsigned)w);
-		*plen = ST_PLEN_WORLD;
-		return XY_OK;
+		if (st_cmd_world(argv[world_arg], id, plen) == XY_OK)
+			return XY_OK;
+		return XY_ERR_INVALID;
 	}
-	return st_region_of_player(player_ref, id, plen);
+	return st_target_or_position(player_ref, id, plen);
 }
 
 void
@@ -2109,6 +2179,87 @@ do_here(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((un
 		rec.plen = plen;
 	}
 	st_row_header(player_ref, id, plen, &rec);
+	eng_nd_flush(player_ref);
+}
+
+/* CMD_REGION.md §6: the player's default target region -- the region that
+ * wall/ban/unban/loadmod/unloadmod/modlist/deny act on when no selector is
+ * given. Bare `target` PRINTS (it is the discovery path for the whole feature,
+ * so it also says what it affects); `select` by contrast sets unconditionally. */
+void
+do_target(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	uint64_t id;
+	uint8_t plen;
+	char place[64];
+	const char *arg = (argc > 1 && argv[1]) ? argv[1] : "";
+
+	if (!*arg) {
+		if (st_target_get(player_ref, &id, &plen)) {
+			st_ban_place(id, plen, place, sizeof(place));
+			nd_writef(player_ref,
+				"Default target region: %s.\n", place);
+			nd_writef(player_ref,
+				"Commands without a region act there: wall, ban, "
+				"unban, loadmod, unloadmod, modlist, deny.\n");
+		} else {
+			nd_writef(player_ref,
+				"No default target region set (commands act on "
+				"your current region).\n");
+			nd_writef(player_ref,
+				"Set one with `target <region>', `target here', "
+				"or clear it with `target none'.\n");
+		}
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	if (strcmp(arg, "none") == 0) {
+		st_target_clear(player_ref);
+		nd_writef(player_ref, "Default target region cleared.\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* `target here` stores the region the player is standing in -- whatever
+	 * st_region_of_player() resolves, which is the deepest CLAIMED region, not
+	 * necessarily a cell. Only worlds are claimed (via `planet`), so in practice
+	 * this is a world or the cosmos. A raw cell (the full 64-bit position) is
+	 * deliberately NOT stored: recipients resolve to world granularity, so a
+	 * cell selector would cover nobody and the default would be a setting that
+	 * refuses everything it touches.
+	 *
+	 * This is still more than a `target <n>` alias: it needs no world number,
+	 * and from the void it stores the cosmos, which no number can name. */
+	if (strcmp(arg, "here") == 0) {
+		if (st_region_of_player(player_ref, &id, &plen) != XY_OK) {
+			nd_writef(player_ref, "You are nowhere.\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+	} else if (st_cmd_world(arg, &id, &plen) != XY_OK) {
+		nd_writef(player_ref,
+			"Usage: target [<world> | cosmos | here | none]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* Authorization at SET time, not at use time (CMD_REGION.md §6.3): a default
+	 * the player cannot use is a setting that appears to work and then refuses
+	 * every command -- the silent-no-op class of bug NO_WIZ.md §13.3 documents.
+	 * st_can_region (not the exact-ownership st_can that loadmod/unloadmod use)
+	 * because that asymmetry is honest: module loading attaches to one specific
+	 * region row, while a wall or ban is scoped to a subtree. A default naming a
+	 * descendant the player does not own exactly is settable here and refused by
+	 * those two commands, which is correct rather than surprising. */
+	if (!st_can_region(player_ref, id, plen)) {
+		st_refuse_region(player_ref, id, plen);
+		return;
+	}
+	st_target_set(player_ref, id, plen);
+	st_ban_place(id, plen, place, sizeof(place));
+	nd_writef(player_ref, "Default target region set to %s.\n", place);
 	eng_nd_flush(player_ref);
 }
 

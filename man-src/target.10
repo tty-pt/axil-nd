@@ -1,0 +1,57 @@
+.TH TARGET 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+target \- Set or show your default target region
+.SH SYNOPSIS
+.B target
+.br
+.B target
+.I region
+.br
+.B target here
+.br
+.B target none
+.SH DESCRIPTION
+.PP
+Commands that act on a region \fBwall\fP, \fBban\fP, \fBunban\fP,
+\fBloadmod\fP, \fBunloadmod\fP, \fBmodlist\fP and \fBdeny\fP \fBnormally take an
+optional region selector. Without one they act on your \fBdefault target
+region\fP if you have set one, and otherwise on the region you are standing in.
+.PP
+This command shows or changes that default.
+.TP
+.B target
+Show the current default, or say that there is none.
+.TP
+.BI target " region"
+Set the default. \fIregion\fP is a bare world number (0\-65535) or the keyword
+\fBcosmos\fP, under exactly the same rules every other region selector uses.
+You must rule the region you name, or an ancestor of it, or the command is
+refused and names the ruler.
+.TP
+.B target here
+Set the default to the region you are standing in, without having to name it.
+That is the deepest region the engine knows about there \-\- a claimed world, or
+the cosmos from the void \-\- not a single cell: only worlds are claimed, and a
+cell selector would reach nobody. From the void this stores the cosmos, which no
+world number can name.
+.TP
+.B target none
+Clear the default. Commands go back to acting on your current region.
+.PP
+The default is validated \fBwhen you set it\fP, not when a command uses it, so
+it cannot be a setting that appears to work and then refuses every command.
+.PP
+Note the asymmetry: \fBloadmod\fP and \fBunloadmod\fP require \fBexact\fP
+ownership of the named region, because module loading attaches to one specific
+region row. A default naming a subregion you rule but do not own outright is
+therefore settable here and refused by those two commands. That is correct
+rather than a defect.
+.PP
+The default applies only to commands that take a region selector. It does not
+change what \fBowned\fP, \fBclone\fP, \fBcreate\fP or \fBchown\fP may reach:
+those are scoped to the region of the \fIobject\fP involved, so setting a default
+is never a way to widen what you can enumerate or act on by name.
+.SH SEE ALSO
+.BR wall,ban,unban,modlist,loadmod,unloadmod,deny,here,planet (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

@@ -331,11 +331,51 @@ void st_ban_refuse(unsigned player_ref, uint64_t id, uint8_t plen);
  * confirmations and refusals -- one spelling everywhere. */
 void st_ban_place(uint64_t id, uint8_t plen, char *buf, size_t len);
 
-/* A command's region selector: argv[world_arg] names a world outright, and
- * without it the caller's position-derived region is returned. This is the one
- * parsing dialect for an explicit world selector. */
+/* A command's region selector: argv[world_arg] names a region outright, and
+ * without it the caller's default target region -- or failing that their
+ * position-derived region -- is returned (st_target_or_position). This is the
+ * one parsing dialect for a region selector. */
 int st_cmd_region(unsigned player_ref, int argc, char *argv[], int world_arg,
 	uint64_t *id, uint8_t *plen);
+
+/* CMD_REGION.md §5.3: parse ONE region selector token -- a bare world number,
+ * or the keyword `cosmos`. Split out of st_cmd_region() so `target` accepts the
+ * same tokens under the same rules and the same rejections.
+ *
+ * `cosmos` is (0, ST_PLEN_ROOT). It is a keyword and not `world 0` on purpose:
+ * st_planet_id(0) is (0, 16), the first CHILD of the cosmos, and libxylem's own
+ * header says "the id alone does not name a region -- (0,0) and (0,16) share
+ * it". No numeric token can name the root, so `wall all` had no replacement
+ * until this keyword existed. */
+int st_cmd_world(const char *tok, uint64_t *id, uint8_t *plen);
+
+/* CMD_REGION.md §4.1-§4.3: the player's default target region, stored in ENT as
+ * (target_id, target_plen) with ST_SEL_UNSET as the "no default" sentinel.
+ *
+ * st_target_get() TRANSLATES the sentinel at the boundary: it returns 1 with a
+ * legal plen set, or 0 for "no default", and ST_SEL_UNSET never leaves it. That
+ * discipline is not optional -- st_in_scope() reads ST_SEL_UNSET as "every
+ * region the actor rules" (the opposite of one chosen region, and a silent
+ * authority widening), st_region_covers() is pure arithmetic over the width, and
+ * st_can_region() merely happens to reject it because 255 > ST_PLEN_CELL. */
+int st_target_get(unsigned player_ref, uint64_t *id, uint8_t *plen);
+
+/* Set or clear the default. Only the setter accepts ST_SEL_UNSET, and only to
+ * mean "clear"; every other value must be a legal plen (0..64), which
+ * st_cmd_world() and st_region_of_player() already guarantee. */
+void st_target_set(unsigned player_ref, uint64_t id, uint8_t plen);
+void st_target_clear(unsigned player_ref);
+
+/* The one definition of "which region does this command act on when the player
+ * did not say": the player's default target region if they have set one, else
+ * the region they are standing in. Every command that takes an optional region
+ * selector resolves through this, which is what stops `wall` and `modlist`
+ * drifting apart again.
+ *
+ * Returns XY_OK with a legal plen, or a negative XY_ERR_* with nothing set --
+ * the same failure modes as st_region_of_player(), which this falls through to.
+ * ST_SEL_UNSET is never returned. */
+int st_target_or_position(unsigned player_ref, uint64_t *id, uint8_t *plen);
 
 extern unsigned owner_hd;
 

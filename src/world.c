@@ -97,6 +97,7 @@ void do_deny(int fd, int argc, char *argv[]);
 void do_toad(int fd, int argc, char *argv[]);
 void do_view(int fd, int argc, char *argv[]);
 void do_wall(int fd, int argc, char *argv[]);
+void do_target(int fd, int argc, char *argv[]);
 
 static unsigned nd_player_login(int fd, char *user);
 
@@ -797,6 +798,13 @@ struct cmd_slot cmds[] = {
 	}, {
 		.name = "status",
 		.cb = &do_status,
+	}, {
+		/* CMD_REGION.md §6: the default region for every command that takes an
+		 * optional region selector. Arity is validated on the STRING in the
+		 * handler, never on argc: axil delivers a bare verb with argc >= 2 and
+		 * an empty argv[1] (NO_WIZ.md §13.2). */
+		.name = "target",
+		.cb = &do_target,
 	}, {
 		/* ST.md §27.3: the enabling primitive -- create a room at an explicit
 		 * 4D position, because every carved room otherwise inherits pos[3]
