@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
+# Refusals close connections mid-suite by design now (password failures, -A
+# terminals), so a later write to a dead socket is an ordinary failed probe,
+# not a suite crash. Ignoring SIGPIPE turns those writes into EPIPE errors the
+# existing || guards and FAIL assertions already handle; without this the shell
+# dies with 141 and no message the first time it writes after a refusal.
+trap '' PIPE
+
 # Prefer the in-tree axil over any installed copy, so the suite tests the code in
 # this checkout. The module libs resolve by soname through the loader and the
 # `axil` binary resolves through PATH, so without this the whole suite silently
@@ -12,8 +19,10 @@ set -e
 axil_bin="$(cd "$(dirname "$0")/../axil/bin" 2>/dev/null && pwd)"
 axil_lib="$(cd "$(dirname "$0")/../axil/lib" 2>/dev/null && pwd)"
 axil_tty_lib="$(cd "$(dirname "$0")/../axil-tty/lib" 2>/dev/null && pwd)"
+axil_auth_lib="$(cd "$(dirname "$0")/../axil-auth/lib" 2>/dev/null && pwd)"
+in_tree_nd_libs=$(printf ':%s' "$PWD"/../nd-*/lib)
 [ -n "$axil_bin" ] && PATH="$axil_bin:$PATH"
-in_tree_lib="$PWD/lib${axil_lib:+:$axil_lib}${axil_tty_lib:+:$axil_tty_lib}"
+in_tree_lib="$PWD/lib${axil_lib:+:$axil_lib}${axil_tty_lib:+:$axil_tty_lib}${axil_auth_lib:+:$axil_auth_lib}${in_tree_nd_libs}"
 
 case "$(uname -s)" in
 	Darwin) export DYLD_LIBRARY_PATH="$in_tree_lib:${DYLD_LIBRARY_PATH}" ;;
@@ -39,6 +48,9 @@ make --no-print-directory
 # compile it.
 make --no-print-directory -C ../axil
 make --no-print-directory -C ../axil-tty
+make --no-print-directory -C ../axil-auth
+make --no-print-directory -C ../nd-fight
+make --no-print-directory -C ../nd-spell
 
 port=$((20000 + RANDOM % 8000))
 tmpout=$(mktemp)
@@ -58,7 +70,7 @@ cp mods.load "$mods_load_saved"
 # Restores the tracked mods.load even on FAILURE or interrupt: a suite that
 # leaves a test fixture committed in the shipped module list is worse than one
 # that fails to clean up its temp dir.
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # MODS.md §0.4 out-of-tree module fixture.
@@ -87,7 +99,7 @@ cat > "$probe/Makefile" <<EOF
 # Deliberately minimal, and deliberately NOT the house library shape: this
 # fixture exists to prove the path form of mods.load loads a module built
 # outside the engine tree, so it should be as close to hand-written as a real
-# one can get. Same rule `make mods` drives it with.
+# one can get. Same rule 'make mods' drives it with.
 testprobe.so: testprobe.c
 	\$(CC) -shared -fPIC -I$(pwd)/include -I${PREFIX:-/usr}/include \\
 		-o \$@ \$<
@@ -128,6 +140,57 @@ EOF
 # Register it by path for this run only; the trap above restores mods.load.
 printf '%s\n' "$probe/testprobe" >> mods.load
 
+# ---------------------------------------------------------------------------
+# Passworded-connect fixture: libaxil-auth plus a loader that initialises it.
+#
+# `connect` authenticates through axil-auth's exported credential check, so the
+# suite cannot log in without the real module AND an initialised user map.
+# xy_install deliberately initialises nothing (the site configures first), so a
+# test-only loader module does the configuring: it points axil-auth at a
+# scratch account database holding one known user and calls auth_init().
+authfix=../axil-nd-authfix
+rm -rf "$authfix"
+mkdir -p "$authfix"
+cat > "$authfix/Makefile" <<EOF
+# Same self-contained shape as the testprobe above: built on its own, named in
+# mods.load by its own path, driven by the same 'make mods'.
+authfix.so: authfix.c
+	\$(CC) -shared -fPIC -I$(pwd)/../axil-auth/include -I$(pwd)/../libxylem/include -I$(pwd)/../axil/include -I$(pwd)/../libcorm/include -I$(pwd)/../libqsys/include \\
+		-o \$@ \$< \\
+		-L$(pwd)/../axil-auth/lib -Wl,-rpath,$(pwd)/../axil-auth/lib -laxil-auth
+EOF
+cat > "$authfix/authfix.c" <<'EOF'
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <ttypt/auth.h>
+
+void xy_install(void)
+{
+	const char *d = getenv("ND_TEST_AUTH_DIR");
+	static char etc[PATH_MAX], users[PATH_MAX], home[PATH_MAX];
+
+	if (!d || !*d) {
+		fprintf(stderr, "nd-auth-fixture: ND_TEST_AUTH_DIR unset\n");
+		return;
+	}
+	snprintf(etc, sizeof etc, "%s/etc", d);
+	snprintf(users, sizeof users, "%s/users", d);
+	snprintf(home, sizeof home, "%s/home", d);
+	auth_config.etc_dir = etc;
+	auth_config.users_dir = users;
+	auth_config.home_dir = home;
+	auth_config.route_prefix = "/testauth";
+	auth_init();
+	fprintf(stderr, "nd-auth-fixture: auth initialised at %s\n", d);
+}
+EOF
+printf '%s\n' "$authfix/authfix" >> mods.load
+
+# libaxil-auth.so beside the engine so nd's xy_load("libaxil-auth") resolves
+# through the loader even where LD_LIBRARY_PATH does not reach.
+ln -sf ../axil-auth/lib/libaxil-auth.so lib/libaxil-auth.so
+
 # Build every module named in mods.load before booting (MODS.md §0.4). The
 # engine loads whatever is in that list, so a module that no longer compiles
 # would otherwise be discovered as "the hook silently stopped firing" deep in
@@ -137,16 +200,72 @@ printf '%s\n' "$probe/testprobe" >> mods.load
 # resolves, since the path-aware nd_mods_load() now trusts it verbatim.
 make --no-print-directory mods
 
+# Scratch account database for the fixture above. The login name is the same
+# real account the old suite required (connect used to need a passwd entry);
+# the password is generated fresh per run and never leaves this host.
+user=$(id -un)
+userpass="ndtest_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# Second login for the match test below; same fixture, own password.
+mp_guest="ndmatch$$"
+guestpass="ndtest_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# Fixture hashes must be bcrypt ($2b$, 60 chars): struct user.hash is 64 bytes
+# and anything longer (e.g. $6$) is truncated on load, so the stored hash can
+# never verify. Registration always writes bcrypt, so this matches production.
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 required for fixture hashes" >&2; exit 1; }
+python3 -c "import bcrypt" 2>/dev/null || { echo "FAIL: python bcrypt module required for fixture hashes" >&2; exit 1; }
+export ND_TEST_AUTH_DIR="$tmpdb/auth"
+mkdir -p "$ND_TEST_AUTH_DIR/etc"
+userhash=$(python3 -c "import bcrypt; print(bcrypt.hashpw('$userpass'.encode(), bcrypt.gensalt()).decode())")
+guesthash=$(python3 -c "import bcrypt; print(bcrypt.hashpw('$guestpass'.encode(), bcrypt.gensalt()).decode())")
+printf '%s:%s:1001:67::::::\n' "$user" "$userhash" > "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:%s:1002:67::::::\n' "$mp_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:x:1001:67::%s/%s:/bin/false\n' "$user" "$ND_TEST_AUTH_DIR" "$user" > "$ND_TEST_AUTH_DIR/etc/passwd"
+printf '%s:x:1002:67::%s/%s:/bin/false\n' "$mp_guest" "$ND_TEST_AUTH_DIR" "$mp_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+# S7/S8/S9 guests share guestpass: passworded connect refuses any name the
+# user map does not hold, so those sections' guests need fixture accounts
+# here, not only players in the ND store. $$ is the suite's own pid and never
+# changes, so these bind to exactly the names the sections below use.
+w7_guest="ndwiz$$"
+b8_guest="ndban$$"
+b9_guest="ndtgt$$"
+printf '%s:%s:1003:67::::::\n' "$w7_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:%s:1004:67::::::\n' "$b8_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:%s:1005:67::::::\n' "$b9_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:x:1003:67::%s/%s:/bin/false\n' "$w7_guest" "$ND_TEST_AUTH_DIR" "$w7_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+printf '%s:x:1004:67::%s/%s:/bin/false\n' "$b8_guest" "$ND_TEST_AUTH_DIR" "$b8_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+printf '%s:x:1005:67::%s/%s:/bin/false\n' "$b9_guest" "$ND_TEST_AUTH_DIR" "$b9_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+printf 'www:x:67:\n' > "$ND_TEST_AUTH_DIR/etc/group"
+
+# Two-phase login helper for raw sockets: `connect <user>`, wait for the
+# password prompt, send the password, wait for the login marker.
+ndlogin() { # fd user pass marker capture tries?
+	local _fd=$1 _user=$2 _pass=$3 _marker=$4 _cap=$5 _tries=${6:-100}
+	printf 'connect %s\n\n' "$_user" >&"$_fd"
+	local _t=$_tries
+	while [ $_t -gt 0 ]; do
+		grep -qaF "Password:" "$_cap" && break
+		_t=$((_t - 1)); sleep 0.05
+	done
+	[ $_t -eq 0 ] && { echo "FAIL: no password prompt for 'connect $_user'" >&2; return 1; }
+	# the prompt suppresses echo while armed; the password line itself is one line
+	printf '%s\n\n' "$_pass" >&"$_fd"
+	_t=$_tries
+	while [ $_t -gt 0 ]; do
+		grep -qaF "$_marker" "$_cap" && break
+		_t=$((_t - 1)); sleep 0.05
+	done
+	[ $_t -eq 0 ] && { echo "FAIL: login marker '$_marker' missing after password" >&2; return 1; }
+	return 0
+}
+
 # the real engine boot opens its store here (world_db(): AXIL_ND_DB else
 # /var/nd/std.db, unwritable on dev hosts).
 export AXIL_ND_DB="$tmpdb/std.db"
 
-# `connect <name>` runs axil_auth(), which returns non-zero when getpwnam()
-# misses (axil-posix.c), and nd_player_login() then returns NOTHING, skipping
-# on_enter entirely. So the guest name must be a real account on this host.
-# The original nd had the same guard (nd/interface.c:1036), so this is a
-# fixture constraint, not a port regression.
-user=$(id -un)
+# The login name is the current account (same name the old suite required), but
+# the credential now comes from the fixture's account database above, not from
+# the host passwd file: `connect <name>` arms a password prompt and only the
+# fixture password completes the login.
 
 axil -d -A -p "$port" -m ./lib/axil-nd >/tmp/axil_test.log 2>&1 &
 mux_pid=$!
@@ -178,19 +297,19 @@ exec 3<>/dev/tcp/127.0.0.1/$port
 printf '%s' "$ws_request" >&3
 
 # Read HTTP response headers
-resp=""
-while IFS= read -r -t3 line <&3; do
-	line="${line%$'\r'}"
-	resp="$resp
+	resp=""
+	while IFS= read -r -t3 line <&3; do
+		line="${line%$'\r'}"
+		resp="$resp
 $line"
-	[ -z "$line" ] && break
-done
+		[ -z "$line" ] && break
+	done
 
-echo "$resp" | grep -qF "101" \
-	|| { echo "FAIL: no 101 in response" >&2; exit 1; }
+	echo "$resp" | grep -qF "101" \
+		|| { echo "FAIL: no 101 in response" >&2; exit 1; }
 
-got_accept=$(echo "$resp" | grep -i "sec-websocket-accept" \
-	| sed 's/.*: *//' | tr -d '\r\n ')
+	got_accept=$(echo "$resp" | grep -i "sec-websocket-accept" \
+		| sed 's/.*: *//' | tr -d '\r\n ')
 [ "$got_accept" = "$accept" ] \
 	|| { echo "FAIL: accept mismatch: got '$got_accept' want '$accept'" >&2; exit 1; }
 
@@ -202,10 +321,11 @@ stdbuf -i0 -o0 cat <&3 >"$tmpout" &
 cat_pid=$!
 tries=40
 while [ $tries -gt 0 ]; do
-	grep -qa "on_enter" "$tmpout" && break
+	grep -qa "on_enter" "$tmpout" && grep -qa "\[demo\] player" "$tmpout" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
+sleep 0.05
 
 hex=$(xxd -p "$tmpout" | tr -d '\n')
 echo "$hex" | grep -qiF "fffd1f" || { echo "FAIL: IAC DO NAWS missing"   >&2; exit 1; }
@@ -432,63 +552,42 @@ grep -qa "You say: naws" "$tmpout" \
 	|| { echo "FAIL: 'You say: naws' missing -- NAWS frame desynchronised the stream" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# axil-tty PTY bridge: 'help begin' renders section 10 man page over PTY
-# send "help begin\n" (WS binary, len 11 -> 0x8b)
-printf '\x82\x8b\x00\x00\x00\x00help begin\n' >&3
+# Terminals are refused on a -A server: every WS upgrade carries DF_AUTH_AUTO,
+# so the exec gate refuses `help`/`man`/`sh` even though the game itself
+# auto-logs-in fine. The positive versions of these live on the no--A cookie
+# server below; here the refusal text (not a shell) is the assertion.
+# send "help begin\n" (WS binary, len 11 -> 0x8b). The refusal may already have
+# closed the socket by the time later writes land; EPIPE is fine, the capture
+# assertions below are the verdict.
+printf '\x82\x8b\x00\x00\x00\x00help begin\n' >&3 2>/dev/null || true
 tries=30
 while [ $tries -gt 0 ]; do
-	grep -qa "BEGIN" "$tmpout" && break
+	grep -qa "Terminal disabled: automatic login." "$tmpout" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
 
+grep -qa "Terminal disabled: automatic login." "$tmpout" \
+	|| { echo "FAIL: 'help begin' was not refused under -A" >&2; exit 1; }
 grep -qa "BEGIN" "$tmpout" \
-	|| { echo "FAIL: 'help begin' man page not seen from PTY" >&2; exit 1; }
+	&& { echo "FAIL: man page rendered under -A" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# axil-tty PTY bridge: 'sh' opens a shell session over PTY
-# send "sh\n" (WS binary, len 3 -> 0x83)
-printf '\x82\x83\x00\x00\x00\x00sh\n' >&3
+# axil-tty PTY bridge refusal: 'sh' must not open a shell session under -A.
+# The refusal closes the connection, so fd 3 ends here by design.
+# send "sh\n" (WS binary, len 3 -> 0x83). Same EPIPE caveat as above.
+printf '\x82\x83\x00\x00\x00\x00sh\n' >&3 2>/dev/null || true
 
-# allow child shell to fork and initialize
-sleep 0.15
-
-# send "echo ND_TTY_OK\n" (WS binary, len 15 -> 0x8f)
-printf '\x82\x8f\x00\x00\x00\x00echo ND_TTY_OK\n' >&3
-
-# wait for and assert ND_TTY_OK
 tries=30
 while [ $tries -gt 0 ]; do
-	grep -qa "ND_TTY_OK" "$tmpout" && break
+	grep -qa "Terminal disabled: automatic login." "$tmpout" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
 
-grep -qa "ND_TTY_OK" "$tmpout" \
-	|| { echo "FAIL: PTY shell echo ND_TTY_OK not seen" >&2; exit 1; }
+grep -qa "Terminal disabled: automatic login." "$tmpout" \
+	|| { echo "FAIL: 'sh' was not refused under -A" >&2; exit 1; }
 
-# The PTY must actually carry the geometry the client negotiated. The NAWS
-# frame was sent above with no PTY alive yet, so this only lands if
-# axil-nd's tick fed the frame to axil_tty_input() -- recording it in
-# axil-tty's mux_wsz_map -- and axil_tty_exec() seeded the new PTY from that
-# map. Measured both ways: with the old axil_tty_active() gate the frame was
-# never parsed and `stty size` reports "0 0".
-# send "stty size\n" (WS binary, len 10 -> 0x8a)
-printf '\x82\x8a\x00\x00\x00\x00stty size\n' >&3
-
-tries=30
-while [ $tries -gt 0 ]; do
-	grep -qa "24 80" "$tmpout" && break
-	sleep 0.05
-	tries=$((tries - 1))
-done
-
-grep -qa "24 80" "$tmpout" \
-	|| { echo "FAIL: PTY did not receive the negotiated 80x24 geometry" >&2; exit 1; }
-
-# send "exit\n" to promptly terminate child shell process (per recorded amendment)
-printf '\x82\x85\x00\x00\x00\x00exit\n' >&3
-sleep 0.15
 kill -9 $cat_pid 2>/dev/null || true
 wait $cat_pid 2>/dev/null || true
 exec 3<&-
@@ -615,24 +714,27 @@ tty_got_accept=$(echo "$tty_resp" | grep -i "sec-websocket-accept" \
 stdbuf -i0 -o0 cat <&7 >"$tty_out" &
 tty_cat_pid=$!
 
-# WILL ECHO is axil-tty's own first statement on its own route, so it is the
-# last of the three to arrive; waiting on it means all three are in.
+# Under -A the upgrade is refused before axil-tty states anything: no
+# negotiation bytes, no PTY, just the refusal text and a close. (The positive
+# version -- negotiation tripwires plus auto-shell -- lives on the no--A cookie
+# server below.)
 tries=40
 while [ $tries -gt 0 ]; do
-	grep -qa $'\xff\xfb\x01' "$tty_out" && break
+	grep -qaF "Terminal disabled: automatic login." "$tty_out" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
 
+grep -qaF "Terminal disabled: automatic login." "$tty_out" \
+	|| { echo "FAIL: /tty was not refused under -A" >&2; exit 1; }
+
 tty_hex=$(xxd -p "$tty_out" | tr -d '\n')
-# Unlike /nd, a PTY exists from this route's on_axil_connect, so ECHO is the
-# server's to state and there is exactly one statement of each option.
+# No negotiation may be stated on a refused connection: a PTY was never born.
 for pair in 'fffb01:IAC WILL ECHO' 'fffd1f:IAC DO NAWS' 'fffc03:IAC WONT SGA'; do
 	pat=${pair%%:*}
 	name=${pair##*:}
-	seen=$(printf '%s' "$tty_hex" | grep -oiF "$pat" | wc -l)
-	[ "$seen" -eq 1 ] \
-		|| { echo "FAIL: expected 1 $name on /tty, got $seen -- two modules negotiated one connection" >&2; exit 1; }
+	echo "$tty_hex" | grep -qiF "$pat" \
+		&& { echo "FAIL: $name stated on a refused /tty" >&2; exit 1; }
 done
 
 # The game must not be on this socket at all: no player was created, so none of
@@ -641,27 +743,156 @@ echo "$tty_hex" | grep -qiF "2362" \
 	&& { echo "FAIL: BCP frames on /tty -- the game ran on axil-tty's route" >&2; exit 1; }
 grep -qa "on_enter" "$tty_out" \
 	&& { echo "FAIL: on_enter on /tty -- nd_connect ran on axil-tty's route" >&2; exit 1; }
-
-# The auto-spawned login shell: NAWS is the trigger, so no `sh` is sent here.
-# Same 9-byte 80x24 subnegotiation the /nd section uses, then type at the shell.
-printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7
+# And no shell either: NAWS on a refused connection must not spawn anything.
+# (The socket is already closed server-side; the || true absorbs the EPIPE.)
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7 2>/dev/null || true
 sleep 0.3
-# send "echo ND_TTY_AUTO_OK\n" (WS binary, len 19 -> 0x93)
-printf '\x82\x93\x00\x00\x00\x00echo ND_TTY_AUTO_OK\n' >&7
-
-tries=40
-while [ $tries -gt 0 ]; do
-	grep -qa "ND_TTY_AUTO_OK" "$tty_out" && break
-	sleep 0.05
-	tries=$((tries - 1))
-done
-
+printf '\x82\x93\x00\x00\x00\x00echo ND_TTY_AUTO_OK\n' >&7 2>/dev/null || true
+sleep 0.5
 grep -qa "ND_TTY_AUTO_OK" "$tty_out" \
-	|| { echo "FAIL: /tty auto-shell echo ND_TTY_AUTO_OK not seen" >&2; exit 1; }
+	&& { echo "FAIL: shell output on a refused /tty" >&2; exit 1; }
 
 kill -9 $tty_cat_pid 2>/dev/null || true
 wait $tty_cat_pid 2>/dev/null || true
 exec 7<&-
+
+# ---------------------------------------------------------------------------
+# Authenticated terminals over WS (no -A): the positive counterparts of the
+# two refusal blocks above. A cookie session for a real-shell account must
+# still get help/man/sh shells on /nd and an auto-shell on /tty.
+wsp=$((port + 9))
+ws_log="$tmpdb/wsauth.log"
+AXIL_ND_DB="$tmpdb/wsauth.db" axil -d -p "$wsp" -m ./lib/axil-nd >"$ws_log" 2>&1 &
+ws_pid=$!
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "Done." "$ws_log" 2>/dev/null && nc -z 127.0.0.1 "$wsp" 2>/dev/null && break
+	tries=$((tries - 1))
+	sleep 0.05
+done
+[ $tries -eq 0 ] && { echo "FAIL: cookie-terminal server did not init" >&2; exit 1; }
+ws_jar="$tmpdb/wsauth.jar"
+ws_code=$(curl -s -o /dev/null -w "%{http_code}" -c "$ws_jar" -X POST \
+	"http://127.0.0.1:$wsp/testauth/login" \
+	-d "username=$user&password=$userpass")
+[ "$ws_code" = "303" ] || { echo "FAIL: cookie-terminal login got $ws_code" >&2; exit 1; }
+ws_tok=$(awk '/QSESSION/ {print $NF}' "$ws_jar")
+[ -n "$ws_tok" ] || { echo "FAIL: no session token for cookie terminals" >&2; exit 1; }
+
+# /nd with the cookie: game login first (on_enter proves it), then terminals.
+ws_nd_out="$tmpdb/ws_nd.out"
+ws_nd_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+exec 7<>/dev/tcp/127.0.0.1/$wsp
+printf 'GET /nd HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCookie: QSESSION=%s\r\n\r\n' \
+	"$wsp" "$ws_nd_key" "$ws_tok" >&7
+ws_nd_resp=""
+while IFS= read -r -t3 line <&7; do
+	line="${line%$'\r'}"
+	[ -z "$line" ] && break
+done
+: >"$ws_nd_out"
+stdbuf -i0 -o0 cat <&7 >"$ws_nd_out" &
+ws_nd_cat=$!
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa "on_enter" "$ws_nd_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "on_enter" "$ws_nd_out" \
+	|| { echo "FAIL: cookie /nd login missing on_enter" >&2; exit 1; }
+
+# help renders through a PTY for a proven identity.
+printf '\x82\x8b\x00\x00\x00\x00help begin\n' >&7
+tries=30
+while [ $tries -gt 0 ]; do
+	grep -qa "BEGIN" "$ws_nd_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "BEGIN" "$ws_nd_out" \
+	|| { echo "FAIL: cookie 'help begin' man page not seen" >&2; exit 1; }
+
+# sh opens a shell: NAWS first for geometry, then the command.
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7
+sleep 0.2
+printf '\x82\x83\x00\x00\x00\x00sh\n' >&7
+sleep 0.5
+# "echo ND_WS_OK\n" is 14 bytes: 0x80|14 = 0x8e. A wrong length byte stalls
+# ws_read waiting for bytes that never come, and the shell looks dead.
+printf '\x82\x8e\x00\x00\x00\x00echo ND_WS_OK\n' >&7
+# Generous bound: bash startup (profiles) plus a loaded host can take seconds
+# before the first command's output arrives; the poll exits on first sight so
+# the fast path costs nothing.
+tries=120
+while [ $tries -gt 0 ]; do
+	grep -qa "ND_WS_OK" "$ws_nd_out" && break
+	sleep 0.1
+	tries=$((tries - 1))
+done
+grep -qa "ND_WS_OK" "$ws_nd_out" \
+	|| { echo "FAIL: cookie PTY shell echo ND_WS_OK not seen" >&2; exit 1; }
+printf '\x82\x8a\x00\x00\x00\x00stty size\n' >&7
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qa "24 80" "$ws_nd_out" && break
+	sleep 0.1
+	tries=$((tries - 1))
+done
+grep -qa "24 80" "$ws_nd_out" \
+	|| { echo "FAIL: cookie PTY missing negotiated 80x24 geometry" >&2; exit 1; }
+printf '\x82\x85\x00\x00\x00\x00exit\n' >&7
+sleep 0.2
+kill -9 $ws_nd_cat 2>/dev/null || true
+wait $ws_nd_cat 2>/dev/null || true
+exec 7<&-
+echo "cookie /nd terminals work (help/sh/geometry)"
+
+# /tty with the cookie: negotiation tripwires plus the auto-shell.
+ws_tty_out="$tmpdb/ws_tty.out"
+ws_tty_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+exec 7<>/dev/tcp/127.0.0.1/$wsp
+printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCookie: QSESSION=%s\r\n\r\n' \
+	"$wsp" "$ws_tty_key" "$ws_tok" >&7
+while IFS= read -r -t3 line <&7; do
+	line="${line%$'\r'}"
+	[ -z "$line" ] && break
+done
+: >"$ws_tty_out"
+stdbuf -i0 -o0 cat <&7 >"$ws_tty_out" &
+ws_tty_cat=$!
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa $'\xff\xfb\x01' "$ws_tty_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+ws_tty_hex=$(xxd -p "$ws_tty_out" | tr -d '\n')
+for pair in 'fffb01:IAC WILL ECHO' 'fffd1f:IAC DO NAWS' 'fffc03:IAC WONT SGA'; do
+	pat=${pair%%:*}
+	name=${pair##*:}
+	seen=$(printf '%s' "$ws_tty_hex" | grep -oiF "$pat" | wc -l)
+	[ "$seen" -ge 1 ] \
+		|| { echo "FAIL: missing $name on cookie /tty" >&2; exit 1; }
+done
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7
+sleep 0.3
+# "echo ND_WS_TTY_OK\n" is 18 bytes: 0x80|18 = 0x92 (see above).
+printf '\x82\x92\x00\x00\x00\x00echo ND_WS_TTY_OK\n' >&7
+tries=120
+while [ $tries -gt 0 ]; do
+	grep -qa "ND_WS_TTY_OK" "$ws_tty_out" && break
+	sleep 0.1
+	tries=$((tries - 1))
+done
+grep -qa "ND_WS_TTY_OK" "$ws_tty_out" \
+	|| { echo "FAIL: cookie /tty auto-shell echo not seen" >&2; exit 1; }
+kill -9 $ws_tty_cat 2>/dev/null || true
+wait $ws_tty_cat 2>/dev/null || true
+exec 7<&-
+echo "cookie /tty auto-shell works"
+kill -9 $ws_pid 2>/dev/null || true
+wait $ws_pid 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Raw-telnet guest path: connect a guest over a plain TCP socket (no WS).
@@ -679,22 +910,27 @@ sleep 0.05
 # axil_read() only dispatches a COMPLETE head: head_complete() accepts LFLF or
 # CRLFCRLF, never a single LF or a single CRLF (libaxil.c). A one-line send is
 # stashed in the descriptor and never dispatched, so every raw command below
-# terminates with a blank line.
-printf 'connect %s\n\n' "$user" >&4
-
-tries=40
-while [ $tries -gt 0 ]; do
-	grep -qa "on_enter" "$tmpout" && break
-	sleep 0.05
-	tries=$((tries - 1))
-done
-
-grep -qa "on_enter" "$tmpout" \
-	|| { echo "FAIL: raw guest on_enter missing" >&2; exit 1; }
+# terminates with a blank line. Login is two-phase: `connect <name>` arms the
+# password prompt, the next line is the password.
+ndlogin 4 "$user" "$userpass" "on_enter" "$tmpout" \
+	|| { echo "FAIL: raw guest login missing" >&2; exit 1; }
 
 hex3=$(xxd -p "$tmpout" | tr -d '\n')
 echo "$hex3" | grep -qiF "fffd1f" || { echo "FAIL: raw IAC DO NAWS missing" >&2; exit 1; }
-echo "$hex3" | grep -qiF "fffb01" && { echo "FAIL: raw IAC WILL ECHO present before PTY" >&2; exit 1; }
+# The password prompt is the one place WILL ECHO may appear before a PTY: the
+# server takes over echoing so the password never shows, then hands echoing
+# back with WONT ECHO once the line is read. Both must be present, in that
+# order -- a prompt that never suppresses, or never restores, breaks the
+# terminal for everything after it.
+echo "$hex3" | grep -qiF "fffb01" || { echo "FAIL: raw IAC WILL ECHO missing at password prompt" >&2; exit 1; }
+echo "$hex3" | grep -qiF "fffc01" || { echo "FAIL: raw IAC WONT ECHO missing after password prompt" >&2; exit 1; }
+will_at=$(echo "$hex3" | grep -bo "fffb01" | head -1 | cut -d: -f1 || true)
+# WONT ECHO also opens the connection (the client echoes until the prompt),
+# so the restore is the first WONT *after* the prompt's WILL, not the first
+# WONT in the capture.
+wont_at=$(echo "$hex3" | grep -bo "fffc01" | awk -F: -v w="$will_at" '$1 > w {print $1; exit}' || true)
+[ -n "$will_at" ] && [ -n "$wont_at" ] \
+	|| { echo "FAIL: WILL ECHO without a later WONT ECHO" >&2; exit 1; }
 echo "$hex3" | grep -qiF "fffc03" || { echo "FAIL: raw IAC WONT SGA missing" >&2; exit 1; }
 
 # say round-trip over the raw socket (no WS framing).
@@ -736,24 +972,121 @@ grep -qa "ND_RAW_OK" "$tmpout" \
 	|| { echo "FAIL: raw live-PTY shell echo ND_RAW_OK not seen" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# S5.4 regression: a PTY connection that is never authenticated must be cleaned up.
+# Passworded-connect negatives, on the main (fixture-loaded) server.
 #
-# This needs its own server, booted WITHOUT -A. The suite's main axil runs with -A
-# (AXIL_AUTOAUTH), which authenticates every WebSocket upgrade through
-# axil_connect(), and that hides the bug completely: with the connection
-# authenticated, both gates happen to let the close through. The site does not
-# pass -A (see start.sh), which is why it was the thing that broke.
+# A wrong password must fail uniformly and close the connection: each guess
+# costs a reconnect, and the failure must not say whether the name exists.
+exec 9<>/dev/tcp/127.0.0.1/$port
+neg_out="$tmpdb/neg.out"
+: >"$neg_out"
+stdbuf -i0 -o0 cat <&9 >"$neg_out" &
+neg_cat=$!
+printf 'connect %s\n\n' "$user" >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qaF "Password:" "$neg_out" \
+	|| { echo "FAIL: negative probe got no password prompt" >&2; exit 1; }
+printf 'definitely-wrong-password\n\n' >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Invalid name or password." "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qaF "Invalid name or password." "$neg_out" \
+	|| { echo "FAIL: wrong password was not refused uniformly" >&2; exit 1; }
+# the failure closes: the socket must go quiet (EOF) rather than accept more
+sleep 0.5
+if printf 'say after-failure\n\n' >&9 2>/dev/null; then
+	sleep 0.5
+	grep -qa "You say:" "$neg_out" \
+		&& { echo "FAIL: connection survived a failed password" >&2; exit 1; }
+fi
+kill -9 $neg_cat 2>/dev/null || true
+wait $neg_cat 2>/dev/null || true
+exec 9<&-
+echo "wrong password refused uniformly and closed"
+
+# Unknown names fail exactly like wrong passwords (no oracle).
+exec 9<>/dev/tcp/127.0.0.1/$port
+: >"$neg_out"
+stdbuf -i0 -o0 cat <&9 >"$neg_out" &
+neg_cat=$!
+printf 'connect nosuchuser_%s\n\n' "$$" >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+printf 'whatever\n\n' >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Invalid name or password." "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qaF "Invalid name or password." "$neg_out" \
+	|| { echo "FAIL: unknown user was not refused uniformly" >&2; exit 1; }
+kill -9 $neg_cat 2>/dev/null || true
+wait $neg_cat 2>/dev/null || true
+exec 9<&-
+echo "unknown user refused uniformly"
+
+# `man` topic validation: traversal and flag injection are refused without
+# spawning anything. Uses the logged-in fd 4 session from above? No -- fd 4
+# is closed. Open a fresh login for the man probes.
+exec 9<>/dev/tcp/127.0.0.1/$port
+: >"$neg_out"
+stdbuf -i0 -o0 cat <&9 >"$neg_out" &
+neg_cat=$!
+ndlogin 9 "$user" "$userpass" "on_enter" "$neg_out" \
+	|| { echo "FAIL: man-probe login missing" >&2; exit 1; }
+printf 'man ../../etc/passwd\n\n' >&9
+sleep 0.5
+printf 'man --pager=id\n\n' >&9
+sleep 0.5
+printf 'man -K\n\n' >&9
+sleep 0.5
+tries=40
+while [ $tries -gt 0 ]; do
+	[ "$(grep -acF "No manual entry." "$neg_out")" -ge 3 ] && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+[ "$(grep -acF "No manual entry." "$neg_out")" -ge 3 ] \
+	|| { echo "FAIL: man traversal/injection not refused" >&2; exit 1; }
+kill -9 $neg_cat 2>/dev/null || true
+wait $neg_cat 2>/dev/null || true
+exec 9<&-
+echo "man traversal and flag injection refused"
+
+# NOTE on fail-closed verification: the bus zero-fills a hook result when no
+# implementation runs, so auth_password_matches() reports valid with non-zero
+# and an absent axil-auth fails every login closed. That contract is pinned by
+# tests/unit/xy_hook_default_test (no modules loaded: the hook returns 0) and
+# tests/unit/axil_auth_account_test (0 uniformly means invalid). A denied-hook
+# probe was tried here and removed: deny is children-only, so a fixture cannot
+# deny nd's own region, and any system libaxil-auth in /lib satisfies the
+# loader anyway -- neither can simulate an absent module in this environment.
+
+# ---------------------------------------------------------------------------
+# S5.4, two legs. The unauthenticated terminal no longer spawns a shell at all
+# (refused before the PTY is born), so the old shape -- spawn-then-check-cleanup
+# on an anonymous connection -- cannot exist any more. What remains:
 #
-# Without -A, axil_connect() returns 0, so libaxil.c does not set DF_CONNECTED
-# either, and DF_AUTHENTICATED is never set by anything else. axil_disconnect()
-# was gated on DF_CONNECTED in axil_close() and then on DF_AUTHENTICATED inside
-# axil_disconnect(), so neither gate let this close through: the PTY, the child
-# shell, and the mux_state entry keyed by this fd all outlived the connection.
-# The kernel then reuses the fd for the next connection -- an ordinary HTTP
-# request -- and axil_tty_input() finds the leaked shell, writes the request into
-# the PTY and returns -1 so axil never dispatches it. The client gets its own
-# request echoed back through the line discipline (each CRLF becoming CRLFCRLF),
-# a terminal reset sequence, and the shell's reaction to being fed a request.
+# Leg 1 (new property): an unauthenticated /tty yields no PTY and no child.
+# Leg 2 (retained regression): an AUTHENTICATED PTY connection, killed
+# abruptly, still cleans up, and recycled fds still serve clean HTTP.
+#
+# Both legs need their own server, booted WITHOUT -A (the suite's main axil
+# runs with -A, which would refuse /tty outright via DF_AUTH_AUTO and hide
+# everything). The fixture account database is shared via ND_TEST_AUTH_DIR, so
+# leg 2 logs in through the fixture's /testauth/login for a cookie session.
 s54_kids() {
 	s54_pids=$(pgrep -P "$s54_pid" 2>/dev/null)
 	s54_n=0
@@ -787,7 +1120,7 @@ s54_pid=$!
 # leaked `axil -d -A -p <port>` and dirtied mods.load; the next run then booted
 # testprobe twice. The scope section below re-declares the full trap for
 # exactly this reason -- do the same here.
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 s54_settle=50
 while [ $s54_settle -gt 0 ]; do
 	grep -qF "Done." "$s54_log" 2>/dev/null && nc -z 127.0.0.1 "$s54_port" 2>/dev/null && break
@@ -796,8 +1129,7 @@ while [ $s54_settle -gt 0 ]; do
 done
 [ $s54_settle -eq 0 ] && { echo "FAIL: S5.4 no-autoauth axil did not become ready" >&2; kill -9 "$s54_pid" 2>/dev/null; exit 1; }
 
-s54_key=$(head -c 16 /dev/urandom | base64 | tr -d '
-')
+s54_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
 s54_accept_expect=$(printf '%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11' "$s54_key" \
 	| openssl dgst -sha1 -binary | base64)
 
@@ -824,12 +1156,61 @@ stdbuf -i0 -o0 cat <&8 >"$s54_out" &
 s54_cat_pid=$!
 sleep 0.2
 
-# NAWS is what auto-spawns the login shell on this route, so the PTY and its child
-# exist without ever sending a command.
+# Leg 1: no PTY and no child for an unauthenticated /tty. NAWS used to
+# auto-spawn the login shell here; now the upgrade is refused outright.
+# (Writes may hit the already-closed socket; EPIPE here is the point.)
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&8 2>/dev/null || true
+sleep 0.3
+printf '\x82\x93\x00\x00\x00\x00echo ND_S54_OK_123\n' >&8 2>/dev/null || true
+
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa "Terminal disabled" "$s54_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "Terminal disabled: no account." "$s54_out" \
+	|| { echo "FAIL: S5.4: unauthenticated /tty was not refused" >&2; exit 1; }
+grep -qa "ND_S54_OK" "$s54_out" \
+	&& { echo "FAIL: S5.4: shell output on a refused terminal" >&2; exit 1; }
+
+s54_before=$(s54_kids)
+[ "$s54_before" -eq 0 ] \
+	|| { echo "FAIL: S5.4: refused terminal left $s54_before live children" >&2; exit 1; }
+grep -q "no authenticated passwd identity" "$s54_log" \
+	|| { echo "FAIL: S5.4: refusal not logged" >&2; exit 1; }
+
+kill -9 $s54_cat_pid 2>/dev/null || true
+wait $s54_cat_pid 2>/dev/null || true
+exec 8<&-
+
+# Leg 2: the retained cleanup regression, on an authenticated PTY. Log in
+# through the fixture for a cookie session (the fixture user is a real host
+# account with a real shell, so the gate passes), open /tty with the cookie,
+# spawn a shell, then kill the connection abruptly: the child must go away
+# and recycled fds must serve clean HTTP.
+s54_jar="$tmpdb/s54.jar"
+s54_code=$(curl -s -o /dev/null -w "%{http_code}" -c "$s54_jar" -X POST \
+	"http://127.0.0.1:$s54_port/testauth/login" \
+	-d "username=$user&password=$userpass")
+[ "$s54_code" = "303" ] || { echo "FAIL: S5.4: fixture login got $s54_code" >&2; exit 1; }
+s54_tok=$(awk '/QSESSION/ {print $NF}' "$s54_jar")
+[ -n "$s54_tok" ] || { echo "FAIL: S5.4: no session token from fixture login" >&2; exit 1; }
+
+exec 8<>/dev/tcp/127.0.0.1/$s54_port
+printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCookie: QSESSION=%s\r\n\r\n' \
+	"$s54_port" "$s54_key" "$s54_tok" >&8
+s54_resp2=""
+while IFS= read -r -t3 line <&8; do
+	line="${line%$'\r'}"
+	[ -z "$line" ] && break
+done
+: >"$s54_out"
+stdbuf -i0 -o0 cat <&8 >"$s54_out" &
+s54_cat_pid=$!
 printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&8
 sleep 0.3
 printf '\x82\x93\x00\x00\x00\x00echo ND_S54_OK_123\n' >&8
-
 tries=40
 while [ $tries -gt 0 ]; do
 	grep -qa "ND_S54_OK" "$s54_out" && break
@@ -837,7 +1218,7 @@ while [ $tries -gt 0 ]; do
 	tries=$((tries - 1))
 done
 grep -qa "ND_S54_OK" "$s54_out" \
-	|| { echo "FAIL: S5.4: no shell on the unauthenticated terminal, test proves nothing" >&2; exit 1; }
+	|| { echo "FAIL: S5.4: no shell on the authenticated terminal, cleanup proves nothing" >&2; exit 1; }
 
 s54_before=$(s54_kids)
 [ "$s54_before" -ge 1 ] \
@@ -923,7 +1304,19 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: boot A did not init" >&2; exit 1; }
 
 exec 5<>/dev/tcp/127.0.0.1/$port_a
+persist_a_out="$tmpdb/persist_a.out"
+: >"$persist_a_out"
+stdbuf -i0 -o0 cat <&5 >"$persist_a_out" &
+persist_a_cat=$!
 printf 'connect %s\n\n' "$user" >&5
+tries=50
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$persist_a_out" 2>/dev/null && break
+	tries=$((tries - 1))
+	sleep 0.05
+done
+[ $tries -eq 0 ] && { echo "FAIL: boot A no password prompt" >&2; exit 1; }
+printf '%s\n\n' "$userpass" >&5
 tries=50
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$log_a" 2>/dev/null && break
@@ -933,7 +1326,24 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: boot A login not seen" >&2; exit 1; }
 
 printf 'save\n\n' >&5
+# Wait for the explicit save to land (store mtime advances past the boot)
+# before the SEGV: without this the crash-handler save races the world tick
+# on a store that may not even contain the player yet, and boot B flakes.
+# Bounded; a save that never lands fails here instead of confusing boot B.
+save_before=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
+tries=60
+while [ $tries -gt 0 ]; do
+	save_now=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
+	[ "$save_now" -gt "$save_before" ] && break
+	tries=$((tries - 1))
+	sleep 0.1
+done
+save_now=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
+[ "$save_now" -gt "$save_before" ] \
+	|| { echo "FAIL: boot A save did not land before SEGV" >&2; exit 1; }
 sleep 0.3
+kill -9 $persist_a_cat 2>/dev/null || true
+wait $persist_a_cat 2>/dev/null || true
 exec 5<&-
 
 kp=$persist_pid_a
@@ -958,7 +1368,19 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: boot B did not init" >&2; exit 1; }
 
 exec 6<>/dev/tcp/127.0.0.1/$port_b
+persist_b_out="$tmpdb/persist_b.out"
+: >"$persist_b_out"
+stdbuf -i0 -o0 cat <&6 >"$persist_b_out" &
+persist_b_cat=$!
 printf 'connect %s\n\n' "$user" >&6
+tries=50
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$persist_b_out" 2>/dev/null && break
+	tries=$((tries - 1))
+	sleep 0.05
+done
+[ $tries -eq 0 ] && { echo "FAIL: boot B no password prompt" >&2; exit 1; }
+printf '%s\n\n' "$userpass" >&6
 tries=50
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$log_b" 2>/dev/null && break
@@ -966,6 +1388,8 @@ while [ $tries -gt 0 ]; do
 	sleep 0.1
 done
 [ $tries -eq 0 ] && { echo "FAIL: boot B login not seen" >&2; exit 1; }
+kill -9 $persist_b_cat 2>/dev/null || true
+wait $persist_b_cat 2>/dev/null || true
 exec 6<&-
 
 kp=$persist_pid_b
@@ -975,7 +1399,11 @@ wait "$kp" 2>/dev/null || true
 
 grep -qF "nd_player_login: '$user'" "$log_b" \
 	|| { echo "FAIL: boot B login missing" >&2; exit 1; }
-grep -qF "eng_object_add" "$log_b" \
+# Player creation is a self-parented add (where=NOTHING rewrites to the new
+# ref, so it logs N -> N). Anything else -- entry drops, which are
+# probability-gated per login -- is not the player and must not fail this.
+# Asserting the absence of ALL adds made this a dice roll on drop tables.
+grep -qE "eng_object_add ([0-9]+) -> \1([^0-9]|$)" "$log_b" \
 	&& { echo "FAIL: boot B re-created the player" >&2; exit 1; }
 grep -qF '/4294967295' "$log_b" \
 	&& { echo "FAIL: boot B did not reuse the persisted player" >&2; exit 1; }
@@ -1104,6 +1532,9 @@ wait_up "$la" "$pa" || { echo "FAIL: planet boot A did not init" >&2; exit 1; }
 
 exec 7<>/dev/tcp/127.0.0.1/$pa
 ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: planet boot A no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
 tries=60
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$la" 2>/dev/null && break
@@ -1206,6 +1637,9 @@ grep -qaF "st_restore: loaded libnd-biome" "$lb" \
 
 exec 7<>/dev/tcp/127.0.0.1/$pb
 ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: planet boot B no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
 tries=60
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$lb" 2>/dev/null && break
@@ -1255,6 +1689,9 @@ grep -qaF "st_restore: loaded libnd-biome" "$lc" \
 
 exec 7<>/dev/tcp/127.0.0.1/$pc
 ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: planet boot C no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
 tries=60
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$lc" 2>/dev/null && break
@@ -1377,7 +1814,7 @@ ld="$tmpdb/scope-a.log"
 le="$tmpdb/scope-b.log"
 scope_pid_a=
 scope_pid_b=
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} 2>/dev/null || true' EXIT
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} 2>/dev/null || true' EXIT
 
 # Count a marker in a log. Used as a DELTA around one command, never as a
 # whole-file grep: "probe A did not fire" is only meaningful if the assertion
@@ -1402,15 +1839,33 @@ nmarked() {
 # "world=N" keeps it from matching "world=10". The transcript is reset first
 # so ndwait cannot pass on a stale marker from an earlier world.
 goto_world() {
-	local fd=$1 world=$2
+	local fd=$1 world=$2 tag=${3:-}
 	: > "$PLANET_TXT"
 	ndcmd "$fd" "room 0 0 0 $world"
-	ndwait "$fd" "at 0 0 0 $world" \
-		|| { echo "FAIL: room 0 0 0 $world was not created (tail: $(planet_tail))" >&2; exit 1; }
+	if ! ndwait "$fd" "at 0 0 0 $world"; then
+		echo "FAIL: room 0 0 0 $world was not created ($tag) (tail: $(planet_tail))" >&2
+		ndcmd "$fd" "status" 2>/dev/null || true
+		ndsettle "$fd" 2>/dev/null || true
+		echo "--- planet transcript tail ---" >&2
+		planet_tail >&2
+		echo "--- server log tail ---" >&2
+		[ -n "${ld:-}" ] && [ -f "$ld" ] && tail -n 40 "$ld" >&2
+		[ -n "${le:-}" ] && [ -f "$le" ] && tail -n 40 "$le" >&2
+		exit 1
+	fi
 	ndsettle "$fd"
 	ndcmd "$fd" "here"
-	ndwait "$fd" "world=$world owner=" \
-		|| { echo "FAIL: the player is not in world $world (tail: $(planet_tail))" >&2; exit 1; }
+	if ! ndwait "$fd" "world=$world owner="; then
+		echo "FAIL: the player is not in world $world ($tag) (tail: $(planet_tail))" >&2
+		ndcmd "$fd" "status" 2>/dev/null || true
+		ndsettle "$fd" 2>/dev/null || true
+		echo "--- planet transcript tail ---" >&2
+		planet_tail >&2
+		echo "--- server log tail ---" >&2
+		[ -n "${ld:-}" ] && [ -f "$ld" ] && tail -n 40 "$ld" >&2
+		[ -n "${le:-}" ] && [ -f "$le" ] && tail -n 40 "$le" >&2
+		exit 1
+	fi
 	ndsettle "$fd"
 }
 
@@ -1421,6 +1876,9 @@ wait_up "$ld" "$pd" || { echo "FAIL: scope boot A did not init" >&2; exit 1; }
 : > "$PLANET_TXT"
 exec 7<>/dev/tcp/127.0.0.1/$pd
 ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: scope boot A no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
 tries=60
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$ld" 2>/dev/null && break
@@ -1433,7 +1891,7 @@ ndcmd 7 "planet 1"
 ndwait 7 "planet 1 established" \
 	|| { echo "FAIL: planet 1 did not establish for the scoped gate" >&2; exit 1; }
 ndsettle 7
-goto_world 7 1
+goto_world 7 1 "boot A world 1"
 ndcmd 7 "loadmod libnd-scope-a 1"
 ndwait 7 "libnd-scope-a loaded into" \
 	|| { echo "FAIL: loadmod libnd-scope-a into planet 1 not confirmed" >&2; exit 1; }
@@ -1453,7 +1911,7 @@ ndcmd 7 "planet 2"
 ndwait 7 "planet 2 established" \
 	|| { echo "FAIL: planet 2 did not establish for the scoped gate" >&2; exit 1; }
 ndsettle 7
-goto_world 7 2
+goto_world 7 2 "boot A world 2"
 ndcmd 7 "loadmod libnd-scope-b 2"
 ndwait 7 "libnd-scope-b loaded into" \
 	|| { echo "FAIL: loadmod libnd-scope-b into planet 2 not confirmed" >&2; exit 1; }
@@ -1490,6 +1948,9 @@ grep -qaF "st_restore: loaded libnd-scope-b" "$le" \
 : > "$PLANET_TXT"
 exec 7<>/dev/tcp/127.0.0.1/$pe
 ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: scope boot B no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
 tries=60
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$le" 2>/dev/null && break
@@ -1499,7 +1960,7 @@ done
 
 # Stand in planet 2 again: planet 2's probe must fire and planet 1's must not,
 # from the RESTORED sets rather than the ones this boot loaded by hand.
-goto_world 7 2
+goto_world 7 2 "boot B world 2"
 : > "$PLANET_TXT"
 before_a=$(nmarked "$le" "nd-scope-a: on_status")
 before_b=$(nmarked "$le" "nd-scope-b: on_status")
@@ -1515,7 +1976,7 @@ after_b=$(nmarked "$le" "nd-scope-b: on_status")
 
 # And standing in planet 1, the roles reverse -- which is what makes the pair
 # an isolation assertion rather than one module happening to be quiet.
-goto_world 7 1
+goto_world 7 1 "boot B world 1"
 : > "$PLANET_TXT"
 before_a=$(nmarked "$le" "nd-scope-a: on_status")
 before_b=$(nmarked "$le" "nd-scope-b: on_status")
@@ -1636,9 +2097,12 @@ mpwait() {
 # Strip the colour and the CR so a marker can be matched as plain text.
 mpclean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
 
-mp_guest="ndmatch$$"
+# mp_guest and guestpass are defined with the fixture accounts at setup.
 exec 7<>/dev/tcp/127.0.0.1/$mp
 mpcmd 7 "$mp_owner_txt" "connect $user"
+mpwait 7 "$mp_owner_txt" "Password:" \
+	|| { echo "FAIL: S6 owner no password prompt" >&2; exit 1; }
+mpcmd 7 "$mp_owner_txt" "$userpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$mpla" 2>/dev/null && break
@@ -1647,6 +2111,9 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: S6 owner login not seen" >&2; exit 1; }
 exec 8<>/dev/tcp/127.0.0.1/$mp
 mpcmd 8 "$mp_guest_txt" "connect $mp_guest"
+mpwait 8 "$mp_guest_txt" "Password:" \
+	|| { echo "FAIL: S6 guest no password prompt" >&2; exit 1; }
+mpcmd 8 "$mp_guest_txt" "$guestpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$mp_guest'" "$mpla" 2>/dev/null && break
@@ -1797,9 +2264,11 @@ w7clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
 w7run() { : > "$2"; w7cmd "$1" "$2" "$3"; }
 w7ref() { w7clean "$1" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1; }
 
-w7_guest="ndwiz$$"
 exec 7<>/dev/tcp/127.0.0.1/$w7
 w7cmd 7 "$w7_owner_txt" "connect $user"
+w7wait 7 "$w7_owner_txt" "Password:" \
+	|| { echo "FAIL: S7 owner no password prompt" >&2; exit 1; }
+w7cmd 7 "$w7_owner_txt" "$userpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$w7la" 2>/dev/null && break
@@ -1808,6 +2277,9 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: S7 owner login not seen" >&2; exit 1; }
 exec 8<>/dev/tcp/127.0.0.1/$w7
 w7cmd 8 "$w7_guest_txt" "connect $w7_guest"
+w7wait 8 "$w7_guest_txt" "Password:" \
+	|| { echo "FAIL: S7 guest no password prompt" >&2; exit 1; }
+w7cmd 8 "$w7_guest_txt" "$guestpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$w7_guest'" "$w7la" 2>/dev/null && break
@@ -2061,9 +2533,11 @@ b8wait() {
 b8clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
 b8run() { : > "$2"; b8cmd "$1" "$2" "$3"; }
 
-b8_guest="ndban$$"
 exec 7<>/dev/tcp/127.0.0.1/$b8
 b8cmd 7 "$b8_owner_txt" "connect $user"
+b8wait 7 "$b8_owner_txt" "Password:" \
+	|| { echo "FAIL: S8 owner no password prompt" >&2; exit 1; }
+b8cmd 7 "$b8_owner_txt" "$userpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$b8la" 2>/dev/null && break
@@ -2072,6 +2546,9 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: S8 owner login not seen" >&2; exit 1; }
 exec 8<>/dev/tcp/127.0.0.1/$b8
 b8cmd 8 "$b8_guest_txt" "connect $b8_guest"
+b8wait 8 "$b8_guest_txt" "Password:" \
+	|| { echo "FAIL: S8 guest no password prompt" >&2; exit 1; }
+b8cmd 8 "$b8_guest_txt" "$guestpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$b8_guest'" "$b8la" 2>/dev/null && break
@@ -2144,8 +2621,15 @@ b8sz=$(stat -c %s "$b8db/w.db" 2>/dev/null || echo 0)
 AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
 b8_pid=$!
 wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot B did not init" >&2; exit 1; }
+# Fresh transcripts: a boot A "Password:" left in the file would satisfy the
+# wait below without the new socket having been answered at all.
+: > "$b8_owner_txt"
+: > "$b8_guest_txt"
 exec 7<>/dev/tcp/127.0.0.1/$b8
 b8cmd 7 "$b8_owner_txt" "connect $user"
+b8wait 7 "$b8_owner_txt" "Password:" \
+	|| { echo "FAIL: S8 boot B owner no password prompt" >&2; exit 1; }
+b8cmd 7 "$b8_owner_txt" "$userpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$b8la" 2>/dev/null && break
@@ -2154,6 +2638,9 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: S8 boot B owner login not seen" >&2; exit 1; }
 exec 8<>/dev/tcp/127.0.0.1/$b8
 b8cmd 8 "$b8_guest_txt" "connect $b8_guest"
+b8wait 8 "$b8_guest_txt" "Password:" \
+	|| { echo "FAIL: S8 boot B guest no password prompt" >&2; exit 1; }
+b8cmd 8 "$b8_guest_txt" "$guestpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$b8_guest'" "$b8la" 2>/dev/null && break
@@ -2257,9 +2744,11 @@ b9refused() {
 	exit 1
 }
 
-b9_guest="ndtgt$$"
 exec 7<>/dev/tcp/127.0.0.1/$b9
 b9cmd 7 "$b9_owner_txt" "connect $user"
+b9wait 7 "$b9_owner_txt" "Password:" \
+	|| { echo "FAIL: S9 owner no password prompt" >&2; exit 1; }
+b9cmd 7 "$b9_owner_txt" "$userpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$b9la" 2>/dev/null && break
@@ -2268,6 +2757,9 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: S9 owner login not seen" >&2; exit 1; }
 exec 8<>/dev/tcp/127.0.0.1/$b9
 b9cmd 8 "$b9_guest_txt" "connect $b9_guest"
+b9wait 8 "$b9_guest_txt" "Password:" \
+	|| { echo "FAIL: S9 guest no password prompt" >&2; exit 1; }
+b9cmd 8 "$b9_guest_txt" "$guestpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$b9_guest'" "$b9la" 2>/dev/null && break
@@ -2573,6 +3065,9 @@ b9_guest_txt="$b9db/guest3.txt"
 : > "$b9_owner_txt"
 : > "$b9_guest_txt"
 b9cmd 7 "$b9_owner_txt" "connect $user"
+b9wait 7 "$b9_owner_txt" "Password:" \
+	|| { echo "FAIL: S9 boot B owner no password prompt" >&2; exit 1; }
+b9cmd 7 "$b9_owner_txt" "$userpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$b9la" 2>/dev/null && break
@@ -2581,6 +3076,9 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: S9 boot B owner login not seen" >&2; exit 1; }
 exec 8<>/dev/tcp/127.0.0.1/$b9
 b9cmd 8 "$b9_guest_txt" "connect $b9_guest"
+b9wait 8 "$b9_guest_txt" "Password:" \
+	|| { echo "FAIL: S9 boot B guest no password prompt" >&2; exit 1; }
+b9cmd 8 "$b9_guest_txt" "$guestpass"
 tries=80
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$b9_guest'" "$b9la" 2>/dev/null && break

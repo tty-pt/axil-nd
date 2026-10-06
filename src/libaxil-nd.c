@@ -69,6 +69,8 @@ void nd_vim(int fd, int argc, char *argv[]);
 void nd_update(unsigned long long dt);
 void nd_disconnect(int fd);
 void close_all(int i);
+void nd_set_auth_ready(int ready);
+void nd_password_line(int fd, const char *name, const char *password);
 
 /* world.c's command table, walked directly by the WebSocket frame dispatch
  * below: axil's own cmd_proc() is static, so a watched WS fd has no axil-side
@@ -244,6 +246,50 @@ XY_IMPL(int, on_axil_parse,
     unsigned char *, input,
     int, nread)
 {
+  /* Password-prompt state comes first: while ND_PWPEND is armed the next line
+   * is a password, not a command, on either transport. Consumed here (return
+   * -1) so it never reaches cmd_parse, the PTY, or the game. */
+  {
+    char pending[64];
+    if (axil_env_get(fd, pending, sizeof(pending), "ND_PWPEND") == 0 &&
+        *pending) {
+      /* Bounded copy up to the first line end, skipping telnet negotiation
+       * (the WILL ECHO sent with the prompt can draw IAC DO ECHO replies that
+       * must not become password bytes). */
+      char line[128];
+      size_t o = 0;
+      int i = 0;
+      while (i < nread && o + 1 < sizeof(line)) {
+        unsigned char c = input[i];
+        if (c == '\r' || c == '\n' || c == '\0')
+          break;
+        if (c == 255 && i + 1 < nread) { /* IAC */
+          unsigned char opt = input[i + 1];
+          if (opt == 250) { /* SB: skip to IAC SE */
+            i += 2;
+            while (i + 1 < nread &&
+                   !(input[i] == 255 && input[i + 1] == 240))
+              i++;
+            i += 2;
+          } else if (opt == 251 || opt == 252 || opt == 253 ||
+                     opt == 254) { /* WILL/WONT/DO/DONT + option */
+            i += 3;
+          } else {
+            i += 2;
+          }
+          continue;
+        }
+        line[o++] = (char)c;
+        i++;
+      }
+      line[o] = '\0';
+      nd_password_line(fd, pending, line);
+      /* Scrub the secret from our own buffer before returning. */
+      memset(line, 0, sizeof(line));
+      return -1;
+    }
+  }
+
   /* axil-tty's route: shell bytes, not a command stream. Returning -1 keeps
    * them out of cmd_parse entirely -- the axil_tty_active() check below only
    * covers the window after a PTY exists, and on this route there is one from
@@ -462,6 +508,17 @@ xy_install(void)
   axil_register_handler("GET:" ND_TTY_ROUTE, axil_tty_handle_tty);
   nd_mods_load();
   xy_load("axil-tty");
+  /* Passworded connect authenticates through axil-auth's exported credential
+   * check. The bus convention (non-zero means valid) already fails closed when
+   * the module is absent; the flag only decides the error message. Same module
+   * name the site uses (mods/auth). */
+  if (xy_load("libaxil-auth") != 0) {
+    fprintf(stderr, "axil-nd: libaxil-auth unavailable; "
+                    "passworded connect disabled\n");
+    nd_set_auth_ready(0);
+  } else {
+    nd_set_auth_ready(1);
+  }
 }
 
 /*

@@ -497,6 +497,9 @@ st_room_at(unsigned player_ref, pos_t pos)
 	biome_map = biome_map_get(* (uint64_t *) pos);
 	unsigned there_ref = eng_object_add(&there, biome_map[bio.bio_idx], 0, (uint64_t) &bio, 0);
 	ROO *rthere = (ROO *) &there.data;
+	/* Carved rooms are permanent; clear RF_TEMP so eng_room_clean
+	 * does not collect the room when empty (§27.3). */
+	rthere->flags &= ~RF_TEMP;
 	map_put(pos, there_ref, 1);
 	exits_infer(there_ref, rthere);
 
@@ -2340,11 +2343,14 @@ do_room(int fd, int argc, char *argv[])
 	 * silently dangle. */
 	there_ref = eng_map_get(pos);
 	if (there_ref != NOTHING) {
-		eng_enter(player_ref, there_ref, E_NULL);
-		nd_writef(player_ref, "room %u at %d %d %d %d (existing)\n",
-			there_ref, pos[0], pos[1], pos[2], pos[3]);
-		eng_nd_flush(player_ref);
-		return;
+		const void *ov = corm_get(obj_hd, &there_ref);
+		if (ov && ((const OBJ *)ov)->type == TYPE_ROOM) {
+			eng_enter(player_ref, there_ref, E_NULL);
+			nd_writef(player_ref, "room %u at %d %d %d %d (existing)\n",
+				there_ref, pos[0], pos[1], pos[2], pos[3]);
+			eng_nd_flush(player_ref);
+			return;
+		}
 	}
 
 	there_ref = st_room_at(player_ref, pos);

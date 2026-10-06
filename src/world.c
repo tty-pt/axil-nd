@@ -124,31 +124,6 @@ world_db(void)
 	return db && *db ? db : "std.db";
 }
 
-/* Shutdown: flush, save, leave. NO corm_close() anywhere in this path, and
- * that is the whole point (measured Oct 2026, after the ban table made the
- * pre-existing bug deterministic).
- *
- * libcorm saves every file-backed map from a library destructor at process
- * exit (corm.h:181). Closing the maps first does not make that save a no-op:
- * it makes it destructive, because the save then recomputes the store's size
- * from what is left in corm's file cache and rewrites the file at that size.
- * With every map closed the cache holds the file and nothing else, so the
- * walk emitted corm's 16-byte header and the next boot found an empty world.
- * The exact shape of the damage varied with what else was still open (16, 1184,
- * 1600, 2000, 2400, 3200 bytes across runs), which is why this read as a
- * nondeterministic flake instead of a bug.
- *
- * Symptom chain, all measured on this tree: `save` mid-run wrote a correct
- * 8229-byte image; the following SIGTERM rewrote the same file as 3200 bytes
- * of seeds with no player, no region and no ban; boot B then restored nothing
- * ("st_restore: region id=0x0 plen=0" and nothing else) and the S8 reboot
- * gate failed with "ban did not survive the reboot". The planet gate failed
- * the same way, as "lost planet 1's surviving module" with a 16-byte db.
- *
- * Every path into here ends in process exit -- on_axil_exit() on a clean
- * shutdown, the SIGSEGV handler otherwise -- so freeing maps here bought
- * nothing and cost the store. Leaving them open makes our save and libcorm's
- * exit save write the same image, both with every map intact. */
 void
 close_all(int i)
 {
@@ -662,7 +637,10 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 void
 do_sh(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 {
-	axil_tty_shell(fd);
+	/* Refusal happens in axil-tty; a non-zero return means the gate bit, and
+	 * the log line is the only trace of a probe that never allocated. */
+	if (axil_tty_shell(fd) != 0)
+		WARN("sh refused on %d\n", fd);
 }
 
 void
@@ -670,6 +648,17 @@ do_man(int fd, int argc, char *argv[])
 {
 	const char *topic = (argc > 1 && argv[1] && *argv[1]) ? argv[1] : "begin";
 	char path[BUFSIZ];
+
+	/* The topic reaches an execve argv below. A slash escapes "man/<topic>.10"
+	 * into an arbitrary-file read (man -l preprocesses through cat), and a
+	 * leading dash turns the fallback branch's positional into a man flag
+	 * (-K, --pager=). Legitimate topics are bare command names, so refuse all
+	 * three outright. */
+	if (strchr(topic, '/') || strstr(topic, "..") || *topic == '-') {
+		WARN("man: refused topic '%s' on %d\n", topic, fd);
+		axil_write(fd, "No manual entry.\r\n", strlen("No manual entry.\r\n"));
+		return;
+	}
 
 	snprintf(path, sizeof(path), "man/%s.10", topic);
 
@@ -979,15 +968,98 @@ nd_player_login(int fd, char *user)
 
 void nd_event_announce(unsigned player_ref, unsigned loc_ref);
 
+/* Credential check owned by axil-auth, reached through the xy bus. Declared
+ * (not implemented) here, exactly like axil_tty_exec above: XY_DECL expands to
+ * a dispatcher. Non-zero means valid BY CONVENTION -- the bus zero-fills the
+ * result when no module implements the hook, so a "0 means valid" predicate
+ * would authenticate everyone the moment axil-auth is absent. */
+XY_DECL(int, auth_password_matches,
+	const char *, username,
+	const char *, password);
+
+/* Whether xy_install() managed to load libaxil-auth. The bus convention above
+ * already fails closed without it; this flag exists so the prompt can say so
+ * instead of hanging at "Password: ". */
+static int nd_auth_ready = 0;
+
+void
+nd_set_auth_ready(int ready)
+{
+	nd_auth_ready = ready ? 1 : 0;
+}
+
 void
 do_connect(int fd, int argc, char *argv[])
 {
-	if (argc < 2) {
+	char pending[64];
+
+	/* Passworded login in two phases: `connect <name>` arms a one-shot
+	 * password prompt on this descriptor, and the next line is the password.
+	 * A name alone never authenticates -- the old passwordless form is gone.
+	 * Pending state lives in the descriptor environment, which axil frees on
+	 * close, so a recycled fd can never inherit someone else's prompt. */
+	if (argc < 2 || !argv[1] || !*argv[1]) {
 		axil_write(fd, "Usage: connect <name>\r\n", strlen("Usage: connect <name>\r\n"));
 		return;
 	}
 
-	unsigned player_ref = nd_player_login(fd, argv[1]);
+	/* The pending slot is 63 chars; a longer name can never verify (auth
+	 * usernames are bounded well below that), so refuse it here rather than
+	 * storing a truncated name that fails confusingly later. */
+	if (strlen(argv[1]) >= sizeof(pending)) {
+		axil_write(fd, "Usage: connect <name>\r\n", strlen("Usage: connect <name>\r\n"));
+		return;
+	}
+
+	if (axil_env_get(fd, pending, sizeof(pending), "ND_PWPEND") == 0 && *pending) {
+		axil_write(fd, "Answer the pending password prompt first.\r\n",
+		    strlen("Answer the pending password prompt first.\r\n"));
+		return;
+	}
+
+	if (!nd_auth_ready) {
+		axil_write(fd, "Password authentication is unavailable.\r\n",
+		    strlen("Password authentication is unavailable.\r\n"));
+		return;
+	}
+
+	axil_env_put(fd, "ND_PWPEND", argv[1]);
+	/* IAC WILL ECHO: "I will echo, you will not." The server then sends
+	 * nothing back for the password line, so it never appears on screen or
+	 * in scrollback. Restored to WONT ECHO once the line is read. The prompt
+	 * ends with a newline: line-oriented readers (and this engine's own
+	 * transcript drains) can otherwise lose a newline-less prompt when
+	 * their read times out mid-line. */
+	static const unsigned char will_echo[] = { 255, 251, 1 };
+	axil_write(fd, (void *)will_echo, sizeof(will_echo));
+	axil_write(fd, "Password: \r\n", strlen("Password: \r\n"));
+}
+
+/* Second phase of connect: the line that arrived while ND_PWPEND was armed.
+ * Called from on_axil_parse (libaxil-nd.c), which already stripped telnet
+ * negotiation and cut the line. Clears the prompt before verifying, fails
+ * closed and uniformly, and closes on failure so each guess costs a reconnect. */
+void
+nd_password_line(int fd, const char *name, const char *password)
+{
+	static const unsigned char wont_echo[] = { 255, 252, 1 };
+
+	axil_env_put(fd, "ND_PWPEND", "");
+	axil_write(fd, (void *)wont_echo, sizeof(wont_echo));
+	axil_write(fd, "\r\n", 2);
+
+	if (!nd_auth_ready || !auth_password_matches(name, password)) {
+		/* Uniform on purpose: unknown user, wrong password, and an
+		 * unavailable service are indistinguishable, so the prompt cannot
+		 * be used to enumerate accounts. */
+		WARN("connect: failed password login for '%s' on %d\n", name, fd);
+		axil_write(fd, "Invalid name or password.\r\n",
+		    strlen("Invalid name or password.\r\n"));
+		axil_close(fd);
+		return;
+	}
+
+	unsigned player_ref = nd_player_login(fd, (char *)name);
 
 	if (player_ref && player_ref != NOTHING) {
 		nd_io_attach(fd, player_ref);
