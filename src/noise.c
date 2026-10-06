@@ -186,8 +186,15 @@ spread(unsigned ny)
 	static const unsigned nx = 2;
 	unsigned w, p;
 
+	/* p < nx * CHUNK_M, not <=: the loop body writes TWO CHUNK_SIZE lines
+	 * (one at p, one at p + CHUNK_SIZE), so the last legal p is the one
+	 * whose second line ends exactly at the end of the row. The <= let p run
+	 * one step too far and the second row's first memcpy started 2432 bytes
+	 * past the end of chunks_bio, overwriting the `bio` pointer and whatever
+	 * globals the linker placed after it (ASan: global-buffer-overflow,
+	 * WRITE of size 2432 "0 bytes after chunks_bio", src/noise.c:191). */
 	for (w = 0; w < ny * nx * CHUNK_M; w += nx * CHUNK_M)
-		for (p = 0; p <= nx * CHUNK_M; p += nx << CHUNK_Y) {
+		for (p = 0; p < nx * CHUNK_M; p += nx << CHUNK_Y) {
 			memcpy(&chunks_bio[w + p],
 			       &chunks_bio_raw[w + (p >> 1)],
 			       bio_line_size);

@@ -1,10 +1,34 @@
 #!/usr/bin/env bash
 set -e
 
+# Refusals close connections mid-suite by design now (password failures, -A
+# terminals), so a later write to a dead socket is an ordinary failed probe,
+# not a suite crash. Ignoring SIGPIPE turns those writes into EPIPE errors the
+# existing || guards and FAIL assertions already handle; without this the shell
+# dies with 141 and no message the first time it writes after a refusal.
+trap '' PIPE
+
+# Prefer the in-tree axil over any installed copy, so the suite tests the code in
+# this checkout. The module libs resolve by soname through the loader and the
+# `axil` binary resolves through PATH, so without this the whole suite silently
+# ran against whatever `sudo make install` last left in /usr -- and reported
+# "axil-nd ok" for an engine whose axil had never been compiled here. Measured:
+# with only the module rebuilt, an in-tree libaxil fix (S5.4) showed no effect at
+# all until these paths were prepended. Prepended, not replaced, so a system
+# library still fills any gap the tree does not provide.
+axil_bin="$(cd "$(dirname "$0")/../axil/bin" 2>/dev/null && pwd)"
+axil_lib="$(cd "$(dirname "$0")/../axil/lib" 2>/dev/null && pwd)"
+axil_tty_lib="$(cd "$(dirname "$0")/../axil-tty/lib" 2>/dev/null && pwd)"
+axil_auth_lib="$(cd "$(dirname "$0")/../axil-auth/lib" 2>/dev/null && pwd)"
+in_tree_nd_libs=$(printf ':%s' "$PWD"/../nd-*/lib)
+[ -n "$axil_bin" ] && PATH="$axil_bin:$PATH"
+in_tree_lib="$PWD/lib${axil_lib:+:$axil_lib}${axil_tty_lib:+:$axil_tty_lib}${axil_auth_lib:+:$axil_auth_lib}${in_tree_nd_libs}"
+
 case "$(uname -s)" in
-	Darwin) export DYLD_LIBRARY_PATH=./lib:${DYLD_LIBRARY_PATH} ;;
-	*)      export LD_LIBRARY_PATH=./lib:${LD_LIBRARY_PATH} ;;
+	Darwin) export DYLD_LIBRARY_PATH="$in_tree_lib:${DYLD_LIBRARY_PATH}" ;;
+	*)      export LD_LIBRARY_PATH="$in_tree_lib:${LD_LIBRARY_PATH}" ;;
 esac
+export PATH
 
 # man/ is generated from the tracked man-src/*.10 (see Makefile). Always refresh
 # rather than only when absent: a stale or partial man/ would otherwise let the
@@ -19,12 +43,23 @@ make --no-print-directory man
 # because only the modules were rebuilt. The engine has to be part of the
 # suite's inputs.
 make --no-print-directory
+# Same reasoning one level down: build the axil and axil-tty this suite is about
+# to boot, so a fix in either cannot go untested because someone forgot to
+# compile it.
+make --no-print-directory -C ../axil
+make --no-print-directory -C ../axil-tty
+make --no-print-directory -C ../axil-auth
+make --no-print-directory -C ../nd-fight
+make --no-print-directory -C ../nd-spell
 
 port=$((20000 + RANDOM % 8000))
 tmpout=$(mktemp)
 tmpdb=$(mktemp -d)
 persist_pid_a=
 persist_pid_b=
+planet_pid_a=
+planet_pid_b=
+planet_pid_c=
 # mods.load is tracked, so the fixture below registers the test module in it
 # for this run and the trap puts the shipped list back. The trap is installed
 # BEFORE anything can fail -- an earlier version created the fixture and ran
@@ -35,7 +70,7 @@ cp mods.load "$mods_load_saved"
 # Restores the tracked mods.load even on FAILURE or interrupt: a suite that
 # leaves a test fixture committed in the shipped module list is worse than one
 # that fails to clean up its temp dir.
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; kill -9 ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} 2>/dev/null || true' EXIT
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # MODS.md §0.4 out-of-tree module fixture.
@@ -64,7 +99,7 @@ cat > "$probe/Makefile" <<EOF
 # Deliberately minimal, and deliberately NOT the house library shape: this
 # fixture exists to prove the path form of mods.load loads a module built
 # outside the engine tree, so it should be as close to hand-written as a real
-# one can get. Same rule `make mods` drives it with.
+# one can get. Same rule 'make mods' drives it with.
 testprobe.so: testprobe.c
 	\$(CC) -shared -fPIC -I$(pwd)/include -I${PREFIX:-/usr}/include \\
 		-o \$@ \$<
@@ -105,6 +140,57 @@ EOF
 # Register it by path for this run only; the trap above restores mods.load.
 printf '%s\n' "$probe/testprobe" >> mods.load
 
+# ---------------------------------------------------------------------------
+# Passworded-connect fixture: libaxil-auth plus a loader that initialises it.
+#
+# `connect` authenticates through axil-auth's exported credential check, so the
+# suite cannot log in without the real module AND an initialised user map.
+# xy_install deliberately initialises nothing (the site configures first), so a
+# test-only loader module does the configuring: it points axil-auth at a
+# scratch account database holding one known user and calls auth_init().
+authfix=../axil-nd-authfix
+rm -rf "$authfix"
+mkdir -p "$authfix"
+cat > "$authfix/Makefile" <<EOF
+# Same self-contained shape as the testprobe above: built on its own, named in
+# mods.load by its own path, driven by the same 'make mods'.
+authfix.so: authfix.c
+	\$(CC) -shared -fPIC -I$(pwd)/../axil-auth/include -I$(pwd)/../libxylem/include -I$(pwd)/../axil/include -I$(pwd)/../libcorm/include -I$(pwd)/../libqsys/include \\
+		-o \$@ \$< \\
+		-L$(pwd)/../axil-auth/lib -Wl,-rpath,$(pwd)/../axil-auth/lib -laxil-auth
+EOF
+cat > "$authfix/authfix.c" <<'EOF'
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <ttypt/auth.h>
+
+void xy_install(void)
+{
+	const char *d = getenv("ND_TEST_AUTH_DIR");
+	static char etc[PATH_MAX], users[PATH_MAX], home[PATH_MAX];
+
+	if (!d || !*d) {
+		fprintf(stderr, "nd-auth-fixture: ND_TEST_AUTH_DIR unset\n");
+		return;
+	}
+	snprintf(etc, sizeof etc, "%s/etc", d);
+	snprintf(users, sizeof users, "%s/users", d);
+	snprintf(home, sizeof home, "%s/home", d);
+	auth_config.etc_dir = etc;
+	auth_config.users_dir = users;
+	auth_config.home_dir = home;
+	auth_config.route_prefix = "/testauth";
+	auth_init();
+	fprintf(stderr, "nd-auth-fixture: auth initialised at %s\n", d);
+}
+EOF
+printf '%s\n' "$authfix/authfix" >> mods.load
+
+# libaxil-auth.so beside the engine so nd's xy_load("libaxil-auth") resolves
+# through the loader even where LD_LIBRARY_PATH does not reach.
+ln -sf ../axil-auth/lib/libaxil-auth.so lib/libaxil-auth.so
+
 # Build every module named in mods.load before booting (MODS.md §0.4). The
 # engine loads whatever is in that list, so a module that no longer compiles
 # would otherwise be discovered as "the hook silently stopped firing" deep in
@@ -114,16 +200,72 @@ printf '%s\n' "$probe/testprobe" >> mods.load
 # resolves, since the path-aware nd_mods_load() now trusts it verbatim.
 make --no-print-directory mods
 
+# Scratch account database for the fixture above. The login name is the same
+# real account the old suite required (connect used to need a passwd entry);
+# the password is generated fresh per run and never leaves this host.
+user=$(id -un)
+userpass="ndtest_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# Second login for the match test below; same fixture, own password.
+mp_guest="ndmatch$$"
+guestpass="ndtest_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# Fixture hashes must be bcrypt ($2b$, 60 chars): struct user.hash is 64 bytes
+# and anything longer (e.g. $6$) is truncated on load, so the stored hash can
+# never verify. Registration always writes bcrypt, so this matches production.
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 required for fixture hashes" >&2; exit 1; }
+python3 -c "import bcrypt" 2>/dev/null || { echo "FAIL: python bcrypt module required for fixture hashes" >&2; exit 1; }
+export ND_TEST_AUTH_DIR="$tmpdb/auth"
+mkdir -p "$ND_TEST_AUTH_DIR/etc"
+userhash=$(python3 -c "import bcrypt; print(bcrypt.hashpw('$userpass'.encode(), bcrypt.gensalt()).decode())")
+guesthash=$(python3 -c "import bcrypt; print(bcrypt.hashpw('$guestpass'.encode(), bcrypt.gensalt()).decode())")
+printf '%s:%s:1001:67::::::\n' "$user" "$userhash" > "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:%s:1002:67::::::\n' "$mp_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:x:1001:67::%s/%s:/bin/false\n' "$user" "$ND_TEST_AUTH_DIR" "$user" > "$ND_TEST_AUTH_DIR/etc/passwd"
+printf '%s:x:1002:67::%s/%s:/bin/false\n' "$mp_guest" "$ND_TEST_AUTH_DIR" "$mp_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+# S7/S8/S9 guests share guestpass: passworded connect refuses any name the
+# user map does not hold, so those sections' guests need fixture accounts
+# here, not only players in the ND store. $$ is the suite's own pid and never
+# changes, so these bind to exactly the names the sections below use.
+w7_guest="ndwiz$$"
+b8_guest="ndban$$"
+b9_guest="ndtgt$$"
+printf '%s:%s:1003:67::::::\n' "$w7_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:%s:1004:67::::::\n' "$b8_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:%s:1005:67::::::\n' "$b9_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:x:1003:67::%s/%s:/bin/false\n' "$w7_guest" "$ND_TEST_AUTH_DIR" "$w7_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+printf '%s:x:1004:67::%s/%s:/bin/false\n' "$b8_guest" "$ND_TEST_AUTH_DIR" "$b8_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+printf '%s:x:1005:67::%s/%s:/bin/false\n' "$b9_guest" "$ND_TEST_AUTH_DIR" "$b9_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+printf 'www:x:67:\n' > "$ND_TEST_AUTH_DIR/etc/group"
+
+# Two-phase login helper for raw sockets: `connect <user>`, wait for the
+# password prompt, send the password, wait for the login marker.
+ndlogin() { # fd user pass marker capture tries?
+	local _fd=$1 _user=$2 _pass=$3 _marker=$4 _cap=$5 _tries=${6:-100}
+	printf 'connect %s\n\n' "$_user" >&"$_fd"
+	local _t=$_tries
+	while [ $_t -gt 0 ]; do
+		grep -qaF "Password:" "$_cap" && break
+		_t=$((_t - 1)); sleep 0.05
+	done
+	[ $_t -eq 0 ] && { echo "FAIL: no password prompt for 'connect $_user'" >&2; return 1; }
+	# the prompt suppresses echo while armed; the password line itself is one line
+	printf '%s\n\n' "$_pass" >&"$_fd"
+	_t=$_tries
+	while [ $_t -gt 0 ]; do
+		grep -qaF "$_marker" "$_cap" && break
+		_t=$((_t - 1)); sleep 0.05
+	done
+	[ $_t -eq 0 ] && { echo "FAIL: login marker '$_marker' missing after password" >&2; return 1; }
+	return 0
+}
+
 # the real engine boot opens its store here (world_db(): AXIL_ND_DB else
 # /var/nd/std.db, unwritable on dev hosts).
 export AXIL_ND_DB="$tmpdb/std.db"
 
-# `connect <name>` runs axil_auth(), which returns non-zero when getpwnam()
-# misses (axil-posix.c), and nd_player_login() then returns NOTHING, skipping
-# on_enter entirely. So the guest name must be a real account on this host.
-# The original nd had the same guard (nd/interface.c:1036), so this is a
-# fixture constraint, not a port regression.
-user=$(id -un)
+# The login name is the current account (same name the old suite required), but
+# the credential now comes from the fixture's account database above, not from
+# the host passwd file: `connect <name>` arms a password prompt and only the
+# fixture password completes the login.
 
 axil -d -A -p "$port" -m ./lib/axil-nd >/tmp/axil_test.log 2>&1 &
 mux_pid=$!
@@ -155,19 +297,19 @@ exec 3<>/dev/tcp/127.0.0.1/$port
 printf '%s' "$ws_request" >&3
 
 # Read HTTP response headers
-resp=""
-while IFS= read -r -t3 line <&3; do
-	line="${line%$'\r'}"
-	resp="$resp
+	resp=""
+	while IFS= read -r -t3 line <&3; do
+		line="${line%$'\r'}"
+		resp="$resp
 $line"
-	[ -z "$line" ] && break
-done
+		[ -z "$line" ] && break
+	done
 
-echo "$resp" | grep -qF "101" \
-	|| { echo "FAIL: no 101 in response" >&2; exit 1; }
+	echo "$resp" | grep -qF "101" \
+		|| { echo "FAIL: no 101 in response" >&2; exit 1; }
 
-got_accept=$(echo "$resp" | grep -i "sec-websocket-accept" \
-	| sed 's/.*: *//' | tr -d '\r\n ')
+	got_accept=$(echo "$resp" | grep -i "sec-websocket-accept" \
+		| sed 's/.*: *//' | tr -d '\r\n ')
 [ "$got_accept" = "$accept" ] \
 	|| { echo "FAIL: accept mismatch: got '$got_accept' want '$accept'" >&2; exit 1; }
 
@@ -179,10 +321,11 @@ stdbuf -i0 -o0 cat <&3 >"$tmpout" &
 cat_pid=$!
 tries=40
 while [ $tries -gt 0 ]; do
-	grep -qa "on_enter" "$tmpout" && break
+	grep -qa "on_enter" "$tmpout" && grep -qa "\[demo\] player" "$tmpout" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
+sleep 0.05
 
 hex=$(xxd -p "$tmpout" | tr -d '\n')
 echo "$hex" | grep -qiF "fffd1f" || { echo "FAIL: IAC DO NAWS missing"   >&2; exit 1; }
@@ -409,63 +552,42 @@ grep -qa "You say: naws" "$tmpout" \
 	|| { echo "FAIL: 'You say: naws' missing -- NAWS frame desynchronised the stream" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# axil-tty PTY bridge: 'help begin' renders section 10 man page over PTY
-# send "help begin\n" (WS binary, len 11 -> 0x8b)
-printf '\x82\x8b\x00\x00\x00\x00help begin\n' >&3
+# Terminals are refused on a -A server: every WS upgrade carries DF_AUTH_AUTO,
+# so the exec gate refuses `help`/`man`/`sh` even though the game itself
+# auto-logs-in fine. The positive versions of these live on the no--A cookie
+# server below; here the refusal text (not a shell) is the assertion.
+# send "help begin\n" (WS binary, len 11 -> 0x8b). The refusal may already have
+# closed the socket by the time later writes land; EPIPE is fine, the capture
+# assertions below are the verdict.
+printf '\x82\x8b\x00\x00\x00\x00help begin\n' >&3 2>/dev/null || true
 tries=30
 while [ $tries -gt 0 ]; do
-	grep -qa "BEGIN" "$tmpout" && break
+	grep -qa "Terminal disabled: automatic login." "$tmpout" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
 
+grep -qa "Terminal disabled: automatic login." "$tmpout" \
+	|| { echo "FAIL: 'help begin' was not refused under -A" >&2; exit 1; }
 grep -qa "BEGIN" "$tmpout" \
-	|| { echo "FAIL: 'help begin' man page not seen from PTY" >&2; exit 1; }
+	&& { echo "FAIL: man page rendered under -A" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# axil-tty PTY bridge: 'sh' opens a shell session over PTY
-# send "sh\n" (WS binary, len 3 -> 0x83)
-printf '\x82\x83\x00\x00\x00\x00sh\n' >&3
+# axil-tty PTY bridge refusal: 'sh' must not open a shell session under -A.
+# The refusal closes the connection, so fd 3 ends here by design.
+# send "sh\n" (WS binary, len 3 -> 0x83). Same EPIPE caveat as above.
+printf '\x82\x83\x00\x00\x00\x00sh\n' >&3 2>/dev/null || true
 
-# allow child shell to fork and initialize
-sleep 0.15
-
-# send "echo ND_TTY_OK\n" (WS binary, len 15 -> 0x8f)
-printf '\x82\x8f\x00\x00\x00\x00echo ND_TTY_OK\n' >&3
-
-# wait for and assert ND_TTY_OK
 tries=30
 while [ $tries -gt 0 ]; do
-	grep -qa "ND_TTY_OK" "$tmpout" && break
+	grep -qa "Terminal disabled: automatic login." "$tmpout" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
 
-grep -qa "ND_TTY_OK" "$tmpout" \
-	|| { echo "FAIL: PTY shell echo ND_TTY_OK not seen" >&2; exit 1; }
+grep -qa "Terminal disabled: automatic login." "$tmpout" \
+	|| { echo "FAIL: 'sh' was not refused under -A" >&2; exit 1; }
 
-# The PTY must actually carry the geometry the client negotiated. The NAWS
-# frame was sent above with no PTY alive yet, so this only lands if
-# axil-nd's tick fed the frame to axil_tty_input() -- recording it in
-# axil-tty's mux_wsz_map -- and axil_tty_exec() seeded the new PTY from that
-# map. Measured both ways: with the old axil_tty_active() gate the frame was
-# never parsed and `stty size` reports "0 0".
-# send "stty size\n" (WS binary, len 10 -> 0x8a)
-printf '\x82\x8a\x00\x00\x00\x00stty size\n' >&3
-
-tries=30
-while [ $tries -gt 0 ]; do
-	grep -qa "24 80" "$tmpout" && break
-	sleep 0.05
-	tries=$((tries - 1))
-done
-
-grep -qa "24 80" "$tmpout" \
-	|| { echo "FAIL: PTY did not receive the negotiated 80x24 geometry" >&2; exit 1; }
-
-# send "exit\n" to promptly terminate child shell process (per recorded amendment)
-printf '\x82\x85\x00\x00\x00\x00exit\n' >&3
-sleep 0.15
 kill -9 $cat_pid 2>/dev/null || true
 wait $cat_pid 2>/dev/null || true
 exec 3<&-
@@ -523,6 +645,19 @@ nd_404_resp=$(http_req "/nd/nonexistent_asset.xyz")
 echo "$nd_404_resp" | grep -qF "404 Not Found" \
 	|| { echo "FAIL: GET /nd/nonexistent_asset.xyz did not 404" >&2; exit 1; }
 
+# S5.5 regression: a request body may legally contain 0xFF. The telnet IAC scan
+# must never run on a chunk that opens with an HTTP request line -- it used to
+# read a body byte as negotiation, slide the request head off the front of the
+# input, and answer the POST with the raw-telnet banner instead of an HTTP
+# status. Title bytes mirror the site's song-add-invalid-utf8 e2e case.
+s55_body=$(printf '%b' '------boundary\r\nContent-Disposition: form-data; name="title"\r\n\r\nA\xffbc\xc0ef\xff\r\n------boundary--\r\n')
+s55_len=$(printf '%s' "$s55_body" | wc -c)
+s55_resp=$(printf 'POST /nd/nonexistent_s55 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: multipart/form-data; boundary=----boundary\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$port" "$s55_len" "$s55_body" | nc -w2 127.0.0.1 "$port" 2>/dev/null)
+echo "$s55_resp" | grep -qF "HTTP/1.1" \
+	|| { echo "FAIL: S5.5: POST with 0xFF body not answered as HTTP" >&2; exit 1; }
+echo "$s55_resp" | grep -qa "Connect with:" \
+	&& { echo "FAIL: S5.5: raw-telnet banner leaked into an HTTP response" >&2; exit 1; }
+
 nd_trav_resp=$(http_req "/nd/../Makefile")
 echo "$nd_trav_resp" | grep -qF "404 Not Found" \
 	|| echo "$nd_trav_resp" | grep -qF "400" \
@@ -579,24 +714,27 @@ tty_got_accept=$(echo "$tty_resp" | grep -i "sec-websocket-accept" \
 stdbuf -i0 -o0 cat <&7 >"$tty_out" &
 tty_cat_pid=$!
 
-# WILL ECHO is axil-tty's own first statement on its own route, so it is the
-# last of the three to arrive; waiting on it means all three are in.
+# Under -A the upgrade is refused before axil-tty states anything: no
+# negotiation bytes, no PTY, just the refusal text and a close. (The positive
+# version -- negotiation tripwires plus auto-shell -- lives on the no--A cookie
+# server below.)
 tries=40
 while [ $tries -gt 0 ]; do
-	grep -qa $'\xff\xfb\x01' "$tty_out" && break
+	grep -qaF "Terminal disabled: automatic login." "$tty_out" && break
 	sleep 0.05
 	tries=$((tries - 1))
 done
 
+grep -qaF "Terminal disabled: automatic login." "$tty_out" \
+	|| { echo "FAIL: /tty was not refused under -A" >&2; exit 1; }
+
 tty_hex=$(xxd -p "$tty_out" | tr -d '\n')
-# Unlike /nd, a PTY exists from this route's on_axil_connect, so ECHO is the
-# server's to state and there is exactly one statement of each option.
+# No negotiation may be stated on a refused connection: a PTY was never born.
 for pair in 'fffb01:IAC WILL ECHO' 'fffd1f:IAC DO NAWS' 'fffc03:IAC WONT SGA'; do
 	pat=${pair%%:*}
 	name=${pair##*:}
-	seen=$(printf '%s' "$tty_hex" | grep -oiF "$pat" | wc -l)
-	[ "$seen" -eq 1 ] \
-		|| { echo "FAIL: expected 1 $name on /tty, got $seen -- two modules negotiated one connection" >&2; exit 1; }
+	echo "$tty_hex" | grep -qiF "$pat" \
+		&& { echo "FAIL: $name stated on a refused /tty" >&2; exit 1; }
 done
 
 # The game must not be on this socket at all: no player was created, so none of
@@ -605,27 +743,156 @@ echo "$tty_hex" | grep -qiF "2362" \
 	&& { echo "FAIL: BCP frames on /tty -- the game ran on axil-tty's route" >&2; exit 1; }
 grep -qa "on_enter" "$tty_out" \
 	&& { echo "FAIL: on_enter on /tty -- nd_connect ran on axil-tty's route" >&2; exit 1; }
-
-# The auto-spawned login shell: NAWS is the trigger, so no `sh` is sent here.
-# Same 9-byte 80x24 subnegotiation the /nd section uses, then type at the shell.
-printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7
+# And no shell either: NAWS on a refused connection must not spawn anything.
+# (The socket is already closed server-side; the || true absorbs the EPIPE.)
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7 2>/dev/null || true
 sleep 0.3
-# send "echo ND_TTY_AUTO_OK\n" (WS binary, len 19 -> 0x93)
-printf '\x82\x93\x00\x00\x00\x00echo ND_TTY_AUTO_OK\n' >&7
-
-tries=40
-while [ $tries -gt 0 ]; do
-	grep -qa "ND_TTY_AUTO_OK" "$tty_out" && break
-	sleep 0.05
-	tries=$((tries - 1))
-done
-
+printf '\x82\x93\x00\x00\x00\x00echo ND_TTY_AUTO_OK\n' >&7 2>/dev/null || true
+sleep 0.5
 grep -qa "ND_TTY_AUTO_OK" "$tty_out" \
-	|| { echo "FAIL: /tty auto-shell echo ND_TTY_AUTO_OK not seen" >&2; exit 1; }
+	&& { echo "FAIL: shell output on a refused /tty" >&2; exit 1; }
 
 kill -9 $tty_cat_pid 2>/dev/null || true
 wait $tty_cat_pid 2>/dev/null || true
 exec 7<&-
+
+# ---------------------------------------------------------------------------
+# Authenticated terminals over WS (no -A): the positive counterparts of the
+# two refusal blocks above. A cookie session for a real-shell account must
+# still get help/man/sh shells on /nd and an auto-shell on /tty.
+wsp=$((port + 9))
+ws_log="$tmpdb/wsauth.log"
+AXIL_ND_DB="$tmpdb/wsauth.db" axil -d -p "$wsp" -m ./lib/axil-nd >"$ws_log" 2>&1 &
+ws_pid=$!
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "Done." "$ws_log" 2>/dev/null && nc -z 127.0.0.1 "$wsp" 2>/dev/null && break
+	tries=$((tries - 1))
+	sleep 0.05
+done
+[ $tries -eq 0 ] && { echo "FAIL: cookie-terminal server did not init" >&2; exit 1; }
+ws_jar="$tmpdb/wsauth.jar"
+ws_code=$(curl -s -o /dev/null -w "%{http_code}" -c "$ws_jar" -X POST \
+	"http://127.0.0.1:$wsp/testauth/login" \
+	-d "username=$user&password=$userpass")
+[ "$ws_code" = "303" ] || { echo "FAIL: cookie-terminal login got $ws_code" >&2; exit 1; }
+ws_tok=$(awk '/QSESSION/ {print $NF}' "$ws_jar")
+[ -n "$ws_tok" ] || { echo "FAIL: no session token for cookie terminals" >&2; exit 1; }
+
+# /nd with the cookie: game login first (on_enter proves it), then terminals.
+ws_nd_out="$tmpdb/ws_nd.out"
+ws_nd_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+exec 7<>/dev/tcp/127.0.0.1/$wsp
+printf 'GET /nd HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCookie: QSESSION=%s\r\n\r\n' \
+	"$wsp" "$ws_nd_key" "$ws_tok" >&7
+ws_nd_resp=""
+while IFS= read -r -t3 line <&7; do
+	line="${line%$'\r'}"
+	[ -z "$line" ] && break
+done
+: >"$ws_nd_out"
+stdbuf -i0 -o0 cat <&7 >"$ws_nd_out" &
+ws_nd_cat=$!
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa "on_enter" "$ws_nd_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "on_enter" "$ws_nd_out" \
+	|| { echo "FAIL: cookie /nd login missing on_enter" >&2; exit 1; }
+
+# help renders through a PTY for a proven identity.
+printf '\x82\x8b\x00\x00\x00\x00help begin\n' >&7
+tries=30
+while [ $tries -gt 0 ]; do
+	grep -qa "BEGIN" "$ws_nd_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "BEGIN" "$ws_nd_out" \
+	|| { echo "FAIL: cookie 'help begin' man page not seen" >&2; exit 1; }
+
+# sh opens a shell: NAWS first for geometry, then the command.
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7
+sleep 0.2
+printf '\x82\x83\x00\x00\x00\x00sh\n' >&7
+sleep 0.5
+# "echo ND_WS_OK\n" is 14 bytes: 0x80|14 = 0x8e. A wrong length byte stalls
+# ws_read waiting for bytes that never come, and the shell looks dead.
+printf '\x82\x8e\x00\x00\x00\x00echo ND_WS_OK\n' >&7
+# Generous bound: bash startup (profiles) plus a loaded host can take seconds
+# before the first command's output arrives; the poll exits on first sight so
+# the fast path costs nothing.
+tries=120
+while [ $tries -gt 0 ]; do
+	grep -qa "ND_WS_OK" "$ws_nd_out" && break
+	sleep 0.1
+	tries=$((tries - 1))
+done
+grep -qa "ND_WS_OK" "$ws_nd_out" \
+	|| { echo "FAIL: cookie PTY shell echo ND_WS_OK not seen" >&2; exit 1; }
+printf '\x82\x8a\x00\x00\x00\x00stty size\n' >&7
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qa "24 80" "$ws_nd_out" && break
+	sleep 0.1
+	tries=$((tries - 1))
+done
+grep -qa "24 80" "$ws_nd_out" \
+	|| { echo "FAIL: cookie PTY missing negotiated 80x24 geometry" >&2; exit 1; }
+printf '\x82\x85\x00\x00\x00\x00exit\n' >&7
+sleep 0.2
+kill -9 $ws_nd_cat 2>/dev/null || true
+wait $ws_nd_cat 2>/dev/null || true
+exec 7<&-
+echo "cookie /nd terminals work (help/sh/geometry)"
+
+# /tty with the cookie: negotiation tripwires plus the auto-shell.
+ws_tty_out="$tmpdb/ws_tty.out"
+ws_tty_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+exec 7<>/dev/tcp/127.0.0.1/$wsp
+printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCookie: QSESSION=%s\r\n\r\n' \
+	"$wsp" "$ws_tty_key" "$ws_tok" >&7
+while IFS= read -r -t3 line <&7; do
+	line="${line%$'\r'}"
+	[ -z "$line" ] && break
+done
+: >"$ws_tty_out"
+stdbuf -i0 -o0 cat <&7 >"$ws_tty_out" &
+ws_tty_cat=$!
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa $'\xff\xfb\x01' "$ws_tty_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+ws_tty_hex=$(xxd -p "$ws_tty_out" | tr -d '\n')
+for pair in 'fffb01:IAC WILL ECHO' 'fffd1f:IAC DO NAWS' 'fffc03:IAC WONT SGA'; do
+	pat=${pair%%:*}
+	name=${pair##*:}
+	seen=$(printf '%s' "$ws_tty_hex" | grep -oiF "$pat" | wc -l)
+	[ "$seen" -ge 1 ] \
+		|| { echo "FAIL: missing $name on cookie /tty" >&2; exit 1; }
+done
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7
+sleep 0.3
+# "echo ND_WS_TTY_OK\n" is 18 bytes: 0x80|18 = 0x92 (see above).
+printf '\x82\x92\x00\x00\x00\x00echo ND_WS_TTY_OK\n' >&7
+tries=120
+while [ $tries -gt 0 ]; do
+	grep -qa "ND_WS_TTY_OK" "$ws_tty_out" && break
+	sleep 0.1
+	tries=$((tries - 1))
+done
+grep -qa "ND_WS_TTY_OK" "$ws_tty_out" \
+	|| { echo "FAIL: cookie /tty auto-shell echo not seen" >&2; exit 1; }
+kill -9 $ws_tty_cat 2>/dev/null || true
+wait $ws_tty_cat 2>/dev/null || true
+exec 7<&-
+echo "cookie /tty auto-shell works"
+kill -9 $ws_pid 2>/dev/null || true
+wait $ws_pid 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Raw-telnet guest path: connect a guest over a plain TCP socket (no WS).
@@ -643,22 +910,27 @@ sleep 0.05
 # axil_read() only dispatches a COMPLETE head: head_complete() accepts LFLF or
 # CRLFCRLF, never a single LF or a single CRLF (libaxil.c). A one-line send is
 # stashed in the descriptor and never dispatched, so every raw command below
-# terminates with a blank line.
-printf 'connect %s\n\n' "$user" >&4
-
-tries=40
-while [ $tries -gt 0 ]; do
-	grep -qa "on_enter" "$tmpout" && break
-	sleep 0.05
-	tries=$((tries - 1))
-done
-
-grep -qa "on_enter" "$tmpout" \
-	|| { echo "FAIL: raw guest on_enter missing" >&2; exit 1; }
+# terminates with a blank line. Login is two-phase: `connect <name>` arms the
+# password prompt, the next line is the password.
+ndlogin 4 "$user" "$userpass" "on_enter" "$tmpout" \
+	|| { echo "FAIL: raw guest login missing" >&2; exit 1; }
 
 hex3=$(xxd -p "$tmpout" | tr -d '\n')
 echo "$hex3" | grep -qiF "fffd1f" || { echo "FAIL: raw IAC DO NAWS missing" >&2; exit 1; }
-echo "$hex3" | grep -qiF "fffb01" && { echo "FAIL: raw IAC WILL ECHO present before PTY" >&2; exit 1; }
+# The password prompt is the one place WILL ECHO may appear before a PTY: the
+# server takes over echoing so the password never shows, then hands echoing
+# back with WONT ECHO once the line is read. Both must be present, in that
+# order -- a prompt that never suppresses, or never restores, breaks the
+# terminal for everything after it.
+echo "$hex3" | grep -qiF "fffb01" || { echo "FAIL: raw IAC WILL ECHO missing at password prompt" >&2; exit 1; }
+echo "$hex3" | grep -qiF "fffc01" || { echo "FAIL: raw IAC WONT ECHO missing after password prompt" >&2; exit 1; }
+will_at=$(echo "$hex3" | grep -bo "fffb01" | head -1 | cut -d: -f1 || true)
+# WONT ECHO also opens the connection (the client echoes until the prompt),
+# so the restore is the first WONT *after* the prompt's WILL, not the first
+# WONT in the capture.
+wont_at=$(echo "$hex3" | grep -bo "fffc01" | awk -F: -v w="$will_at" '$1 > w {print $1; exit}' || true)
+[ -n "$will_at" ] && [ -n "$wont_at" ] \
+	|| { echo "FAIL: WILL ECHO without a later WONT ECHO" >&2; exit 1; }
 echo "$hex3" | grep -qiF "fffc03" || { echo "FAIL: raw IAC WONT SGA missing" >&2; exit 1; }
 
 # say round-trip over the raw socket (no WS framing).
@@ -700,6 +972,312 @@ grep -qa "ND_RAW_OK" "$tmpout" \
 	|| { echo "FAIL: raw live-PTY shell echo ND_RAW_OK not seen" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# Passworded-connect negatives, on the main (fixture-loaded) server.
+#
+# A wrong password must fail uniformly and close the connection: each guess
+# costs a reconnect, and the failure must not say whether the name exists.
+exec 9<>/dev/tcp/127.0.0.1/$port
+neg_out="$tmpdb/neg.out"
+: >"$neg_out"
+stdbuf -i0 -o0 cat <&9 >"$neg_out" &
+neg_cat=$!
+printf 'connect %s\n\n' "$user" >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qaF "Password:" "$neg_out" \
+	|| { echo "FAIL: negative probe got no password prompt" >&2; exit 1; }
+printf 'definitely-wrong-password\n\n' >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Invalid name or password." "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qaF "Invalid name or password." "$neg_out" \
+	|| { echo "FAIL: wrong password was not refused uniformly" >&2; exit 1; }
+# the failure closes: the socket must go quiet (EOF) rather than accept more
+sleep 0.5
+if printf 'say after-failure\n\n' >&9 2>/dev/null; then
+	sleep 0.5
+	grep -qa "You say:" "$neg_out" \
+		&& { echo "FAIL: connection survived a failed password" >&2; exit 1; }
+fi
+kill -9 $neg_cat 2>/dev/null || true
+wait $neg_cat 2>/dev/null || true
+exec 9<&-
+echo "wrong password refused uniformly and closed"
+
+# Unknown names fail exactly like wrong passwords (no oracle).
+exec 9<>/dev/tcp/127.0.0.1/$port
+: >"$neg_out"
+stdbuf -i0 -o0 cat <&9 >"$neg_out" &
+neg_cat=$!
+printf 'connect nosuchuser_%s\n\n' "$$" >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+printf 'whatever\n\n' >&9
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qaF "Invalid name or password." "$neg_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qaF "Invalid name or password." "$neg_out" \
+	|| { echo "FAIL: unknown user was not refused uniformly" >&2; exit 1; }
+kill -9 $neg_cat 2>/dev/null || true
+wait $neg_cat 2>/dev/null || true
+exec 9<&-
+echo "unknown user refused uniformly"
+
+# `man` topic validation: traversal and flag injection are refused without
+# spawning anything. Uses the logged-in fd 4 session from above? No -- fd 4
+# is closed. Open a fresh login for the man probes.
+exec 9<>/dev/tcp/127.0.0.1/$port
+: >"$neg_out"
+stdbuf -i0 -o0 cat <&9 >"$neg_out" &
+neg_cat=$!
+ndlogin 9 "$user" "$userpass" "on_enter" "$neg_out" \
+	|| { echo "FAIL: man-probe login missing" >&2; exit 1; }
+printf 'man ../../etc/passwd\n\n' >&9
+sleep 0.5
+printf 'man --pager=id\n\n' >&9
+sleep 0.5
+printf 'man -K\n\n' >&9
+sleep 0.5
+tries=40
+while [ $tries -gt 0 ]; do
+	[ "$(grep -acF "No manual entry." "$neg_out")" -ge 3 ] && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+[ "$(grep -acF "No manual entry." "$neg_out")" -ge 3 ] \
+	|| { echo "FAIL: man traversal/injection not refused" >&2; exit 1; }
+kill -9 $neg_cat 2>/dev/null || true
+wait $neg_cat 2>/dev/null || true
+exec 9<&-
+echo "man traversal and flag injection refused"
+
+# NOTE on fail-closed verification: the bus zero-fills a hook result when no
+# implementation runs, so auth_password_matches() reports valid with non-zero
+# and an absent axil-auth fails every login closed. That contract is pinned by
+# tests/unit/xy_hook_default_test (no modules loaded: the hook returns 0) and
+# tests/unit/axil_auth_account_test (0 uniformly means invalid). A denied-hook
+# probe was tried here and removed: deny is children-only, so a fixture cannot
+# deny nd's own region, and any system libaxil-auth in /lib satisfies the
+# loader anyway -- neither can simulate an absent module in this environment.
+
+# ---------------------------------------------------------------------------
+# S5.4, two legs. The unauthenticated terminal no longer spawns a shell at all
+# (refused before the PTY is born), so the old shape -- spawn-then-check-cleanup
+# on an anonymous connection -- cannot exist any more. What remains:
+#
+# Leg 1 (new property): an unauthenticated /tty yields no PTY and no child.
+# Leg 2 (retained regression): an AUTHENTICATED PTY connection, killed
+# abruptly, still cleans up, and recycled fds still serve clean HTTP.
+#
+# Both legs need their own server, booted WITHOUT -A (the suite's main axil
+# runs with -A, which would refuse /tty outright via DF_AUTH_AUTO and hide
+# everything). The fixture account database is shared via ND_TEST_AUTH_DIR, so
+# leg 2 logs in through the fixture's /testauth/login for a cookie session.
+s54_kids() {
+	s54_pids=$(pgrep -P "$s54_pid" 2>/dev/null)
+	s54_n=0
+	for s54_p in $s54_pids; do
+		s54_st=$(ps -o stat= -p "$s54_p" 2>/dev/null)
+		case "$s54_st" in
+		Z* | "") ;;                    # zombie, or already gone
+		*) s54_n=$((s54_n + 1)) ;;
+		esac
+	done
+	echo "$s54_n"
+}
+
+s54_port=$((port + 5))
+s54_log="$tmpdb/s54.log"
+s54_out="$tmpdb/s54.out"
+
+# No -A here, and a private store so this boot cannot collide with the fixtures
+# the rest of the suite shares.
+AXIL_ND_DB="$tmpdb/s54.db" axil -d -p "$s54_port" -m ./lib/axil-nd >"$s54_log" 2>&1 &
+s54_pid=$!
+# Never leak this server: every FAIL below exits, and without this the port
+# stays held by an orphan that breaks later runs.
+#
+# This must be a SUPERSET of the trap at the top, not a replacement for it.
+# `trap ... EXIT` overwrites wholesale, so the short form used to drop the
+# mods.load restore, the tmpdir removal and every other daemon kill: a single
+# FAIL here left a live axil holding $port AND left the tracked mods.load
+# carrying a duplicate ../axil-nd-testprobe/testprobe line for every later run
+# to inherit. Measured while landing ST.md §27.6(1): a cold-start FAIL here
+# leaked `axil -d -A -p <port>` and dirtied mods.load; the next run then booted
+# testprobe twice. The scope section below re-declares the full trap for
+# exactly this reason -- do the same here.
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
+s54_settle=50
+while [ $s54_settle -gt 0 ]; do
+	grep -qF "Done." "$s54_log" 2>/dev/null && nc -z 127.0.0.1 "$s54_port" 2>/dev/null && break
+	s54_settle=$((s54_settle - 1))
+	sleep 0.05
+done
+[ $s54_settle -eq 0 ] && { echo "FAIL: S5.4 no-autoauth axil did not become ready" >&2; kill -9 "$s54_pid" 2>/dev/null; exit 1; }
+
+s54_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+s54_accept_expect=$(printf '%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11' "$s54_key" \
+	| openssl dgst -sha1 -binary | base64)
+
+exec 8<>/dev/tcp/127.0.0.1/$s54_port
+# No Cookie, so nothing authenticates this connection.
+printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n' \
+	"$s54_port" "$s54_key" >&8
+
+s54_resp=""
+while IFS= read -r -t3 line <&8; do
+	line="${line%$'\r'}"
+	s54_resp="$s54_resp
+$line"
+	[ -z "$line" ] && break
+done
+echo "$s54_resp" | grep -qF "101" \
+	|| { echo "FAIL: S5.4 no 101 for unauthenticated GET /tty upgrade" >&2; exit 1; }
+s54_got=$(echo "$s54_resp" | grep -i "sec-websocket-accept" | sed 's/.*: *//' | tr -d '\r\n ')
+[ "$s54_got" = "$s54_accept_expect" ] \
+	|| { echo "FAIL: S5.4 accept mismatch: got '$s54_got' want '$s54_accept_expect'" >&2; exit 1; }
+
+: >"$s54_out"
+stdbuf -i0 -o0 cat <&8 >"$s54_out" &
+s54_cat_pid=$!
+sleep 0.2
+
+# Leg 1: no PTY and no child for an unauthenticated /tty. NAWS used to
+# auto-spawn the login shell here; now the upgrade is refused outright.
+# (Writes may hit the already-closed socket; EPIPE here is the point.)
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&8 2>/dev/null || true
+sleep 0.3
+printf '\x82\x93\x00\x00\x00\x00echo ND_S54_OK_123\n' >&8 2>/dev/null || true
+
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa "Terminal disabled" "$s54_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "Terminal disabled: no account." "$s54_out" \
+	|| { echo "FAIL: S5.4: unauthenticated /tty was not refused" >&2; exit 1; }
+grep -qa "ND_S54_OK" "$s54_out" \
+	&& { echo "FAIL: S5.4: shell output on a refused terminal" >&2; exit 1; }
+
+s54_before=$(s54_kids)
+[ "$s54_before" -eq 0 ] \
+	|| { echo "FAIL: S5.4: refused terminal left $s54_before live children" >&2; exit 1; }
+grep -q "no authenticated passwd identity" "$s54_log" \
+	|| { echo "FAIL: S5.4: refusal not logged" >&2; exit 1; }
+
+kill -9 $s54_cat_pid 2>/dev/null || true
+wait $s54_cat_pid 2>/dev/null || true
+exec 8<&-
+
+# Leg 2: the retained cleanup regression, on an authenticated PTY. Log in
+# through the fixture for a cookie session (the fixture user is a real host
+# account with a real shell, so the gate passes), open /tty with the cookie,
+# spawn a shell, then kill the connection abruptly: the child must go away
+# and recycled fds must serve clean HTTP.
+s54_jar="$tmpdb/s54.jar"
+s54_code=$(curl -s -o /dev/null -w "%{http_code}" -c "$s54_jar" -X POST \
+	"http://127.0.0.1:$s54_port/testauth/login" \
+	-d "username=$user&password=$userpass")
+[ "$s54_code" = "303" ] || { echo "FAIL: S5.4: fixture login got $s54_code" >&2; exit 1; }
+s54_tok=$(awk '/QSESSION/ {print $NF}' "$s54_jar")
+[ -n "$s54_tok" ] || { echo "FAIL: S5.4: no session token from fixture login" >&2; exit 1; }
+
+exec 8<>/dev/tcp/127.0.0.1/$s54_port
+printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCookie: QSESSION=%s\r\n\r\n' \
+	"$s54_port" "$s54_key" "$s54_tok" >&8
+s54_resp2=""
+while IFS= read -r -t3 line <&8; do
+	line="${line%$'\r'}"
+	[ -z "$line" ] && break
+done
+: >"$s54_out"
+stdbuf -i0 -o0 cat <&8 >"$s54_out" &
+s54_cat_pid=$!
+printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&8
+sleep 0.3
+printf '\x82\x93\x00\x00\x00\x00echo ND_S54_OK_123\n' >&8
+tries=40
+while [ $tries -gt 0 ]; do
+	grep -qa "ND_S54_OK" "$s54_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "ND_S54_OK" "$s54_out" \
+	|| { echo "FAIL: S5.4: no shell on the authenticated terminal, cleanup proves nothing" >&2; exit 1; }
+
+s54_before=$(s54_kids)
+[ "$s54_before" -ge 1 ] \
+	|| { echo "FAIL: S5.4: shell reported ND_S54_OK but is not a live child of axil" >&2; exit 1; }
+
+kill -9 $s54_cat_pid 2>/dev/null || true
+wait $s54_cat_pid 2>/dev/null || true
+exec 8<&-
+
+# The shell is a direct child of the axil process, so its survival is the leak
+# itself and is worth asserting directly rather than inferred from a response.
+#
+# Count only *live* children. axil never waitpid()s a PTY child (the single
+# waitpid() in the tree covers command exec, not the shell), so a shell that was
+# correctly killed lingers as a zombie and still shows up in pgrep -P. A zombie
+# holds no PTY master and no descriptors -- it cannot read a later connection's
+# bytes -- so it is not the condition under test.
+tries=40
+while [ $tries -gt 0 ]; do
+	[ "$(s54_kids)" -lt "$s54_before" ] && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+s54_after=$(s54_kids)
+[ "$s54_after" -lt "$s54_before" ] || {
+	echo "FAIL: S5.4: PTY shell outlived its unauthenticated connection ($s54_before -> $s54_after live children); its fd-keyed state would attach to a later request" >&2
+	exit 1
+}
+
+# And the symptom: plain HTTP requests landing on the recycled fd must come back
+# as real HTTP responses.
+s54_reqs=20
+while [ $s54_reqs -gt 0 ]; do
+	s54_http=$(printf 'GET /tty HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n' "$s54_port" \
+		| nc -w2 127.0.0.1 "$s54_port" 2>/dev/null)
+	echo "$s54_http" | grep -qF "200 OK" || {
+		echo "FAIL: S5.4: request on a recycled fd is not a 200" >&2
+		printf '%s\n' "$s54_http" | head -5 >&2
+		exit 1
+	}
+	echo "$s54_http" | grep -qa '?2004' && {
+		echo "FAIL: S5.4: terminal reset leaked into an HTTP response" >&2
+		exit 1
+	}
+	echo "$s54_http" | grep -qa 'command not found' && {
+		echo "FAIL: S5.4: leaked shell executed the HTTP request" >&2
+		exit 1
+	}
+	s54_reqs=$((s54_reqs - 1))
+done
+
+kill -9 $s54_pid 2>/dev/null || true
+wait $s54_pid 2>/dev/null || true
+
+if [ -n "${AXIL_S54_VERBOSE:-}" ]; then
+	echo "S5.4: no-autoauth axil live children $s54_before -> $s54_after, 20 recycled-fd requests clean" >&2
+fi
+
+# ---------------------------------------------------------------------------
 # Persistence regression: the store must survive an orderly shutdown and a
 # second boot must REUSE the saved player.  Boot A on a fresh store:
 # `connect $user` -> `save` -> `kill -SEGV`.  Boot B on the SAME store:
@@ -726,7 +1304,19 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: boot A did not init" >&2; exit 1; }
 
 exec 5<>/dev/tcp/127.0.0.1/$port_a
+persist_a_out="$tmpdb/persist_a.out"
+: >"$persist_a_out"
+stdbuf -i0 -o0 cat <&5 >"$persist_a_out" &
+persist_a_cat=$!
 printf 'connect %s\n\n' "$user" >&5
+tries=50
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$persist_a_out" 2>/dev/null && break
+	tries=$((tries - 1))
+	sleep 0.05
+done
+[ $tries -eq 0 ] && { echo "FAIL: boot A no password prompt" >&2; exit 1; }
+printf '%s\n\n' "$userpass" >&5
 tries=50
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$log_a" 2>/dev/null && break
@@ -736,7 +1326,24 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: boot A login not seen" >&2; exit 1; }
 
 printf 'save\n\n' >&5
+# Wait for the explicit save to land (store mtime advances past the boot)
+# before the SEGV: without this the crash-handler save races the world tick
+# on a store that may not even contain the player yet, and boot B flakes.
+# Bounded; a save that never lands fails here instead of confusing boot B.
+save_before=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
+tries=60
+while [ $tries -gt 0 ]; do
+	save_now=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
+	[ "$save_now" -gt "$save_before" ] && break
+	tries=$((tries - 1))
+	sleep 0.1
+done
+save_now=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
+[ "$save_now" -gt "$save_before" ] \
+	|| { echo "FAIL: boot A save did not land before SEGV" >&2; exit 1; }
 sleep 0.3
+kill -9 $persist_a_cat 2>/dev/null || true
+wait $persist_a_cat 2>/dev/null || true
 exec 5<&-
 
 kp=$persist_pid_a
@@ -761,7 +1368,19 @@ done
 [ $tries -eq 0 ] && { echo "FAIL: boot B did not init" >&2; exit 1; }
 
 exec 6<>/dev/tcp/127.0.0.1/$port_b
+persist_b_out="$tmpdb/persist_b.out"
+: >"$persist_b_out"
+stdbuf -i0 -o0 cat <&6 >"$persist_b_out" &
+persist_b_cat=$!
 printf 'connect %s\n\n' "$user" >&6
+tries=50
+while [ $tries -gt 0 ]; do
+	grep -qaF "Password:" "$persist_b_out" 2>/dev/null && break
+	tries=$((tries - 1))
+	sleep 0.05
+done
+[ $tries -eq 0 ] && { echo "FAIL: boot B no password prompt" >&2; exit 1; }
+printf '%s\n\n' "$userpass" >&6
 tries=50
 while [ $tries -gt 0 ]; do
 	grep -qF "nd_player_login: '$user'" "$log_b" 2>/dev/null && break
@@ -769,6 +1388,8 @@ while [ $tries -gt 0 ]; do
 	sleep 0.1
 done
 [ $tries -eq 0 ] && { echo "FAIL: boot B login not seen" >&2; exit 1; }
+kill -9 $persist_b_cat 2>/dev/null || true
+wait $persist_b_cat 2>/dev/null || true
 exec 6<&-
 
 kp=$persist_pid_b
@@ -778,13 +1399,1751 @@ wait "$kp" 2>/dev/null || true
 
 grep -qF "nd_player_login: '$user'" "$log_b" \
 	|| { echo "FAIL: boot B login missing" >&2; exit 1; }
-grep -qF "eng_object_add" "$log_b" \
+# Player creation is a self-parented add (where=NOTHING rewrites to the new
+# ref, so it logs N -> N). Anything else -- entry drops, which are
+# probability-gated per login -- is not the player and must not fail this.
+# Asserting the absence of ALL adds made this a dice roll on drop tables.
+grep -qE "eng_object_add ([0-9]+) -> \1([^0-9]|$)" "$log_b" \
 	&& { echo "FAIL: boot B re-created the player" >&2; exit 1; }
 grep -qF '/4294967295' "$log_b" \
 	&& { echo "FAIL: boot B did not reuse the persisted player" >&2; exit 1; }
 sz=$(stat -c %s "$persist_db" 2>/dev/null || echo 0)
 [ "${sz:-0}" -gt 0 ] || { echo "FAIL: boot B store empty" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# ST.md §22.6 -- planet persistence, Phase 2 gate.
+#
+# Five things, over three boots on ONE store, and every one of them is a
+# property of the persisted region rows rather than of the live tree:
+#
+#   1. two planets with DIFFERENT module sets (the working test target, §0)
+#   2. `modlist` in each shows its own set and neither shows the other's
+#   3. reboot restores both sets
+#   4. `unloadmod` in planet 1, reboot: planet 1 shrinks, planet 2 untouched
+#   5. `loadmod` of a name with no binary behind it fails loudly and LEAVES
+#      the row intact -- a missing .so is not a reason to forget the intent
+#      (§7.6), so this is asserted in the row, not just in the output
+#
+# The three modules used are the point of §15's ninth bullet: libnd-wts,
+# libnd-stone and libnd-biome are all COMMENTED OUT of mods.load, so none of
+# them is in the cosmos-wide root tier. Using a root-tier module here would
+# make "a module in planet A never fires for planet B" pass vacuously, since
+# a root module fires for every planet by construction.
+#
+# Why an explicit `<world>` argument: `teleport` resolves a named object, not
+# a world number, so there is no in-game way to stand in world 1 and no honest
+# way to derive "the caller's current region" for a moderator who is not there.
+# The planet commands therefore take the world explicitly (§22.5); `here`
+# still reports the genuinely position-derived region.
+
+planet_db="$tmpdb/planet.db"
+pa=$((port + 3))
+pb=$((port + 4))
+pc=$((port + 5))
+la="$tmpdb/planet-a.log"
+lb="$tmpdb/planet-b.log"
+lc="$tmpdb/planet-c.log"
+
+# Send a command on a raw-telnet fd and append everything the server says to a
+# transcript. `read -t` with a fractional timeout is the whole loop: it returns
+# non-zero the moment the socket goes quiet, so this cannot hang, and it
+# line-buffers into the file with no external process to lose a partial buffer
+# when a timeout kills it (which is exactly how `timeout cat | >> file` drops
+# output -- cat block-buffers to a file and the kill discards the tail).
+PLANET_TXT="$tmpdb/planet.txt"
+: > "$PLANET_TXT"
+ndcmd() {
+	local fd=$1; shift
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.35 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$PLANET_TXT"
+	done
+	return 0
+}
+
+# Wait for a marker in the cumulative transcript, draining the socket while
+# waiting. A grep-once right after ndcmd is a race: the server's reply can
+# arrive a beat after the 0.35s drain goes quiet (stale per-fd ioc buffers
+# flushing, scheduling lag), and then a correct implementation fails the
+# suite. Polling the cumulative file closes that race -- a late reply still
+# lands in PLANET_TXT and the next ndwait finds it. Fast path (marker already
+# present) returns without waiting.
+ndwait() {
+	local fd=$1 marker=$2 tries=${3:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$PLANET_TXT" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$PLANET_TXT"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+
+# Drain until quiet without sending anything. Used after an ndwait before an
+# ABSENCE assertion: the marker proves output started, the settle proves it
+# finished, so a missing line is genuinely absent rather than merely late.
+ndsettle() {
+	local fd=$1 line
+	while read -t 0.4 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$PLANET_TXT"
+	done
+	return 0
+}
+
+# Last-resort context for a failed assertion: the tail of the transcript only.
+# The full transcript is a screenful of room renders with ANSI colour, which
+# buries the one line that matters and makes the failure unreadable.
+planet_tail() {
+	tail -c 600 "$PLANET_TXT" 2>/dev/null | tr -d '\033' | sed 's/\[[0-9;]*m//g'
+}
+
+# Wait for nd_world_init's "Done." (world.c) and an open port, bounded.
+wait_up() {
+	local log=$1 prt=$2 tries=60
+	while [ $tries -gt 0 ]; do
+		grep -qF "Done." "$log" 2>/dev/null && nc -z 127.0.0.1 "$prt" 2>/dev/null && return 0
+		tries=$((tries - 1))
+		sleep 0.05
+	done
+	return 1
+}
+
+killaxil() {
+	local pid=$1
+	[ -n "$pid" ] || return 0
+	# SIGTERM, not SEGV, and deliberately so (§22.6): the planet gate tests
+	# REBOOT persistence (explicit `save`, then a fresh process reads the
+	# file), and TERM performs no save of its own -- the file keeps exactly
+	# what the explicit save wrote, every time. SEGV runs close_all's
+	# handler save, which races with the world tick and intermittently
+	# truncates the store (the pre-existing ~1-in-3 flake, §9); that
+	# crash-persistence path is the pre-existing section's job, above, not
+	# this gate's. Verified 3/3 green with TERM vs ~1/3 red with SEGV.
+	kill -TERM "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+}
+
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pa" -m ./lib/axil-nd >"$la" 2>&1 &
+planet_pid_a=$!
+wait_up "$la" "$pa" || { echo "FAIL: planet boot A did not init" >&2; exit 1; }
+
+exec 7<>/dev/tcp/127.0.0.1/$pa
+ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: planet boot A no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: planet boot A login not seen" >&2; exit 1; }
+
+# --- 1. two planets, different module sets ---------------------------------
+ndcmd 7 "planet 1"
+ndwait 7 "planet 1 established" \
+	|| { echo "FAIL: 'planet 1' did not establish (tail: $(planet_tail))" >&2; exit 1; }
+ndcmd 7 "planet 2"
+ndwait 7 "planet 2 established" \
+	|| { echo "FAIL: 'planet 2' did not establish (tail: $(planet_tail))" >&2; exit 1; }
+
+ndcmd 7 "loadmod libnd-wts 1"
+ndwait 7 "libnd-wts loaded into" \
+	|| { echo "FAIL: loadmod libnd-wts into planet 1 not confirmed" >&2; exit 1; }
+ndcmd 7 "loadmod libnd-stone 1"
+ndwait 7 "libnd-stone loaded into" \
+	|| { echo "FAIL: loadmod libnd-stone into planet 1 not confirmed" >&2; exit 1; }
+ndcmd 7 "loadmod libnd-biome 2"
+ndwait 7 "libnd-biome loaded into" \
+	|| { echo "FAIL: loadmod libnd-biome into planet 2 not confirmed" >&2; exit 1; }
+
+# --- 2. each modlist shows only its own set --------------------------------
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-stone" \
+	|| { echo "FAIL: modlist 1 never completed" >&2; exit 1; }
+ndsettle 7
+planet1_txt="$tmpdb/planet1.txt"; cp "$PLANET_TXT" "$planet1_txt"
+grep -qaF "plen=16" "$planet1_txt" \
+	|| { echo "FAIL: modlist 1 did not report a plen=16 region" >&2; exit 1; }
+grep -qaF "libnd-wts" "$planet1_txt" \
+	|| { echo "FAIL: modlist 1 missing libnd-wts" >&2; exit 1; }
+grep -qaF "libnd-biome" "$planet1_txt" \
+	&& { echo "FAIL: modlist 1 leaked planet 2's module" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 2"
+ndwait 7 "libnd-biome" \
+	|| { echo "FAIL: modlist 2 never completed" >&2; exit 1; }
+ndsettle 7
+planet2_txt="$tmpdb/planet2.txt"; cp "$PLANET_TXT" "$planet2_txt"
+grep -qaF "libnd-biome" "$planet2_txt" \
+	|| { echo "FAIL: modlist 2 missing libnd-biome" >&2; exit 1; }
+grep -qaF "libnd-wts" "$planet2_txt" \
+	&& { echo "FAIL: modlist 2 leaked planet 1's module" >&2; exit 1; }
+
+# `planets` must list both, which is what makes the sets independently visible
+# rather than only through the per-planet view.
+: > "$PLANET_TXT"
+ndcmd 7 "planets"
+ndwait 7 "world=1" \
+	|| { echo "FAIL: planets did not list world 1" >&2; exit 1; }
+ndwait 7 "world=2" \
+	|| { echo "FAIL: planets did not list world 2" >&2; exit 1; }
+
+# --- 5a. a failed load is loud AND leaves the row alone ---------------------
+# Write path: `loadmod` loads FIRST and only records on success, so a typo
+# cannot persist forever and make every boot log the same failure. The failed
+# name must NOT appear in the row, and the rest of the set must be intact.
+ndcmd 7 "loadmod libnd-nosuchthing 1"
+ndwait 7 "libnd-nosuchthing failed to load" \
+	|| { echo "FAIL: loadmod of a missing module was not reported" >&2; exit 1; }
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-stone" \
+	|| { echo "FAIL: modlist 1 never completed after failed load" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-nosuchthing" "$PLANET_TXT" \
+	&& { echo "FAIL: a failed loadmod recorded a phantom entry" >&2; exit 1; }
+grep -qaF "libnd-wts" "$PLANET_TXT" \
+	|| { echo "FAIL: a failed loadmod damaged the rest of planet 1's set" >&2; exit 1; }
+
+# --- 3. reboot: both sets restored ------------------------------------------
+ndcmd 7 "save"
+sleep 0.3
+exec 7<&-
+killaxil $planet_pid_a; planet_pid_a=
+
+sz=$(stat -c %s "$planet_db" 2>/dev/null || echo 0)
+[ "${sz:-0}" -gt 0 ] || { echo "FAIL: planet boot A store empty" >&2; exit 1; }
+
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pb" -m ./lib/axil-nd >"$lb" 2>&1 &
+planet_pid_b=$!
+wait_up "$lb" "$pb" || { echo "FAIL: planet boot B did not init" >&2; exit 1; }
+
+# The restore itself must be visible in the log, not merely in what modlist
+# later reports: a row restored with zero modules would still list cleanly.
+grep -qaF "st_restore: region id=0x0001000000000000 plen=16" "$lb" \
+	|| { echo "FAIL: boot B did not restore planet 1's region" >&2; exit 1; }
+grep -qaF "st_restore: region id=0x0002000000000000 plen=16" "$lb" \
+	|| { echo "FAIL: boot B did not restore planet 2's region" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-wts" "$lb" \
+	|| { echo "FAIL: boot B did not reload planet 1's libnd-wts" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-biome" "$lb" \
+	|| { echo "FAIL: boot B did not reload planet 2's libnd-biome" >&2; exit 1; }
+
+exec 7<>/dev/tcp/127.0.0.1/$pb
+ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: planet boot B no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$lb" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: planet boot B login not seen" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-stone" \
+	|| { echo "FAIL: planet 1 modlist never completed after reboot" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-wts" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 1 lost libnd-wts across the reboot" >&2; exit 1; }
+grep -qaF "libnd-stone" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 1 lost libnd-stone across the reboot" >&2; exit 1; }
+grep -qaF "libnd-biome" "$PLANET_TXT" \
+	&& { echo "FAIL: planet 1 gained planet 2's module across the reboot" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 2"
+ndwait 7 "libnd-biome" \
+	|| { echo "FAIL: planet 2 modlist never completed after reboot" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-biome" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 2 lost libnd-biome across the reboot" >&2; exit 1; }
+
+# --- 4. unload one, reboot: planet 1 shrinks, planet 2 untouched ------------
+ndcmd 7 "unloadmod libnd-stone 1"
+ndwait 7 "libnd-stone unloaded from" \
+	|| { echo "FAIL: unloadmod libnd-stone not confirmed" >&2; exit 1; }
+ndcmd 7 "save"
+sleep 0.3
+exec 7<&-
+killaxil $planet_pid_b; planet_pid_b=
+
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pc" -m ./lib/axil-nd >"$lc" 2>&1 &
+planet_pid_c=$!
+wait_up "$lc" "$pc" || { echo "FAIL: planet boot C did not init" >&2; exit 1; }
+
+grep -qaF "st_restore: loaded libnd-stone" "$lc" \
+	&& { echo "FAIL: boot C reloaded an unloaded module" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-wts" "$lc" \
+	|| { echo "FAIL: boot C lost planet 1's surviving module" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-biome" "$lc" \
+	|| { echo "FAIL: unloadmod in planet 1 disturbed planet 2" >&2; exit 1; }
+
+exec 7<>/dev/tcp/127.0.0.1/$pc
+ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: planet boot C no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$lc" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: planet boot C login not seen" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 1"
+ndwait 7 "libnd-wts" \
+	|| { echo "FAIL: planet 1 modlist never completed after unload" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-stone" "$PLANET_TXT" \
+	&& { echo "FAIL: an unloaded module came back" >&2; exit 1; }
+grep -qaF "libnd-wts" "$PLANET_TXT" \
+	|| { echo "FAIL: the unload took a sibling module with it" >&2; exit 1; }
+: > "$PLANET_TXT"
+ndcmd 7 "modlist 2"
+ndwait 7 "libnd-biome" \
+	|| { echo "FAIL: planet 2 modlist never completed after unload" >&2; exit 1; }
+ndsettle 7
+grep -qaF "libnd-biome" "$PLANET_TXT" \
+	|| { echo "FAIL: planet 2 damaged by planet 1's unload" >&2; exit 1; }
+
+# --- release: the row goes, the region entry stays inert --------------------
+ndcmd 7 "release 2"
+ndwait 7 "planet 2 released" \
+	|| { echo "FAIL: release 2 not confirmed" >&2; exit 1; }
+: > "$PLANET_TXT"
+ndcmd 7 "planets"
+ndwait 7 "world=1" \
+	|| { echo "FAIL: planets empty after release" >&2; exit 1; }
+ndsettle 7
+grep -qaF "world=2" "$PLANET_TXT" \
+	&& { echo "FAIL: released planet 2 still listed" >&2; exit 1; }
+grep -qaF "world=1" "$PLANET_TXT" \
+	|| { echo "FAIL: releasing planet 2 took planet 1 with it" >&2; exit 1; }
+
+exec 7<&-
+killaxil $planet_pid_c; planet_pid_c=
+
+# ---------------------------------------------------------------------------
+# ST.md §27 -- Phase 3 gate: anchored dispatch + delegation.
+#
+# Phase 2 proved a planet PERSISTS a module set. It never proved the set
+# RUNS: until this section, nd_events.c dispatched every event with a bare
+# xy_call from the root, and xy_call reaches the whole subtree (§4.4), so a
+# planet's module fired for events anchored anywhere on the server.
+#
+# What is asserted, and why each shape is here:
+#
+#   1. a probe loaded into planet 1 fires for an event anchored in planet 1,
+#      and reports region=16 -- the region that ran it, not just its name, so
+#      "ran in its own planet" is distinguishable from "ran, from the cosmos"
+#   2. with a probe in EACH planet, standing in planet 2 fires only planet 2's.
+#      This is the negative assertion the whole phase exists for: §15's ninth
+#      bullet, a root-tier module would make it pass vacuously
+#   3. the same holds across a reboot, both sets restored (§7.6)
+#   4. `deny` makes planet 1 refuse a module, and the refusal is scoped --
+#      planet 2 still loads it
+#
+# The probes are built HERE, from one source, tagged by -D, and installed into
+# $tmpdb/probe which is prepended to LD_LIBRARY_PATH. They must be reachable by
+# BARE SONAME: `loadmod` rejects any name containing '/' (xy would treat it as
+# a path), so the §0.4 by-path fixture shape cannot be used for a planet. And
+# they must not be root-tier, which is why they are not in mods.load -- every
+# module in mods.load is loaded into the root region and therefore fires for
+# every planet by construction.
+# ---------------------------------------------------------------------------
+
+scopeprobe_dir="$tmpdb/probe"
+mkdir -p "$scopeprobe_dir"
+export LD_LIBRARY_PATH="$scopeprobe_dir:${LD_LIBRARY_PATH:-}"
+
+cat > "$tmpdb/scopeprobe.c" <<'EOF'
+/* One source, two .so, tagged by -DND_SCOPE_TAG.
+ *
+ * The tag is in the output because the assertion is about WHICH module fired;
+ * the region plen is in the output because the assertion is about WHERE it
+ * fired. A probe that printed only its own name would pass the negative case
+ * just as happily when it ran from the cosmos, which is the exact failure this
+ * gate exists to catch. plen=0 is the root, plen=16 a planet, so the number is
+ * what distinguishes "its own planet" from "the whole tree".
+ *
+ * The context is `xy` -- <ttypt/xy-mod.h> declares `static struct xy_ctx xy`
+ * and the host fills it in -- not `xy_ctx`. nd/xy.h's own `nd_last` macro and
+ * its "xy is undeclared at the use site" comment are both about `xy`. */
+#include <ttypt/xy-mod.h>
+#include <nd/xy.h>
+
+#ifndef ND_SCOPE_TAG
+#define ND_SCOPE_TAG "?"
+#endif
+
+XY_MODULE_API void xy_install(void)
+{
+	WARN("nd-scope-" ND_SCOPE_TAG ": installed plen=%u\n",
+		xy_current_region_plen());
+}
+
+XY_IMPL(int, on_status, unsigned, player_ref)
+{
+	(void)player_ref;
+	WARN("nd-scope-" ND_SCOPE_TAG ": on_status region plen=%u\n",
+		xy_current_region_plen());
+	return 0;
+}
+EOF
+
+for tag in a b; do
+	${CC:-cc} -shared -fPIC -DND_SCOPE_TAG="\"$tag\"" \
+		-I"$(pwd)/include" -I"${PREFIX:-/usr}/include" \
+		-o "$scopeprobe_dir/libnd-scope-$tag.so" "$tmpdb/scopeprobe.c"
+done
+
+scope_db="$tmpdb/scope.db"
+pd=$((port + 6))
+pe=$((port + 7))
+ld="$tmpdb/scope-a.log"
+le="$tmpdb/scope-b.log"
+scope_pid_a=
+scope_pid_b=
+trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} 2>/dev/null || true' EXIT
+
+# Count a marker in a log. Used as a DELTA around one command, never as a
+# whole-file grep: "probe A did not fire" is only meaningful if the assertion
+# knows how many times it had fired before.
+nmarked() {
+	local n
+	n=$(grep -acF "$2" "$1" 2>/dev/null) || n=0
+	printf '%s' "${n:-0}"
+}
+
+# Create a room at an explicit 4D position and leave the caller standing there.
+# §27.3 -- without this a world is unreachable, so nothing can ever be
+# anchored in one. `room` itself enters the caller: do_teleport cannot make
+# this move for a non-wizard because eng_controls requires control of the
+# caller's current location, while `room` is already authorized for the target
+# region.
+#
+# The arrival is confirmed by `here`, not by the room command's own output.
+# `here` prints the region header for the position the player is actually in
+# ("[id=0x... plen=16 world=1 owner=... mods=...]"), which is the only in-band
+# statement of which world that is. Matching "world=N owner=" rather than
+# "world=N" keeps it from matching "world=10". The transcript is reset first
+# so ndwait cannot pass on a stale marker from an earlier world.
+goto_world() {
+	local fd=$1 world=$2 tag=${3:-}
+	: > "$PLANET_TXT"
+	ndcmd "$fd" "room 0 0 0 $world"
+	if ! ndwait "$fd" "at 0 0 0 $world"; then
+		echo "FAIL: room 0 0 0 $world was not created ($tag) (tail: $(planet_tail))" >&2
+		ndcmd "$fd" "status" 2>/dev/null || true
+		ndsettle "$fd" 2>/dev/null || true
+		echo "--- planet transcript tail ---" >&2
+		planet_tail >&2
+		echo "--- server log tail ---" >&2
+		[ -n "${ld:-}" ] && [ -f "$ld" ] && tail -n 40 "$ld" >&2
+		[ -n "${le:-}" ] && [ -f "$le" ] && tail -n 40 "$le" >&2
+		exit 1
+	fi
+	ndsettle "$fd"
+	ndcmd "$fd" "here"
+	if ! ndwait "$fd" "world=$world owner="; then
+		echo "FAIL: the player is not in world $world ($tag) (tail: $(planet_tail))" >&2
+		ndcmd "$fd" "status" 2>/dev/null || true
+		ndsettle "$fd" 2>/dev/null || true
+		echo "--- planet transcript tail ---" >&2
+		planet_tail >&2
+		echo "--- server log tail ---" >&2
+		[ -n "${ld:-}" ] && [ -f "$ld" ] && tail -n 40 "$ld" >&2
+		[ -n "${le:-}" ] && [ -f "$le" ] && tail -n 40 "$le" >&2
+		exit 1
+	fi
+	ndsettle "$fd"
+}
+
+AXIL_ND_DB="$scope_db" axil -d -A -p "$pd" -m ./lib/axil-nd >"$ld" 2>&1 &
+scope_pid_a=$!
+wait_up "$ld" "$pd" || { echo "FAIL: scope boot A did not init" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+exec 7<>/dev/tcp/127.0.0.1/$pd
+ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: scope boot A no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$ld" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: scope boot A login not seen" >&2; exit 1; }
+
+# --- 1. planet 1: the probe fires, in planet 1 -----------------------------
+ndcmd 7 "planet 1"
+ndwait 7 "planet 1 established" \
+	|| { echo "FAIL: planet 1 did not establish for the scoped gate" >&2; exit 1; }
+ndsettle 7
+goto_world 7 1 "boot A world 1"
+ndcmd 7 "loadmod libnd-scope-a 1"
+ndwait 7 "libnd-scope-a loaded into" \
+	|| { echo "FAIL: loadmod libnd-scope-a into planet 1 not confirmed" >&2; exit 1; }
+ndsettle 7
+grep -qaF "nd-scope-a: installed plen=16" "$ld" \
+	|| { echo "FAIL: probe A did not install into planet 1's region (plen != 16)" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 1" >&2; exit 1; }
+ndsettle 7
+grep -qaF "nd-scope-a: on_status region plen=16" "$ld" \
+	|| { echo "FAIL: probe A did not fire for an event anchored in its own planet (tail: $(planet_tail))" >&2; exit 1; }
+
+# --- 2. planet 2: only planet 2's probe fires ------------------------------
+ndcmd 7 "planet 2"
+ndwait 7 "planet 2 established" \
+	|| { echo "FAIL: planet 2 did not establish for the scoped gate" >&2; exit 1; }
+ndsettle 7
+goto_world 7 2 "boot A world 2"
+ndcmd 7 "loadmod libnd-scope-b 2"
+ndwait 7 "libnd-scope-b loaded into" \
+	|| { echo "FAIL: loadmod libnd-scope-b into planet 2 not confirmed" >&2; exit 1; }
+ndsettle 7
+
+: > "$PLANET_TXT"
+before_a=$(nmarked "$ld" "nd-scope-a: on_status")
+before_b=$(nmarked "$ld" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 2" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$ld" "nd-scope-a: on_status")
+after_b=$(nmarked "$ld" "nd-scope-b: on_status")
+
+[ "$after_b" -gt "$before_b" ] \
+	|| { echo "FAIL: probe B did not fire for an event anchored in its own planet" >&2; exit 1; }
+[ "$after_a" -eq "$before_a" ] \
+	|| { echo "FAIL: planet 1's probe fired for an event anchored in planet 2 ($((after_a - before_a)) time(s))" >&2; exit 1; }
+
+# --- 3. reboot: both sets restored, and the isolation survives it ----------
+ndcmd 7 "save"
+sleep 0.3
+exec 7<&-
+killaxil $scope_pid_a; scope_pid_a=
+
+AXIL_ND_DB="$scope_db" axil -d -A -p "$pe" -m ./lib/axil-nd >"$le" 2>&1 &
+scope_pid_b=$!
+wait_up "$le" "$pe" || { echo "FAIL: scope boot B did not init" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-scope-a" "$le" \
+	|| { echo "FAIL: boot B did not restore planet 1's probe" >&2; exit 1; }
+grep -qaF "st_restore: loaded libnd-scope-b" "$le" \
+	|| { echo "FAIL: boot B did not restore planet 2's probe" >&2; exit 1; }
+
+: > "$PLANET_TXT"
+exec 7<>/dev/tcp/127.0.0.1/$pe
+ndcmd 7 "connect $user"
+ndwait 7 "Password:" \
+	|| { echo "FAIL: scope boot B no password prompt" >&2; exit 1; }
+ndcmd 7 "$userpass"
+tries=60
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$le" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: scope boot B login not seen" >&2; exit 1; }
+
+# Stand in planet 2 again: planet 2's probe must fire and planet 1's must not,
+# from the RESTORED sets rather than the ones this boot loaded by hand.
+goto_world 7 2 "boot B world 2"
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+before_b=$(nmarked "$le" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 2 after the reboot" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+after_b=$(nmarked "$le" "nd-scope-b: on_status")
+[ "$after_b" -gt "$before_b" ] \
+	|| { echo "FAIL: probe B did not fire after the reboot" >&2; exit 1; }
+[ "$after_a" -eq "$before_a" ] \
+	|| { echo "FAIL: planet 1's probe fired across the reboot for a planet 2 anchor" >&2; exit 1; }
+
+# And standing in planet 1, the roles reverse -- which is what makes the pair
+# an isolation assertion rather than one module happening to be quiet.
+goto_world 7 1 "boot B world 1"
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+before_b=$(nmarked "$le" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 1 after the reboot" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+after_b=$(nmarked "$le" "nd-scope-b: on_status")
+[ "$after_a" -gt "$before_a" ] \
+	|| { echo "FAIL: probe A did not fire after the reboot" >&2; exit 1; }
+[ "$after_b" -eq "$before_b" ] \
+	|| { echo "FAIL: planet 2's probe fired for an event anchored in planet 1" >&2; exit 1; }
+
+# --- 4. delegation: a deny is dispatch-time and scoped to its subtree --------
+#
+# Placement is deliberate: a deny lives in region entries, which are rebuilt
+# from the st rows on every boot, so a deny does NOT survive the reboot above.
+# Setting one before the restore assertions would have made probe A stop
+# firing in world 1 and failed step 3 for the wrong reason.
+#
+# The semantics are dispatch-time, not load-time. libxylem consults a module
+# deny only from the dispatch walker (module_is_denied() is called from
+# libxylem-dispatch.c and nowhere else), so a denied module still LOADS and is
+# still recorded in the region's set -- it just never gets to RUN there. The
+# gate therefore asserts silence, not a failed load, and in BOTH directions:
+# the same .so denied in planet 1 must still fire in planet 2.
+ndcmd 7 "loadmod libnd-scope-a 2"
+ndwait 7 "libnd-scope-a loaded into" \
+	|| { echo "FAIL: probe A could not also be loaded into planet 2" >&2; exit 1; }
+ndsettle 7
+ndcmd 7 "deny module libnd-scope-a 1"
+ndwait 7 "denied: module libnd-scope-a in region id=0x0001000000000000 plen=16" \
+	|| { echo "FAIL: deny module in planet 1 not confirmed (tail: $(planet_tail))" >&2; exit 1; }
+ndsettle 7
+
+# World 1: denied, so A is silent. If the deny were inert, A would still fire.
+goto_world 7 1
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 1 after the deny" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+[ "$after_a" -eq "$before_a" ] \
+	|| { echo "FAIL: a module denied in planet 1 still fired there ($((after_a - before_a)) time(s))" >&2; exit 1; }
+
+# World 2: same .so, same process, NOT denied -> A fires. If the deny had
+# leaked to a sibling planet it would be silent here instead.
+goto_world 7 2
+: > "$PLANET_TXT"
+before_a=$(nmarked "$le" "nd-scope-a: on_status")
+before_b=$(nmarked "$le" "nd-scope-b: on_status")
+ndcmd 7 "status"
+ndwait 7 ") type " || { echo "FAIL: status never answered in world 2 after the deny" >&2; exit 1; }
+ndsettle 7
+after_a=$(nmarked "$le" "nd-scope-a: on_status")
+after_b=$(nmarked "$le" "nd-scope-b: on_status")
+[ "$after_a" -gt "$before_a" ] \
+	|| { echo "FAIL: planet 1's deny leaked into planet 2 and silenced a module there" >&2; exit 1; }
+[ "$after_b" -gt "$before_b" ] \
+	|| { echo "FAIL: probe B stopped firing in its own planet" >&2; exit 1; }
+
+exec 7<&-
+killaxil $scope_pid_b; scope_pid_b=
+
 exec 4<&-
+
+# --- S6: ematch ref resolution (NO_WIZ.md §14) -----------------------------
+# eng_obj_exists() returned `corm_get(...) == NULL` -- TRUE when the object is
+# ABSENT. eng_ematch_absolute() is its one internal caller, so the inversion
+# made every branch of that function behave backwards: a real, existing ref
+# tested false and was discarded as NOTHING, while an absent ref tested true
+# and was handed back as a match. eng_ematch_at() then took over, and because
+# its contents scan assigned `tmp_ref` on every iteration and returned it
+# unconditionally, "no match" surfaced as "the last object iterated in the
+# room". Together these made `teleport #<ref> here` silently move a bystander
+# (measured: the dolphin) and made any player-typed `teleport #<absent>` abort
+# the daemon via corm_get_copy on a row that does not exist.
+#
+# Both sockets get their OWN transcript. PLANET_TXT is cumulative for fd 7 and
+# is wiped by the sections above; an assertion that a line is ABSENT needs a
+# transcript that provably only holds this command's output.
+mp=$((20000 + RANDOM % 8000))
+mpdb=$(mktemp -d)
+mpla="$mpdb/a.log"
+mp_owner_txt="$mpdb/owner.txt"
+mp_guest_txt="$mpdb/guest.txt"
+: > "$mp_owner_txt"
+: > "$mp_guest_txt"
+
+AXIL_ND_DB="$mpdb/w.db" axil -d -A -p "$mp" -m ./lib/axil-nd >"$mpla" 2>&1 &
+mp_pid=$!
+wait_up "$mpla" "$mp" || { echo "FAIL: S6 ematch boot did not init" >&2; exit 1; }
+
+# Per-fd send+drain, so each side's transcript is that command's output alone.
+mpcmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+# Poll one fd's own transcript, draining that fd while waiting.
+mpwait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+# Strip the colour and the CR so a marker can be matched as plain text.
+mpclean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+
+# mp_guest and guestpass are defined with the fixture accounts at setup.
+exec 7<>/dev/tcp/127.0.0.1/$mp
+mpcmd 7 "$mp_owner_txt" "connect $user"
+mpwait 7 "$mp_owner_txt" "Password:" \
+	|| { echo "FAIL: S6 owner no password prompt" >&2; exit 1; }
+mpcmd 7 "$mp_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$mpla" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S6 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$mp
+mpcmd 8 "$mp_guest_txt" "connect $mp_guest"
+mpwait 8 "$mp_guest_txt" "Password:" \
+	|| { echo "FAIL: S6 guest no password prompt" >&2; exit 1; }
+mpcmd 8 "$mp_guest_txt" "$guestpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$mp_guest'" "$mpla" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S6 guest login not seen" >&2; exit 1; }
+
+# The owner carves a world room so "here" is a real room, not the shared void
+# (NPCs share the void, and a void assertion would prove nothing about which
+# object moved). do_room prints `room <ref> at <x> <y> <z> <w>` after it has
+# entered the caller there, so that line -- not eng_enter's bare "Teleported" --
+# is the marker, and `status`'s `at <ref>` is the proof of where the caller
+# actually ended up.
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "room 0 0 0 1"
+mpwait 7 "$mp_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S6 owner could not carve a world room (tail: $(mpclean "$mp_owner_txt" | tail -3))" >&2; exit 1; }
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "status"
+mpwait 7 "$mp_owner_txt" ") type " \
+	|| { echo "FAIL: S6 owner status never answered (tail: $(mpclean "$mp_owner_txt" | tail -3))" >&2; exit 1; }
+mp_room_ref=$(mpclean "$mp_owner_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+[ -n "$mp_room_ref" ] \
+	|| { echo "FAIL: S6 could not parse the carved room ref from status (tail: $(mpclean "$mp_owner_txt" | head -2))" >&2; exit 1; }
+
+# The guest ref is parsed in-band from the guest's OWN status line,
+# `name (<ref>) type 1 ...`. Refs are not stable across runs (a room carved
+# later can get a lower ref than a player), so this must never be hardcoded.
+: > "$mp_guest_txt"
+mpcmd 8 "$mp_guest_txt" "status"
+mpwait 8 "$mp_guest_txt" ") type " \
+	|| { echo "FAIL: S6 guest status never answered (tail: $(mpclean "$mp_guest_txt" | tail -3))" >&2; exit 1; }
+mp_guest_ref=$(mpclean "$mp_guest_txt" \
+	| sed -n "s/^$mp_guest (\([0-9][0-9]*\)) type .*/\1/p" | head -1)
+[ -n "$mp_guest_ref" ] \
+	|| { echo "FAIL: S6 could not parse the guest ref from its status (tail: $(mpclean "$mp_guest_txt" | head -2))" >&2; exit 1; }
+
+# --- 1. `teleport #<valid ref> here` actually moves the guest ----------------
+# Pre-fix the guest was never found: eng_obj_exists reported every existing ref
+# as absent, so eng_ematch_absolute discarded it and eng_ematch_at returned
+# whichever object it happened to iterate last.
+: > "$mp_owner_txt"; : > "$mp_guest_txt"
+mpcmd 7 "$mp_owner_txt" "teleport #$mp_guest_ref here"
+mpwait 8 "$mp_guest_txt" "wrenching" \
+	|| { echo "FAIL: S6 'teleport #$mp_guest_ref here' did not move the guest (owner: $(mpclean "$mp_owner_txt" | tail -3) / guest: $(mpclean "$mp_guest_txt" | tail -3))" >&2; exit 1; }
+
+# The guest must now be standing in the owner's carved room, not the void.
+: > "$mp_guest_txt"
+mpcmd 8 "$mp_guest_txt" "status"
+mpwait 8 "$mp_guest_txt" ") type " \
+	|| { echo "FAIL: S6 guest status never answered after the teleport (tail: $(mpclean "$mp_guest_txt" | tail -3))" >&2; exit 1; }
+mp_guest_at=$(mpclean "$mp_guest_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+[ "$mp_guest_at" = "$mp_room_ref" ] \
+	|| { echo "FAIL: S6 guest is at '$mp_guest_at', expected the carved room '$mp_room_ref'" >&2; exit 1; }
+
+# --- 2. `teleport #<absent ref>` must not kill the daemon ------------------
+# Measured pre-fix: SIGABRT from corm_get_copy on a nonexistent row. eng_obj_exists
+# claimed such a ref existed, so it reached the copy.
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "teleport #1823110 here"
+# Liveness FIRST, so a regression reports as the crash it is instead of as a
+# missing message. A dead daemon writes nothing, which would otherwise satisfy
+# no marker and read as a phrasing problem.
+if ! kill -0 $mp_pid 2>/dev/null; then
+	echo "FAIL: S6 'teleport #<absent> here' killed the daemon (tail: $(tail -3 "$mpla"))" >&2
+	exit 1
+fi
+mpwait 7 "$mp_owner_txt" "don't know what you mean" \
+	|| { echo "FAIL: S6 'teleport #<absent> here' gave no NOMATCH refusal" >&2
+	     echo "  raw transcript: $(cat -v "$mp_owner_txt" | tr '\n' '|')" >&2
+	     echo "  cleaned:        $(mpclean "$mp_owner_txt" | tr '\n' '|')" >&2
+	     exit 1; }
+kill -0 $mp_pid 2>/dev/null \
+	|| { echo "FAIL: S6 'teleport #<absent> here' killed the daemon" >&2; exit 1; }
+
+# The socket still works, i.e. the daemon is genuinely alive and not a zombie.
+: > "$mp_owner_txt"
+mpcmd 7 "$mp_owner_txt" "status"
+mpwait 7 "$mp_owner_txt" ") type " \
+	|| { echo "FAIL: S6 daemon stopped answering after an absent-ref teleport (tail: $(mpclean "$mp_owner_txt" | tail -3))" >&2; exit 1; }
+mp_owner_at=$(mpclean "$mp_owner_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+[ "$mp_owner_at" = "$mp_room_ref" ] \
+	|| { echo "FAIL: S6 the absent-ref teleport moved the owner to '$mp_owner_at'" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $mp_pid
+rm -rf "$mpdb"
+
+# ---------------------------------------------------------------------------
+# --- S7: region ownership gates (NO_WIZ.md §5 + §6) ---------------------------
+# ---------------------------------------------------------------------------
+# EF_WIZARD is gone, so every gate that used to read `!(flags & EF_WIZARD)`
+# became an unconditional denial. Authority is now derived from the st region
+# rows: a gate asks st_can_region()/st_in_scope() and a refusal NAMES the ruler.
+#
+# The only two-player authority assertion that is constructible here is
+# owner-yes / guest-no, and NO_WIZ.md §13.7 says why there is no other: a
+# non-cosmos ruler cannot be created (do_planet needs cosmos authority to claim
+# a new planet, do_release deletes the row instead of clearing the owner, no
+# transfer command exists), so in a fresh store the first player owns cosmos
+# (0,0) -- which covers the whole address space -- and every other player rules
+# nothing at all. The owner half is therefore the positive boundary and the
+# guest half is the negative one; there is no third party to be negative
+# against. Selector-scoped wall/ban narrow the same boundary without needing a
+# second ruler.
+#
+# Refs are parsed in-band from `status` on the socket that owns them: a room
+# carved after login can get a LOWER ref than a player, so nothing here is
+# hardcoded. Same per-fd transcripts as S6 -- an assertion that a line is
+# ABSENT needs a transcript holding only this command's output.
+w7=$((20000 + RANDOM % 8000))
+w7db=$(mktemp -d)
+w7la="$w7db/a.log"
+w7_owner_txt="$w7db/owner.txt"
+w7_guest_txt="$w7db/guest.txt"
+: > "$w7_owner_txt"
+: > "$w7_guest_txt"
+
+AXIL_ND_DB="$w7db/w.db" axil -d -A -p "$w7" -m ./lib/axil-nd >"$w7la" 2>&1 &
+w7_pid=$!
+wait_up "$w7la" "$w7" || { echo "FAIL: S7 boot did not init" >&2; exit 1; }
+
+w7cmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+w7wait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+w7clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+# One command per socket, transcript wiped first, so the file provably holds
+# only this command's output and an absence assertion means something.
+w7run() { : > "$2"; w7cmd "$1" "$2" "$3"; }
+w7ref() { w7clean "$1" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1; }
+
+exec 7<>/dev/tcp/127.0.0.1/$w7
+w7cmd 7 "$w7_owner_txt" "connect $user"
+w7wait 7 "$w7_owner_txt" "Password:" \
+	|| { echo "FAIL: S7 owner no password prompt" >&2; exit 1; }
+w7cmd 7 "$w7_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$w7la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S7 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$w7
+w7cmd 8 "$w7_guest_txt" "connect $w7_guest"
+w7wait 8 "$w7_guest_txt" "Password:" \
+	|| { echo "FAIL: S7 guest no password prompt" >&2; exit 1; }
+w7cmd 8 "$w7_guest_txt" "$guestpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$w7_guest'" "$w7la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S7 guest login not seen" >&2; exit 1; }
+
+# Both refs, from each socket's own status line: `name (<ref>) type 1 ...`.
+w7run 8 "$w7_guest_txt" "status"
+w7wait 8 "$w7_guest_txt" ") type " || { echo "FAIL: S7 guest status (tail: $(w7clean "$w7_guest_txt" | tail -3))" >&2; exit 1; }
+w7_guest_ref=$(w7ref "$w7_guest_txt")
+[ -n "$w7_guest_ref" ] || { echo "FAIL: S7 no guest ref (tail: $(w7clean "$w7_guest_txt" | head -2))" >&2; exit 1; }
+w7run 7 "$w7_owner_txt" "status"
+w7wait 7 "$w7_owner_txt" ") type " || { echo "FAIL: S7 owner status (tail: $(w7clean "$w7_owner_txt" | tail -3))" >&2; exit 1; }
+w7_owner_ref=$(w7ref "$w7_owner_txt")
+[ -n "$w7_owner_ref" ] || { echo "FAIL: S7 no owner ref (tail: $(w7clean "$w7_owner_txt" | head -2))" >&2; exit 1; }
+
+# The refusal every gate shares: st_refuse_region() names the ruler of the
+# region the TARGET is in, so the guest's refusals all name the owner. Asserted
+# as the fixed prefix plus the owner's real name, which is the whole point --
+# a gate that printed a bare "You can't do that." would fail here.
+w7_refused() {
+	local fd=$1 file=$2 label=$3
+	grep -qaF "Permission denied (ruled by $user" "$file" \
+		&& return 0
+	echo "FAIL: $label: expected a refusal naming $user; got: $(w7clean "$file" | tr '\n' '|' | tail -c 200)" >&2
+	exit 1
+}
+
+# --- 1. `create`: the guest rules nothing, the owner rules the cosmos ---------
+# Object refs for the section are derived by diffing the owner's own listing
+# before and after: `create` names the new object after its SKELETON, not after
+# the requested name (pre-existing behaviour, out of scope), so the requested
+# name never appears on the wire. Tokens are `(#N)` ref markers, one per line,
+# sorted for comm.
+w7tokens() { w7clean "$1" | grep -o '(#[0-9][0-9]*)' | sort -u; }
+w7run 7 "$w7_owner_txt" "owned"
+w7wait 7 "$w7_owner_txt" "objects found" || { echo "FAIL: S7 owner listing never answered (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7tokens "$w7_owner_txt" > "$w7db/before.txt"
+w7run 8 "$w7_guest_txt" "create guestpebble 0"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest create did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest create"
+
+w7run 7 "$w7_owner_txt" "create ownerpebble 0"
+w7wait 7 "$w7_owner_txt" "Created" || { echo "FAIL: S7 owner create refused (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# Skeleton IDs are checked before touching the object table. Skid 0 is the
+# seeded human/entity skeleton; skid 1 is the seeded void room skeleton, whose
+# creation path reads the numeric `v` argument as a `struct bio *` and faults
+# on zero (measured: the pre-guard form segfaulted the S7 daemon here).
+# Modules may add further skeletons at boot, so the absent case uses UINT_MAX,
+# which cannot be allocated in this store.
+w7run 7 "$w7_owner_txt" "create badroom 1"
+w7wait 7 "$w7_owner_txt" "Rooms are made with" || { echo "FAIL: S7 room skeleton was not rejected safely (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$w7_pid" 2>/dev/null \
+	|| { echo "FAIL: S7 room skeleton killed the daemon" >&2; exit 1; }
+w7run 7 "$w7_owner_txt" "create noskel 4294967295"
+w7wait 7 "$w7_owner_txt" "don't know what you mean" || { echo "FAIL: S7 absent skeleton was not rejected safely (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$w7_pid" 2>/dev/null \
+	|| { echo "FAIL: S7 absent skeleton killed the daemon" >&2; exit 1; }
+
+# --- 2. `clone`: guest refused, owner may clone their own ---------------------
+# The guest cannot resolve the owner's inventory by name, so the negative half
+# uses the object's absolute ref: `#<ref>` resolves globally and leaves only
+# the region gate to answer.
+w7run 7 "$w7_owner_txt" "owned"
+w7wait 7 "$w7_owner_txt" "objects found" || { echo "FAIL: S7 owner re-listing never answered (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7tokens "$w7_owner_txt" > "$w7db/after.txt"
+w7_pebble_ref=$(comm -13 "$w7db/before.txt" "$w7db/after.txt" | sed 's/(#//;s/)//' | head -1)
+[ -n "$w7_pebble_ref" ] || { echo "FAIL: S7 create left no new object" >&2; exit 1; }
+[ "$(comm -13 "$w7db/before.txt" "$w7db/after.txt" | wc -l)" = "1" ] \
+	|| { echo "FAIL: S7 create left more than one new object" >&2; exit 1; }
+w7run 8 "$w7_guest_txt" "clone #$w7_pebble_ref"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest clone did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest clone"
+
+# `clone` answers with silence on success, so the owner's listing proves it:
+# exactly one new `(#N)` token must appear after the clone.
+w7cmd 7 "$w7_owner_txt" "clone #$w7_pebble_ref"
+w7run 7 "$w7_owner_txt" "owned"
+w7wait 7 "$w7_owner_txt" "objects found" || { echo "FAIL: S7 owner post-clone listing never answered (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7tokens "$w7_owner_txt" > "$w7db/cloned.txt"
+[ "$(comm -13 "$w7db/after.txt" "$w7db/cloned.txt" | wc -l)" = "1" ] \
+	|| { echo "FAIL: S7 owner clone left no new object (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 3. `chown` negative half + the room the rest of S7 needs ------------------
+w7run 8 "$w7_guest_txt" "chown #$w7_pebble_ref me"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest chown did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest chown"
+
+# The owner carves a world room (`room` creates-or-finds AND enters) whose ref
+# the teleport and chown proofs below both need. It is still ROOT-owned here;
+# the ownership transfer to the guest comes AFTER the teleport proof, because
+# §6.1 case 3 refuses region authority over a player-owned non-entity -- once
+# the guest owns this room, not even the cosmos ruler may teleport anyone
+# INTO it. That ordering is load-bearing, not incidental.
+w7run 7 "$w7_owner_txt" "room 0 0 0 1"
+w7wait 7 "$w7_owner_txt" " at 0 0 0 1" || { echo "FAIL: S7 owner could not carve a room (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_room_ref=$(w7clean "$w7_owner_txt" | sed -n 's/^room \([0-9][0-9]*\) at .*/\1/p' | head -1)
+[ -n "$w7_room_ref" ] || { echo "FAIL: S7 no carved room ref (tail: $(w7clean "$w7_owner_txt" | head -5))" >&2; exit 1; }
+w7run 8 "$w7_guest_txt" "owned"
+w7wait 8 "$w7_guest_txt" "objects found" || { echo "FAIL: S7 guest listing never answered (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7clean "$w7_guest_txt" | grep -qaF "(#$w7_room_ref)" \
+	|| { echo "FAIL: S7 carved room not listed before chown" >&2; exit 1; }
+
+# --- 4. §6.1 eng_controls: the guest cannot move the owner -------------------
+# The victim is an entity owned by somebody else, so the gate falls through to
+# st_can_region(who, region_of(victim)). The owner is in the carved world room
+# and the guest is in the void; the owner rules both regions through the
+# cosmos and the guest rules neither. S6 already proved the owner's half
+# (owner teleports the guest); this is the negative half, and it must refuse
+# WITHOUT killing the daemon.
+w7run 8 "$w7_guest_txt" "teleport #$w7_owner_ref here"
+w7wait 8 "$w7_guest_txt" "can't do that" \
+	|| { echo "FAIL: S7 guest teleport did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$w7_pid" 2>/dev/null \
+	|| { echo "FAIL: S7 guest teleport killed the daemon" >&2; exit 1; }
+
+# The owner still CAN move the guest into the still-ROOT-owned room -- a gate
+# that refuses everyone would pass the negative half alone.
+w7run 7 "$w7_owner_txt" "teleport #$w7_guest_ref here"
+w7wait 8 "$w7_guest_txt" "wrenching" \
+	|| { echo "FAIL: S7 owner lost the ability to teleport the guest (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 5. `chown` positive half: the owner CAN move the room to the guest ------
+# The pebble is an entity and entities cannot change hands (the old
+# entity-vs-object rule), so this transfers the carved room instead. Ownership
+# is observed through `owned`, whose rows are filtered by the victim's owner
+# field: before the transfer the room is ROOT-owned and listed, after it the
+# room belongs to the guest ref and drops out of the guest's own listing.
+# `chown` answers with silence on success, so the owner's `status` sequences
+# it: a status answer proves the chown was processed before the guest re-lists.
+: > "$w7_owner_txt"
+w7cmd 7 "$w7_owner_txt" "chown #$w7_room_ref $w7_guest"
+w7cmd 7 "$w7_owner_txt" "status"
+w7wait 7 "$w7_owner_txt" ") type " || { echo "FAIL: S7 owner status never answered after chown (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7run 8 "$w7_guest_txt" "owned"
+w7wait 8 "$w7_guest_txt" "objects found" || { echo "FAIL: S7 guest re-listing never answered (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7clean "$w7_guest_txt" | grep -qaF "(#$w7_room_ref)" \
+	&& { echo "FAIL: S7 owner chown did not move the room" >&2; exit 1; }
+
+# --- 6. `owned <name>`: the silent fall-through is gone ------------------------
+# do_owned used to print the CALLER'S OWN list plus "N objects found" when a
+# non-ruler passed a name -- misleading, not a refusal, so this asserts the
+# named refusal and not merely "something was printed".
+w7run 8 "$w7_guest_txt" "owned $user"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest owned did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest owned"
+w7clean "$w7_guest_txt" | grep -qaF "objects found" \
+	&& { echo "FAIL: S7 guest 'owned \$user' still fell through to a listing" >&2; exit 1; }
+
+# The no-arg form is unchanged: it is the caller's own inventory and has no
+# region to authorize against. Proved for both sides so the gate cannot be
+# "fixing" the refusal by breaking self-inspection.
+w7run 8 "$w7_guest_txt" "owned"
+w7wait 8 "$w7_guest_txt" "objects found" || { echo "FAIL: S7 guest lost no-arg owned (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 7. `wall`: selector + delivery ------------------------------------------
+# `wall cosmos <msg>` names the cosmos explicitly, so only its ruler passes the
+# authority check. The guest rules nothing, including the cosmos, and is
+# therefore refused; a cosmos selection is not a way to smuggle "everywhere"
+# past the gate.
+#
+# CMD_REGION.md §5: the selector dialect is one bare world number or the
+# `cosmos` keyword, shared with modlist/ban/deny. The old `all` keyword is gone,
+# so this leg moved with it -- the intent is unchanged, only the spelling is.
+w7run 8 "$w7_guest_txt" "wall cosmos hello 3"
+w7wait 8 "$w7_guest_txt" "Permission denied" || { echo "FAIL: S7 guest wall did not answer (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7_refused 8 "$w7_guest_txt" "guest wall"
+
+# The owner's wall must reach the GUEST and say so with the speaker's name.
+# `wall cosmos hello 3` has to stay ONE message: the message is built from the
+# words after the selector, so a bare "3" must not be swallowed as a world
+# number. (The guest is in the carved room by now, but the delivery proof uses
+# `cosmos` anyway: it is the selector with the widest authority demand.)
+w7run 7 "$w7_owner_txt" "wall cosmos hello 3"
+w7wait 8 "$w7_guest_txt" "shouts:  hello 3" \
+	|| { echo "FAIL: S7 owner wall did not reach the guest (tail: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+w7clean "$w7_guest_txt" | grep -qaF "$user shouts:" \
+	|| { echo "FAIL: S7 wall did not name the speaker" >&2; exit 1; }
+
+# --- 8. §6.2 eng_look_at: the owner may look inside the guest ----------------
+# Reached with `look #<ref>`, NOT a name: do_look_at's ematch chain has no
+# eng_ematch_player, so a bare name silently falls back to the caller and the
+# assertion would be testing the wrong object entirely.
+w7run 7 "$w7_owner_txt" "look #$w7_guest_ref"
+w7wait 7 "$w7_owner_txt" "Contents:" \
+	|| { echo "FAIL: S7 owner could not look inside the guest (tail: $(w7clean "$w7_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# The guest may NOT look inside the owner. Before the grant this was
+# unconditionally true for EVERYONE, so there was no positive half anywhere;
+# the owner's look above is the grant and this is the boundary.
+w7run 8 "$w7_guest_txt" "look #$w7_owner_ref"
+w7wait 8 "$w7_guest_txt" "Contents:" \
+	&& { echo "FAIL: S7 guest looked inside the owner: $(w7clean "$w7_guest_txt" | tr '\n' '|' | tail -c 200)" >&2; exit 1; }
+# Silence is not proof, so the guest must be asked something that always
+# answers and the daemon must still be there.
+w7run 8 "$w7_guest_txt" "status"
+w7wait 8 "$w7_guest_txt" ") type " \
+	|| { echo "FAIL: S7 guest died after the guarded look" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $w7_pid
+rm -rf "$w7db"
+
+# ---------------------------------------------------------------------------
+# --- S8: region bans (NO_WIZ.md §7) -------------------------------------------
+# ---------------------------------------------------------------------------
+# Ban is a per-region exclusion row, not a global bit: (player, id, plen) in a
+# separate persisted `ban` table, enforced at every eng_enter() arrival. The
+# owner half is RED (today `ban` is an unconditional CANTDO and `teleport`
+# ignores bans entirely); the world-2 leak check is the boundary that a
+# global-ban implementation would fail.
+#
+# Same two-socket, per-fd-transcript discipline as S7. Refs are re-parsed after
+# the reboot: row keys persist, but nothing here hardcodes one.
+b8=$((20000 + RANDOM % 8000))
+b8db=$(mktemp -d)
+b8la="$b8db/a.log"
+b8_owner_txt="$b8db/owner.txt"
+b8_guest_txt="$b8db/guest.txt"
+: > "$b8_owner_txt"
+: > "$b8_guest_txt"
+
+AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
+b8_pid=$!
+wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot did not init" >&2; exit 1; }
+
+b8cmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+b8wait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+b8clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+b8run() { : > "$2"; b8cmd "$1" "$2" "$3"; }
+
+exec 7<>/dev/tcp/127.0.0.1/$b8
+b8cmd 7 "$b8_owner_txt" "connect $user"
+b8wait 7 "$b8_owner_txt" "Password:" \
+	|| { echo "FAIL: S8 owner no password prompt" >&2; exit 1; }
+b8cmd 7 "$b8_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b8
+b8cmd 8 "$b8_guest_txt" "connect $b8_guest"
+b8wait 8 "$b8_guest_txt" "Password:" \
+	|| { echo "FAIL: S8 guest no password prompt" >&2; exit 1; }
+b8cmd 8 "$b8_guest_txt" "$guestpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b8_guest'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 guest login not seen" >&2; exit 1; }
+
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 guest status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8_guest_ref=$(b8clean "$b8_guest_txt" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1)
+[ -n "$b8_guest_ref" ] || { echo "FAIL: S8 no guest ref" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "room 0 0 0 1"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S8 owner could not carve world 1 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 1. `ban <guest> 1`: banned from world 1, and told so ----------------------
+b8run 7 "$b8_owner_txt" "ban $b8_guest 1"
+b8wait 7 "$b8_owner_txt" "Banned $b8_guest from world 1" \
+	|| { echo "FAIL: S8 ban did not confirm (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 2. the ban bites on arrival, naming the region --------------------------
+# The owner CAN move the guest (controls passes) but eng_enter refuses the
+# arrival: the guest must stay where they are, told why, daemon alive.
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 guest pre-ban status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8_guest_at=$(b8clean "$b8_guest_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "banned from world 1" \
+	|| { echo "FAIL: S8 banned arrival was not refused (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$b8_pid" 2>/dev/null \
+	|| { echo "FAIL: S8 banned teleport killed the daemon" >&2; exit 1; }
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 guest post-ban status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+[ "$(b8clean "$b8_guest_txt" | sed -n 's/.* at \([0-9][0-9]*\).*/\1/p' | head -1)" = "$b8_guest_at" ] \
+	|| { echo "FAIL: S8 banned guest moved despite the ban" >&2; exit 1; }
+
+# --- 3. the ban does not leak sideways: world 2 is still open -----------------
+b8run 7 "$b8_owner_txt" "room 0 0 0 2"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S8 owner could not carve world 2 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "wrenching" \
+	|| { echo "FAIL: S8 world-2 teleport refused (the ban leaked sideways) (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 4. `unban` restores: world 1 opens again ----------------------------------
+b8run 7 "$b8_owner_txt" "room 0 0 0 1"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S8 owner could not return to world 1 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "unban $b8_guest 1"
+b8wait 7 "$b8_owner_txt" "Unbanned $b8_guest from world 1" \
+	|| { echo "FAIL: S8 unban did not confirm (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "wrenching" \
+	|| { echo "FAIL: S8 post-unban teleport refused (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 5. the ban survives a reboot ----------------------------------------------
+b8run 7 "$b8_owner_txt" "ban $b8_guest 1"
+b8wait 7 "$b8_owner_txt" "Banned $b8_guest from world 1" \
+	|| { echo "FAIL: S8 re-ban did not confirm (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8cmd 7 "$b8_owner_txt" "save"
+sleep 0.3
+exec 7<&-
+exec 8<&-
+killaxil $b8_pid
+b8sz=$(stat -c %s "$b8db/w.db" 2>/dev/null || echo 0)
+[ "${b8sz:-0}" -gt 0 ] || { echo "FAIL: S8 store empty before reboot" >&2; exit 1; }
+AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
+b8_pid=$!
+wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot B did not init" >&2; exit 1; }
+# Fresh transcripts: a boot A "Password:" left in the file would satisfy the
+# wait below without the new socket having been answered at all.
+: > "$b8_owner_txt"
+: > "$b8_guest_txt"
+exec 7<>/dev/tcp/127.0.0.1/$b8
+b8cmd 7 "$b8_owner_txt" "connect $user"
+b8wait 7 "$b8_owner_txt" "Password:" \
+	|| { echo "FAIL: S8 boot B owner no password prompt" >&2; exit 1; }
+b8cmd 7 "$b8_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 boot B owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b8
+b8cmd 8 "$b8_guest_txt" "connect $b8_guest"
+b8wait 8 "$b8_guest_txt" "Password:" \
+	|| { echo "FAIL: S8 boot B guest no password prompt" >&2; exit 1; }
+b8cmd 8 "$b8_guest_txt" "$guestpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b8_guest'" "$b8la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S8 boot B guest login not seen" >&2; exit 1; }
+# Refs persist (row keys), but re-parse anyway: nothing here is hardcoded.
+b8run 8 "$b8_guest_txt" "status"
+b8wait 8 "$b8_guest_txt" ") type " \
+	|| { echo "FAIL: S8 boot B guest status (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8_guest_ref=$(b8clean "$b8_guest_txt" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1)
+[ -n "$b8_guest_ref" ] || { echo "FAIL: S8 boot B no guest ref" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "room 0 0 0 1"
+b8wait 7 "$b8_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S8 boot B owner could not enter world 1 (tail: $(b8clean "$b8_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "banned from world 1" \
+	|| { echo "FAIL: S8 ban did not survive the reboot (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+kill -0 "$b8_pid" 2>/dev/null \
+	|| { echo "FAIL: S8 post-reboot teleport killed the daemon" >&2; exit 1; }
+
+# --- 6. `unban` needs authority too: the guest cannot lift their own ban ------
+b8run 8 "$b8_guest_txt" "unban $b8_guest 1"
+b8wait 8 "$b8_guest_txt" "Permission denied" \
+	|| { echo "FAIL: S8 guest unban did not answer (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b8run 7 "$b8_owner_txt" "teleport #$b8_guest_ref here"
+b8wait 8 "$b8_guest_txt" "banned from world 1" \
+	|| { echo "FAIL: S8 guest unban lifted the ban (tail: $(b8clean "$b8_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $b8_pid
+rm -rf "$b8db"
+
+# ---------------------------------------------------------------------------
+# --- S9: default target region + one selector dialect (CMD_REGION.md) --------
+# ---------------------------------------------------------------------------
+# Seven commands can name a region -- wall, ban, unban, loadmod, unloadmod,
+# modlist, deny. Before this section six shared st_cmd_region() and `wall` had a
+# private `all`/`world <n>` dialect, so with no argument `wall` bypassed the
+# shared parser entirely (speech.c's direct st_region_of_player). Once a player
+# can choose a default region, two commands meaning the same thing would resolve
+# differently -- and `wall` would be the one ignoring the setting.
+#
+# The fix: one dialect (bare world number or `cosmos`) at a fixed argv position,
+# one default resolution (explicit -> default target -> position), and the
+# default stored in ENT as (target_id, target_plen).
+#
+# Same two-socket, per-fd-transcript discipline as S7/S8. Four legs are ABSENCE
+# assertions, so every one of them uses a freshly wiped transcript (b9run) --
+# PLANET_TXT-style cumulative files make an absence check meaningless.
+b9=$((20000 + RANDOM % 8000))
+b9db=$(mktemp -d)
+b9la="$b9db/a.log"
+b9_owner_txt="$b9db/owner.txt"
+b9_guest_txt="$b9db/guest.txt"
+: > "$b9_owner_txt"
+: > "$b9_guest_txt"
+
+AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m ./lib/axil-nd >"$b9la" 2>&1 &
+b9_pid=$!
+wait_up "$b9la" "$b9" || { echo "FAIL: S9 boot did not init" >&2; exit 1; }
+
+b9cmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+b9wait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1))
+	done
+	return 1
+}
+b9clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+# One command per socket, transcript wiped first, so the file provably holds
+# only this command's output and an absence assertion means something.
+b9run() { : > "$2"; b9cmd "$1" "$2" "$3"; }
+b9ref() { b9clean "$1" | sed -n 's/^.*(\([0-9][0-9]*\)) type .*/\1/p' | head -1; }
+# Silence is not proof (NO_WIZ.md §13.3): an absence assertion is only credible
+# if the daemon is still there to have answered. Both sides get a liveness probe
+# that always produces output.
+b9alive() {
+	kill -0 "$b9_pid" 2>/dev/null \
+		|| { echo "FAIL: S9 daemon died ($1)" >&2; exit 1; }
+}
+b9refused() {
+	local fd=$1 file=$2 label=$3
+	grep -qaF "Permission denied" "$file" && return 0
+	echo "FAIL: $label: expected a refusal; got: $(b9clean "$file" | tr '\n' '|' | tail -c 200)" >&2
+	exit 1
+}
+
+exec 7<>/dev/tcp/127.0.0.1/$b9
+b9cmd 7 "$b9_owner_txt" "connect $user"
+b9wait 7 "$b9_owner_txt" "Password:" \
+	|| { echo "FAIL: S9 owner no password prompt" >&2; exit 1; }
+b9cmd 7 "$b9_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b9
+b9cmd 8 "$b9_guest_txt" "connect $b9_guest"
+b9wait 8 "$b9_guest_txt" "Password:" \
+	|| { echo "FAIL: S9 guest no password prompt" >&2; exit 1; }
+b9cmd 8 "$b9_guest_txt" "$guestpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b9_guest'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 guest login not seen" >&2; exit 1; }
+
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 guest status (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9_guest_ref=$(b9ref "$b9_guest_txt")
+[ -n "$b9_guest_ref" ] || { echo "FAIL: S9 no guest ref" >&2; exit 1; }
+
+# A real, CLAIMED region in each world, and a real room in it.
+#
+# `room 0 0 0 N` on its own is NOT enough, and this cost a full probe cycle to
+# find: do_room never calls xy_claim_at, so carving a room at world N leaves the
+# world-N REGION absent and xy_region_at falls back to the root. Every player
+# then reads as (0,0) -- the cosmos -- no matter which world they stand in, and
+# a wall to world 1, a wall to world 2 and a wall to the cosmos become
+# indistinguishable. Only `planet N` claims the region (xy_claim_at at
+# spacetime.c:2112). Measured: without the claims, `here` printed
+# "id=0x0000000000000000 plen=0" for both players after every move.
+#
+# The owner rules the cosmos, so claiming these worlds is permitted. World 5 is
+# deliberately NOT claimed: leg 6 uses "a selected region with no row" as its
+# discriminator, and it cannot do that if the world exists.
+b9run 7 "$b9_owner_txt" "planet 1"
+b9wait 7 "$b9_owner_txt" "planet 1 established" \
+	|| { echo "FAIL: S9 could not claim world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "planet 2"
+b9wait 7 "$b9_owner_txt" "planet 2 established" \
+	|| { echo "FAIL: S9 could not claim world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "planet 3"
+b9wait 7 "$b9_owner_txt" "planet 3 established" \
+	|| { echo "FAIL: S9 could not claim world 3 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "planet 4"
+b9wait 7 "$b9_owner_txt" "planet 4 established" \
+	|| { echo "FAIL: S9 could not claim world 4 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And a real room in each: an unmapped position resolves to the void, which is
+# the cosmos -- so "here" would prove nothing (NO_WIZ.md §14.4).
+b9run 7 "$b9_owner_txt" "room 0 0 0 1"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S9 owner could not carve world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not carve world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Park the guest in world 2. Every later leg moves them, and each move is
+# verified, so no leg can pass by accident on the wrong starting position.
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 could not place the guest in world 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Both sides must now read as world 2, not the cosmos. `here` prints the region
+# row header; this is the assertion that makes every leg below meaningful.
+b9run 7 "$b9_owner_txt" "here"
+b9wait 7 "$b9_owner_txt" "plen=16" \
+	|| { echo "FAIL: S9 owner is not in a world region (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 8 "$b9_guest_txt" "here"
+b9wait 8 "$b9_guest_txt" "plen=16" \
+	|| { echo "FAIL: S9 guest is not in a world region (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 1. RED: the default beats the position ----------------------------------
+# The owner sets default = world 1 while standing in world 2, and the guest is
+# moved to world 1. A bare `wall` must then reach the guest in the DEFAULT
+# region and not the position. Before the change `wall` was position-derived, so
+# it would go the other way -- this leg is the compatibility guarantee for
+# players who never run `target` AND the proof that the default is honoured.
+b9run 7 "$b9_owner_txt" "target 1"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 1" \
+	|| { echo "FAIL: S9 target 1 did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "Default target region: world 1" \
+	|| { echo "FAIL: S9 target did not report the default (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Move the guest to world 1, then put the owner back in world 2. The default
+# stays world 1 throughout, so the two sides are now genuinely different.
+b9run 7 "$b9_owner_txt" "room 0 0 0 1"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S9 owner could not return to world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 could not move the guest to world 1 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not go to world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 8 "$b9_guest_txt" "here"
+b9wait 8 "$b9_guest_txt" "plen=16" \
+	|| { echo "FAIL: S9 guest left the world-region tree (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall defaulted to the target"
+b9alive "leg 1 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  defaulted to the target" \
+	|| { echo "FAIL: S9 bare wall did not reach the guest in the DEFAULT region (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 2. an explicit selector beats the default -------------------------------
+# With default = world 1, `wall 2 <msg>` must go to world 2. The guest is in
+# world 1, so the absence of the message in their transcript is the proof that
+# the explicit argument won.
+b9run 7 "$b9_owner_txt" "wall 2 explicit beats default"
+b9alive "leg 2 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 guest status after leg 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "explicit beats default" \
+	&& { echo "FAIL: S9 explicit 'wall 2' reached the guest in world 1 (default won over the explicit selector)" >&2; exit 1; }
+b9alive "leg 2 absence"
+
+# --- 3. `target none` restores position-derived behaviour ---------------------
+# This is the compatibility leg: after clearing, a bare `wall` follows the owner
+# instead of the old default. It is also what proves leg 1 was the DEFAULT being
+# honoured and not simply "world 1 is where the guest happened to be".
+b9run 7 "$b9_owner_txt" "target none"
+b9wait 7 "$b9_owner_txt" "Default target region cleared" \
+	|| { echo "FAIL: S9 target none did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "No default target region set" \
+	|| { echo "FAIL: S9 bare target did not report the cleared default (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Positive half: join the guest in world 1. Without a default the command follows
+# the owner's feet, so a position-derived wall reaches the co-located guest.
+b9run 7 "$b9_owner_txt" "room 0 0 0 1"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 1" \
+	|| { echo "FAIL: S9 owner could not join world 1 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall back to the position"
+b9alive "leg 3 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  back to the position" \
+	|| { echo "FAIL: S9 cleared default did not fall back to the owner's position (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Absence half: leave the guest in world 1, stand in world 2. The same cleared
+# state must now NOT reach them -- which is also the proof that leg 1's delivery
+# was the default, not the position (the positions here are the same as leg 1's).
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not return to world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall position only"
+b9alive "leg 3 absence wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 guest status after leg 3 absence (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "position only" \
+	&& { echo "FAIL: S9 position-derived wall from world 2 reached the guest in world 1" >&2; exit 1; }
+b9alive "leg 3 absence"
+
+# --- 4. `target here` stores your CURRENT region, without naming it ------------
+# Not a number, not a second dialect: whatever st_region_of_player() resolves.
+# That is the deepest CLAIMED region -- a world here, the cosmos from the void --
+# not a cell. Only worlds are claimed (via `planet`), and recipients resolve to
+# world granularity, so a raw cell selector would cover nobody; storing one would
+# make `target here` a default that refuses everything it touches.
+# The owner is in world 2 (leg 3's absence half left them there).
+b9run 7 "$b9_owner_txt" "target here"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 2" \
+	|| { echo "FAIL: S9 target here did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "Default target region: world 2" \
+	|| { echo "FAIL: S9 target did not report the here-stored default (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# `here` prints the region row header, so the stored width IS assertable -- and
+# what it asserts is that this is a WORLD default, not the cell CMD_REGION.md
+# §6.1 promised. That promise does not survive st_region_of_player(): the
+# deepest claimed region is what you get, and only worlds are claimed.
+b9run 7 "$b9_owner_txt" "here"
+b9wait 7 "$b9_owner_txt" "plen=16" \
+	|| { echo "FAIL: S9 the owner is not in a world-sized region (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And it must ACT: the guest is in world 1, the owner's here-stored default is
+# world 2. Move the guest in and bare-wall.
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 could not bring the guest to world 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall here means here"
+b9alive "leg 4 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  here means here" \
+	|| { echo "FAIL: S9 here-stored default did not reach the guest (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 5. a default grants nothing ---------------------------------------------
+# The guest rules no region, so `target 2` must be refused at SET time, naming
+# the ruler. This is the point of validating in `target` rather than at use
+# time: a default the player cannot use is a setting that looks like it works
+# and then refuses every command.
+b9run 8 "$b9_guest_txt" "target 2"
+b9alive "leg 5 target"
+b9refused 8 "$b9_guest_txt" "guest target 2"
+# And the guest's own bare wall is still refused, i.e. the failed `target` left
+# nothing behind that could be used.
+b9run 8 "$b9_guest_txt" "wall guest should be refused"
+b9alive "leg 5 wall"
+b9refused 8 "$b9_guest_txt" "guest wall"
+
+# --- 6. the change reached the SHARED parser, not just do_wall ---------------
+# `modlist` shares st_cmd_region() with wall but not do_wall's argv handling. If
+# only do_wall had changed, a bare modlist would still be position-derived while
+# a bare wall honoured the default -- which is the exact drift this section
+# exists to prevent.
+#
+# The discriminator is modlist's OUTPUT, not a refusal. modlist is the only one
+# of the seven commands with no st_can_region gate at all (measured: do_wall,
+# do_ban, do_unban, do_loadmod, do_unloadmod and do_deny each have one;
+# do_modlist has none), so a refusal cannot be used -- the owner rules every
+# world it claimed and would be allowed either way. What differs is whether the
+# selected region HAS a row: world 5 is deliberately left unclaimed, so a
+# default naming world 5 answers "No such region" and a position-derived
+# selection in world 2 prints the row.
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 owner could not enter world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "modlist"
+b9alive "leg 6 modlist baseline"
+b9clean "$b9_owner_txt" | grep -qaF "No such region" \
+	&& { echo "FAIL: S9 world 2 should have a region row (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Default = the unclaimed world 5. Bare modlist must consult it.
+b9run 7 "$b9_owner_txt" "target 5"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 5" \
+	|| { echo "FAIL: S9 target 5 did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "modlist"
+b9alive "leg 6 modlist with default"
+b9clean "$b9_owner_txt" | grep -qaF "No such region" \
+	|| { echo "FAIL: S9 bare modlist used the owner's POSITION, not the default target (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Default cleared: the same command at the same position must now answer from
+# the position. The pair is the whole proof -- position alone would print the row
+# both times, and a default-only implementation would print neither.
+b9run 7 "$b9_owner_txt" "target none"
+b9wait 7 "$b9_owner_txt" "Default target region cleared" \
+	|| { echo "FAIL: S9 leg 6 clear did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "modlist"
+b9alive "leg 6 modlist position"
+b9clean "$b9_owner_txt" | grep -qaF "No such region" \
+	&& { echo "FAIL: S9 bare modlist did not fall back to the position (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And `deny` -- which shares the same st_cmd_region and IS gated -- must refuse
+# when the default names a region the caller cannot rule. This is the same
+# shared-parser path with an authority check on top.
+b9run 8 "$b9_guest_txt" "target 5"
+b9alive "leg 6 guest target"
+b9refused 8 "$b9_guest_txt" "guest target 5"
+
+# --- 7. `cosmos` is a keyword: (0,0) is NOT `world 0` ------------------------
+# st_planet_id(0) is (0<<48, 16) = (0, 16), the FIRST CHILD of the cosmos, a real
+# region id with no row and nothing under it. The cosmos is (0, 0) and covers
+# everything. So from an owner in world 4 to a guest in world 2, `wall 0` must
+# reach NOTHING (permitted -- the owner rules the cosmos -- but covering no
+# listener) while `wall cosmos` reaches the guest. Nothing else in the suite
+# distinguishes (0,0) from (0,16), which is why this leg gets its own treatment:
+# an implementation that collapsed them would pass every other leg.
+#
+# No void is needed and none is used: a reconnect restores the saved position,
+# so there is no path back to the unmapped start-room. The discriminator is
+# coverage, not the void.
+b9run 7 "$b9_owner_txt" "target none"
+b9wait 7 "$b9_owner_txt" "Default target region cleared" \
+	|| { echo "FAIL: S9 leg 7 clear did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Guest in world 2, owner in world 4. Both verified, so the coverage assertions
+# below cannot pass on the wrong positions.
+b9run 7 "$b9_owner_txt" "room 0 0 0 4"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 4" \
+	|| { echo "FAIL: S9 owner could not enter world 4 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "here"
+b9wait 7 "$b9_owner_txt" "plen=16" \
+	|| { echo "FAIL: S9 owner is not in a world region for leg 7 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 8 "$b9_guest_txt" "here"
+b9wait 8 "$b9_guest_txt" "plen=16" \
+	|| { echo "FAIL: S9 guest is not in a world region for leg 7 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# `wall 0` names (0,16): allowed, but the guest in world 2 is not under it.
+b9run 7 "$b9_owner_txt" "wall 0 world zero is not the cosmos"
+b9alive "leg 7 wall 0"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 leg 7 guest status after 'wall 0' (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "world zero is not the cosmos" \
+	&& { echo "FAIL: S9 'wall 0' reached world 2: (0,16) and (0,0) are not the same region" >&2; exit 1; }
+b9alive "leg 7 wall 0 absence"
+# `wall cosmos` names (0,0) and must reach the guest.
+b9run 7 "$b9_owner_txt" "wall cosmos the cosmos is reached"
+b9alive "leg 7 wall cosmos"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  the cosmos is reached" \
+	|| { echo "FAIL: S9 'wall cosmos' did not reach the guest (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# Control: the guest is not deaf. A world-2 selector reaches them from world 4,
+# so the `wall 0` silence above is the SELECTOR, not the listener.
+b9run 7 "$b9_owner_txt" "wall 2 the guest can hear"
+b9alive "leg 7 wall 2"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  the guest can hear" \
+	|| { echo "FAIL: S9 control wall did not reach the guest (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 8. the default survives a reboot ----------------------------------------
+# Persistence needs a reboot test, NOT save-then-read: libcorm saves every
+# file-backed map from a destructor at process exit and used to recompute the
+# store size from what was still in its cache, rewriting the file smaller
+# (NO_WIZ.md §7.1). No in-process assertion could see that.
+b9run 7 "$b9_owner_txt" "target 2"
+b9wait 7 "$b9_owner_txt" "Default target region set to world 2" \
+	|| { echo "FAIL: S9 pre-reboot target 2 did not confirm (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9cmd 7 "$b9_owner_txt" "save"
+sleep 0.3
+exec 7<&-
+exec 8<&-
+killaxil $b9_pid
+b9sz=$(stat -c %s "$b9db/w.db" 2>/dev/null || echo 0)
+[ "${b9sz:-0}" -gt 0 ] || { echo "FAIL: S9 store empty before reboot" >&2; exit 1; }
+AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m ./lib/axil-nd >"$b9la" 2>&1 &
+b9_pid=$!
+wait_up "$b9la" "$b9" || { echo "FAIL: S9 boot B did not init" >&2; exit 1; }
+exec 7<>/dev/tcp/127.0.0.1/$b9
+b9_owner_txt="$b9db/owner2.txt"
+b9_guest_txt="$b9db/guest3.txt"
+: > "$b9_owner_txt"
+: > "$b9_guest_txt"
+b9cmd 7 "$b9_owner_txt" "connect $user"
+b9wait 7 "$b9_owner_txt" "Password:" \
+	|| { echo "FAIL: S9 boot B owner no password prompt" >&2; exit 1; }
+b9cmd 7 "$b9_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 boot B owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$b9
+b9cmd 8 "$b9_guest_txt" "connect $b9_guest"
+b9wait 8 "$b9_guest_txt" "Password:" \
+	|| { echo "FAIL: S9 boot B guest no password prompt" >&2; exit 1; }
+b9cmd 8 "$b9_guest_txt" "$guestpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$b9_guest'" "$b9la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S9 boot B guest login not seen" >&2; exit 1; }
+# Refs persist (row keys) but re-parse anyway: nothing here is hardcoded.
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" ") type " \
+	|| { echo "FAIL: S9 boot B guest status (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9_guest_ref=$(b9ref "$b9_guest_txt")
+[ -n "$b9_guest_ref" ] || { echo "FAIL: S9 boot B no guest ref" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "target"
+b9wait 7 "$b9_owner_txt" "Default target region: world 2" \
+	|| { echo "FAIL: S9 default target did not survive the reboot (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# And it must still be ACTUALLY used, not just reported: the world-2 room already
+# exists from boot A, so both sides can be placed without carving.
+b9run 7 "$b9_owner_txt" "room 0 0 0 2"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 2" \
+	|| { echo "FAIL: S9 boot B owner could not enter world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "teleport #$b9_guest_ref here"
+b9wait 8 "$b9_guest_txt" "wrenching" \
+	|| { echo "FAIL: S9 boot B could not place the guest in world 2 (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "room 0 0 0 4"
+b9wait 7 "$b9_owner_txt" " at 0 0 0 4" \
+	|| { echo "FAIL: S9 boot B owner could not leave world 2 (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9run 7 "$b9_owner_txt" "wall survived the reboot"
+b9alive "leg 8 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  survived the reboot" \
+	|| { echo "FAIL: S9 post-reboot default did not act on the target region (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+
+# --- 9. the `wall` message boundary ------------------------------------------
+# `wall` is the only one of the seven whose first argument is also its first
+# word. `wall 3` ALONE is therefore the message "3", not a usage error and not
+# a selector -- which is exactly what `argc > 2` (not `argc > 1`) buys. The
+# guest is in world 2 and the owner has default = world 2, so a bare-ish wall
+# reaches them either way; what is asserted is the MESSAGE, not the destination.
+b9run 7 "$b9_owner_txt" "wall 3"
+b9alive "leg 9 wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  3" \
+	|| { echo "FAIL: S9 'wall 3' was not delivered as the message \"3\" (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "Usage: wall" \
+	&& { echo "FAIL: S9 'wall 3' became a usage error" >&2; exit 1; }
+# And a bare `wall` with no message at all IS still a usage error, so the
+# boundary is not simply "wall never complains".
+b9run 7 "$b9_owner_txt" "wall"
+b9alive "leg 9 bare wall"
+b9wait 7 "$b9_owner_txt" "Usage: wall" \
+	|| { echo "FAIL: S9 bare 'wall' lost its usage error (tail: $(b9clean "$b9_owner_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+# A leading number WITH a message is a selector: the message must not contain
+# the number, and the guest in world 2 must not receive a world-2 selector that
+# they would in fact receive -- so this checks the message text instead.
+b9run 7 "$b9_owner_txt" "wall 2 selector then message"
+b9alive "leg 9 selector wall"
+b9run 8 "$b9_guest_txt" "status"
+b9wait 8 "$b9_guest_txt" "shouts:  selector then message" \
+	|| { echo "FAIL: S9 'wall 2 <msg>' mangled the message (tail: $(b9clean "$b9_guest_txt" | tr '\n' '|' | tail -c 200))" >&2; exit 1; }
+b9clean "$b9_guest_txt" | grep -qaF "shouts:  2 selector" \
+	&& { echo "FAIL: S9 the selector was swallowed into the message" >&2; exit 1; }
+
+exec 7<&-
+exec 8<&-
+killaxil $b9_pid
+rm -rf "$b9db"
 
 echo "axil-nd ok"

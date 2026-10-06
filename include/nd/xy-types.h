@@ -99,10 +99,13 @@ typedef struct {
 	unsigned char floor;
 } ROO;
 
+/* Mirrors uapi/object.h's enum entity_flags. EF_WIZARD (8) is gone there and
+ * must stay gone here: modules compile against this copy, so a module still
+ * naming EF_WIZARD would be testing a flag nothing sets. ST.md §27.6(1).
+ * EF_BAN (16) is gone for the same reason: the ban table supersedes the bit
+ * (ST.md §27.6(1) §7). */
 enum entity_flags {
 	EF_SHOP = 4,
-	EF_WIZARD = 8,
-	EF_BAN = 16,
 };
 
 enum base_actions {
@@ -119,7 +122,24 @@ typedef struct entity {
 	/* tmp data? */
 	unsigned last_observed;
 	unsigned char select;
-	unsigned char aux;
+
+	/* CMD_REGION.md §3: the player's default target region, as the (id, plen)
+	 * pair every region selector already speaks. `aux` was repurposeable --
+	 * declared and never read or written anywhere -- so target_plen lands in
+	 * what was aux plus the tail padding and the whole struct grows 8 bytes,
+	 * not 16.
+	 *
+	 * target_plen == ST_SEL_UNSET (st.h) means "no default set", NOT 0: a fresh
+	 * entity is memset to zero by eng_object_add(), and (0, 0) is the cosmos,
+	 * a real region with a real owner. Reading zero as "unset" would silently
+	 * hand every new entity a whole-world default. st_target_get() translates
+	 * the sentinel at the boundary and never returns it.
+	 *
+	 * KEEP BYTE-IDENTICAL to uapi/object.h's copy: module code lays out an ENT
+	 * from THIS header (nd_api.c hands ent_get/ent_set/ent_del to modules), so
+	 * a divergence makes a module write the wrong bytes. `diff` is the gate. */
+	unsigned char target_plen;
+	uint64_t target_id;
 } ENT;
 
 typedef struct object {

@@ -96,10 +96,19 @@ parse_unsigned(const char *s)
 unsigned
 eng_ematch_absolute(char *name)
 {
-	unsigned match;
 	if (*name == NUMBER_TOKEN) {
-		match = parse_unsigned(name + 1);
-		if (match < 0 || !eng_obj_exists(match))
+		unsigned match = parse_unsigned(name + 1);
+
+		/* parse_unsigned is unsigned and already maps a bad parse to
+		 * NOTHING, so there is no `match < 0` to test here -- the old
+		 * `if (match < 0 || ...)` could never be true and every guard on
+		 * this path rested on eng_obj_exists alone. Presence is the whole
+		 * test, and it is now asked in the right direction (see
+		 * eng_obj_exists in object.c, which used to report "present" for
+		 * absent rows). An absent ref must NOT reach its callers: they
+		 * corm_get_copy it straight out of the store, and on a row that is
+		 * not there that aborts the daemon. */
+		if (!match || !eng_obj_exists(match))
 			return NOTHING;
 		else
 			return match;
@@ -159,24 +168,38 @@ eng_ematch_at(unsigned player_ref, unsigned where_ref, char *name) {
 
 	unsigned c = corm_iter(contents_hd, &where_ref, CM_RANGE);
 	const void *kp, *vp;
+
+	/* tmp_ref is only ever assigned on an ACTUAL match, and the iterator is
+	 * always finished. Both were wrong: the loop assigned tmp_ref on every
+	 * iteration and returned it unconditionally, so exhausting the scan
+	 * without a match reported "the last object in the room" as a hit --
+	 * which is how `teleport #<a real ref> here` silently moved the dolphin
+	 * instead of the player, since eng_ematch_absolute had discarded the real
+	 * ref and this scan was all that stood between the command and a bystander.
+	 * It also leaked the iterator on the exhausting path (corm_fin ran only on
+	 * the two break arms).
+	 *
+	 * where_ref is the RANGE KEY handed to corm_iter and must not be
+	 * reassigned from the iteration; `where_ref = *(const unsigned *)kp`
+	 * overwrote it with each row's key while corm_next was still walking it. */
 	while (corm_next(&kp, &vp, c)) {
-		where_ref = *(const unsigned *)kp;
-		tmp_ref = *(const unsigned *)vp;
-		if (tmp_ref == absolute_ref) {
-			corm_fin(c);
+		unsigned obj_ref = *(const unsigned *)vp;
+		if (absolute_ref != NOTHING && obj_ref == absolute_ref) {
+			tmp_ref = obj_ref;
 			break;
 		}
 
 		OBJ tmp;
-		corm_get_copy(obj_hd, &tmp_ref, &(tmp));
+		corm_get_copy(obj_hd, &obj_ref, &(tmp));
 		if (string_match(tmp.name, name)) {
 			if (nth <= 0) {
-				corm_fin(c);
+				tmp_ref = obj_ref;
 				break;
 			}
 			nth--;
 		}
 	}
+	corm_fin(c);
 
 	return tmp_ref;
 }

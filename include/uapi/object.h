@@ -35,11 +35,21 @@ typedef struct {
 	unsigned char floor;
 } ROO;
 
+/* EF_WIZARD (8) was deleted: it was never set by any code path, so every
+ * st_is_wiz() gate on it was dead code. Authority is now scoped to a region
+ * (see ST.md §27.6(1) and NO_WIZ.md). Bit 8 is deliberately left unallocated
+ * rather than reserved -- no persisted flag outgrew it, and a free bit that
+ * nothing sets is indistinguishable from a reserved one until someone reads
+ * the gap as an invitation. */
 enum entity_flags {
 	EF_SHOP = 4,
-	EF_WIZARD = 8,
-	EF_BAN = 16,
 };
+
+/* EF_BAN (16) was deleted next: the ban table supersedes the bit (ST.md
+ * §27.6(1) §7, NO_WIZ.md). Bit 16 is left unallocated for the same reason as
+ * bit 8 above. The boot migration (st_ban_migrate) still READS legacy rows
+ * carrying 16 -- it uses the EF_BAN_LEGACY literal in spacetime.c, not this
+ * enum -- so an upgrade converts old bans instead of dropping them. */
 
 enum base_actions {
 	ACT_LOOK = 1,
@@ -65,7 +75,20 @@ typedef struct entity {
 	/* tmp data? */
 	unsigned last_observed;
 	unsigned char select;
-	unsigned char aux;
+
+	/* CMD_REGION.md §3: the player's default target region, as the (id, plen)
+	 * pair every region selector already speaks. `aux` was repurposeable --
+	 * declared and never read or written anywhere -- so target_plen lands in
+	 * what was aux plus the tail padding and the whole struct grows 8 bytes,
+	 * not 16.
+	 *
+	 * target_plen == ST_SEL_UNSET (st.h) means "no default set", NOT 0: a fresh
+	 * entity is memset to zero by eng_object_add(), and (0, 0) is the cosmos,
+	 * a real region with a real owner. Reading zero as "unset" would silently
+	 * hand every new entity a whole-world default. st_target_get() translates
+	 * the sentinel at the boundary and never returns it. */
+	unsigned char target_plen;
+	uint64_t target_id;
 } ENT;
 
 typedef struct object {

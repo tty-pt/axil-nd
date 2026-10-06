@@ -43,9 +43,6 @@ typedef struct view_tile {
 typedef void st_teleport_t(unsigned player_ref, uint64_t pos);
 st_teleport_t eng_st_teleport;
 
-typedef void st_run_t(unsigned player_ref, char *symbol);
-st_run_t eng_st_run;
-
 typedef struct bio noise_point_t(pos_t p);
 noise_point_t eng_noise_point;
 

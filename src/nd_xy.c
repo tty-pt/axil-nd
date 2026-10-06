@@ -21,8 +21,11 @@
 #include <ttypt/corm.h>
 #include <ttypt/axil.h>
 
+#include <errno.h>
+#include <libgen.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -159,15 +162,52 @@ nd_mods_load(void)
 	 *   'mods/demo/demo.so': ...so.so: cannot open shared object file
 	 * and the suite died on `FAIL: on_demo frame missing`.
 	 *
-	 * Falls back to the demo module when no list file is present. */
-	char path[1030];
-	/* "mods/" + name + "/" + name + ".c" over a `line` of up to 511 bytes
-	 * is 1030 plus the NUL, so this has to be wider than `path`. */
-	char inpath[sizeof(path) + 8];
+	 * The list file itself defaults to "mods.load" (cwd-relative), which is
+	 * what every standalone run (test.sh, a bare `axil -m ./lib/axil-nd`)
+	 * already expects. AXIL_ND_GLOBAL_MODS overrides it -- needed when the
+	 * site embeds this engine as an XY module: the site's own axil process
+	 * chdir()s into the SITE root (not this tree), so a cwd-relative
+	 * "mods.load" there would resolve to the SITE's own list (mods/core/core.c
+	 * reads the exact same relative name) and the two module tiers -- the
+	 * site's own and the engine's global one -- would collide on one file.
+	 * The site's start scripts set AXIL_ND_GLOBAL_MODS to this tree's own
+	 * mods.load by an unambiguous path, keeping the two lists apart.
+	 *
+	 * The in-tree form's `mods/<n>/<n>` is resolved against the list
+	 * file's OWN directory (dirname(list_path)), not cwd, for the same
+	 * reason: dirname() of a bare "mods.load" is "." (unchanged standalone
+	 * behavior), but dirname() of AXIL_ND_GLOBAL_MODS's absolute path is
+	 * this tree's own root even though the site's axil process never
+	 * chdir()s there. Without this, every in-tree entry -- "demo" among
+	 * them -- would silently take the installed-soname branch instead,
+	 * since `access("mods/demo/demo.c", R_OK)` is checked against the
+	 * SITE's cwd and finds nothing there.
+	 *
+	 * A missing list fails loudly: silently substituting the demo module
+	 * would hide a bad path (typo'd override, wrong cwd) behind a server
+	 * that looks like it booted fine, with none of the intended modules
+	 * actually present. */
+	char base_dir[768];
+	/* base_dir + "/mods/" + name + "/" + name + ".c", name up to 511 bytes
+	 * (sizeof(line) - 1) twice over -- wider than `path` to absorb the
+	 * ".c" suffix the in-tree probe adds. */
+	char inpath[sizeof(base_dir) + 2 * 512 + 16];
+	char path[sizeof(inpath) - 8];
 	char line[512];
-	FILE *fp = fopen("mods.load", "r");
+	char list_path_buf[sizeof(base_dir)];
+	const char *list_path = getenv("AXIL_ND_GLOBAL_MODS");
+	FILE *fp;
+	if (!list_path || !*list_path)
+		list_path = "mods.load";
+	/* dirname() may modify its argument; snprintf()'s result into
+	 * list_path_buf is that mutable copy. */
+	snprintf(list_path_buf, sizeof(list_path_buf), "%s", list_path);
+	snprintf(base_dir, sizeof(base_dir), "%s", dirname(list_path_buf));
+	fp = fopen(list_path, "r");
 	if (!fp) {
-		xy_load("./mods/demo/demo");
+		fprintf(stderr,
+			"nd_mods_load: cannot open global module list '%s': %s\n",
+			list_path, strerror(errno));
 		return;
 	}
 	while (fgets(line, sizeof(line), fp)) {
@@ -184,12 +224,16 @@ nd_mods_load(void)
 		else {
 			/* Same test Makefile's `mods:` target uses. A source file
 			 * under mods/<n>/ is what makes a name in-tree; anything
-			 * else is an installed soname. */
-			snprintf(inpath, sizeof(inpath), "mods/%s/%s.c",
-				line, line);
-			snprintf(path, sizeof(path),
-				access(inpath, R_OK) == 0 ? "mods/%s/%s" : "%s",
-				line, line);
+			 * else is an installed soname. Both candidate paths are
+			 * rooted at base_dir (the list file's own directory), not
+			 * cwd -- see the comment above nd_mods_load(). */
+			snprintf(inpath, sizeof(inpath), "%s/mods/%s/%s.c",
+				base_dir, line, line);
+			if (access(inpath, R_OK) == 0)
+				snprintf(path, sizeof(path), "%s/mods/%s/%s",
+					base_dir, line, line);
+			else
+				snprintf(path, sizeof(path), "%s", line);
 		}
 		if (xy_load(path) != XY_OK)
 			fprintf(stderr, "nd_mods_load: module %s failed to load\n",

@@ -20,8 +20,18 @@ int axil_tty_handle_tty(socket_t cfd, char *body);
 
 #include <arpa/telnet.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* Same sentinel as uapi/object.h / nd/xy-types.h -- not included directly:
+ * this file folds nd_xy.c/nd_events.c/nd_api.c in as one TU (see the bottom
+ * of this file), and uapi/object.h's eng_object_* typedefs conflict with
+ * those files' own XY_IMPL-based definitions of the same names. */
+#ifndef NOTHING
+#define NOTHING ((unsigned) -1)
+#endif
 
 #ifndef AXIL_PREFIX
 #define AXIL_PREFIX "/usr/local"
@@ -59,6 +69,8 @@ void nd_vim(int fd, int argc, char *argv[]);
 void nd_update(unsigned long long dt);
 void nd_disconnect(int fd);
 void close_all(int i);
+void nd_set_auth_ready(int ready);
+void nd_password_line(int fd, const char *name, const char *password);
 
 /* world.c's command table, walked directly by the WebSocket frame dispatch
  * below: axil's own cmd_proc() is static, so a watched WS fd has no axil-side
@@ -170,9 +182,54 @@ XY_IMPL(int, on_axil_connect, socket_t, fd)
   axil_tty_attach(fd);
 
   unsigned player_ref = nd_connect(fd);
-  if (!player_ref)
-    return 0; /* mcp_auth_fail already emitted */
+  /* nd_connect() -> auth() -> nd_player_login() returns TWO distinct failure
+   * sentinels, not one: plain 0 when there is no REMOTE_USER at all
+   * (mcp_auth_fail already emitted), and NOTHING when nd_player_login's own
+   * `if (axil_auth(fd, user)) return NOTHING;` (world.c) rejects the name --
+   * which getpwnam() does for any site-registered account that is not also
+   * a real OS/passwd-backed user (confirmed: an axil-auth-registered name
+   * resolves through the site's own login flow, not through getpwnam()).
+   * NOTHING is (unsigned) -1, nonzero, so the old `!player_ref` check alone
+   * let it through: this then called nd_io_attach(fd, NOTHING) below,
+   * clobbering the valid attach nd_player_login's own NEW-PLAYER branch had
+   * already made (world.c, nd_io_attach before the axil_auth check) --
+   * and any later command on this fd (do_say and siblings read
+   * eng_fd_player(fd) unconditionally) aborted in corm_get_copy on the
+   * bogus key. The raw-telnet counterpart (world.c:do_connect) already
+   * checks both sentinels; this WS path just didn't.
+   *
+   * Note this means axil_auth()'s rejection of an unknown-OS name does not
+   * actually block a returning site-registered player from being usable
+   * here: nd_player_login's own earlier nd_io_attach (for a brand-new
+   * player) or its RETURNING-player branch's nd_io_attach already set a
+   * working fd->player mapping before the rejection fires, and this check
+   * now simply stops clobbering it rather than making nd_player_login's
+   * rejection fully authoritative. Whether axil-nd should enforce that
+   * rejection all the way through (disconnecting an unknown-OS name
+   * outright) is a separate policy question, not addressed here -- this
+   * fix's scope is the crash only. */
+  if (!player_ref || player_ref == NOTHING) {
+    /* A decline is invisible to axil's upgrade path -- axil_ws_upgrade takes
+     * no teardown action when no hook claims the connection -- so without
+     * this the descriptor and its TCP socket stay open indefinitely (the
+     * pre-fix behaviour: `ws_init` in the log, then silence, no disconnect
+     * ever). The client that probed it held a live, silent connection for
+     * its whole timeout, one fd per probe. Close it: the close frame first
+     * (a spec-correct peer then terminates its own side), then the full
+     * teardown so the socket does not linger for peers that ignore the frame.
+     * axil_close() inside this hook is safe: it runs the disconnect hooks
+     * (nd's own nd_disconnect tolerates a missing entry, axil-tty's tolerates
+     * a missing pty since S5.4) and the post-hook `d->flags |= DF_CONNECTED`
+     * lands on a zeroed slot that descr_new() memsets on reuse.
+     *
+     * The reachable case is an unauthenticated /nd upgrade: no REMOTE_USER, so
+     * auth() already sent mcp_auth_fail and returned 0. */
+    axil_ws_close(fd);
+    axil_close(fd);
+    return 0;
+  }
   nd_io_attach(fd, player_ref);
+
   nd_demo_announce(player_ref);
   nd_event_announce(player_ref, player_ref); /* P5: real location */
   /* The ioc dedup self-flushes on every differing write, so the ONLY
@@ -189,6 +246,50 @@ XY_IMPL(int, on_axil_parse,
     unsigned char *, input,
     int, nread)
 {
+  /* Password-prompt state comes first: while ND_PWPEND is armed the next line
+   * is a password, not a command, on either transport. Consumed here (return
+   * -1) so it never reaches cmd_parse, the PTY, or the game. */
+  {
+    char pending[64];
+    if (axil_env_get(fd, pending, sizeof(pending), "ND_PWPEND") == 0 &&
+        *pending) {
+      /* Bounded copy up to the first line end, skipping telnet negotiation
+       * (the WILL ECHO sent with the prompt can draw IAC DO ECHO replies that
+       * must not become password bytes). */
+      char line[128];
+      size_t o = 0;
+      int i = 0;
+      while (i < nread && o + 1 < sizeof(line)) {
+        unsigned char c = input[i];
+        if (c == '\r' || c == '\n' || c == '\0')
+          break;
+        if (c == 255 && i + 1 < nread) { /* IAC */
+          unsigned char opt = input[i + 1];
+          if (opt == 250) { /* SB: skip to IAC SE */
+            i += 2;
+            while (i + 1 < nread &&
+                   !(input[i] == 255 && input[i + 1] == 240))
+              i++;
+            i += 2;
+          } else if (opt == 251 || opt == 252 || opt == 253 ||
+                     opt == 254) { /* WILL/WONT/DO/DONT + option */
+            i += 3;
+          } else {
+            i += 2;
+          }
+          continue;
+        }
+        line[o++] = (char)c;
+        i++;
+      }
+      line[o] = '\0';
+      nd_password_line(fd, pending, line);
+      /* Scrub the secret from our own buffer before returning. */
+      memset(line, 0, sizeof(line));
+      return -1;
+    }
+  }
+
   /* axil-tty's route: shell bytes, not a command stream. Returning -1 keeps
    * them out of cmd_parse entirely -- the axil_tty_active() check below only
    * covers the window after a PTY exists, and on this route there is one from
@@ -221,6 +322,16 @@ XY_IMPL(int, on_axil_parse,
 
     return nread;
   }
+
+  /* HTTP requests pass through untouched -- no telnet scan, no slide, no RAW
+   * classification. Everything below assumes a terminal byte stream, but a
+   * request body may legally contain 0xFF: axil_tty_input() would read it as
+   * IAC, the slide would delete the request head sitting in front of it, and
+   * the RAW check would answer a POST with the telnet banner (SECURITY.md
+   * S5.5). A raw stream never opens with "METHOD SP", and WebSocket payloads
+   * are handled above, so this changes nothing for either of them. */
+  if (is_http_method((const char *)input))
+    return nread;
 
   /* axil-tty gets first refusal on the raw path too. Two reasons: strip_telnet()
    * below discards the NAWS payload, and a raw telnet guest negotiates its
@@ -334,6 +445,25 @@ XY_IMPL(int, on_axil_exit, int, i)
 /* HTTP handlers                                                       */
 /* ------------------------------------------------------------------ */
 
+/* Compiled-in default (AXIL_HTDOCS, set above) plus a process-environment
+ * override, copied from axil-tty's serve_htdocs() (libaxil-tty.c). A
+ * distinct env var name (AXIL_ND_HTDOCS, not axil-tty's AXIL_HTDOCS) is
+ * required: both modules load into the same process when the site embeds
+ * this engine, and they serve two different asset trees. Deliberately not
+ * read from the per-connection request env (axil_env_get()), which is
+ * populated from client input. */
+static void
+nd_serve_htdocs(socket_t fd, const char *file)
+{
+  char htdocs[PATH_MAX - 1] = AXIL_HTDOCS;
+  char path[PATH_MAX];
+  const char *override = getenv("AXIL_ND_HTDOCS");
+  if (override && *override)
+    snprintf(htdocs, sizeof(htdocs), "%s", override);
+  snprintf(path, sizeof(path), "%s/%s", htdocs, file);
+  axil_sendfile(fd, path);
+}
+
 static int
 handle_nd(socket_t fd, char *body)
 {
@@ -352,7 +482,7 @@ handle_nd(socket_t fd, char *body)
      * called entirely. */
     return 0;
   }
-  axil_sendfile(fd, "htdocs/index.html");
+  nd_serve_htdocs(fd, "index.html");
   return 0;
 }
 
@@ -364,7 +494,7 @@ void
 xy_install(void)
 {
   /* boot the real engine first: opens the store, seeds the world,
-   * registers the SIC adapters (mod_load_all/st_run only on a live db). */
+   * registers the SIC adapters (mod_load_all only on a live db). */
   if (nd_world_init(0, NULL))
     fprintf(stderr, "nd_world_init failed\n");
   nd_register_commands();
@@ -378,6 +508,17 @@ xy_install(void)
   axil_register_handler("GET:" ND_TTY_ROUTE, axil_tty_handle_tty);
   nd_mods_load();
   xy_load("axil-tty");
+  /* Passworded connect authenticates through axil-auth's exported credential
+   * check. The bus convention (non-zero means valid) already fails closed when
+   * the module is absent; the flag only decides the error message. Same module
+   * name the site uses (mods/auth). */
+  if (xy_load("libaxil-auth") != 0) {
+    fprintf(stderr, "axil-nd: libaxil-auth unavailable; "
+                    "passworded connect disabled\n");
+    nd_set_auth_ready(0);
+  } else {
+    nd_set_auth_ready(1);
+  }
 }
 
 /*

@@ -50,6 +50,8 @@
  * Region model (st_* ownership): a game module claims a subspace with
  * `xy_require_claim()` in its xy_install(); `xy_with_region()`/regions scope
  * per-owner plugin dispatch — maps the spacetime per-owner `st_*` loader.
+ * NB `xy_with_region()` now takes a width as its second argument, since a region
+ * is `(id, plen)` and ids repeat down the left spine; prose only, never called.
  *
  * This is the XY expansion of `struct nd` (include/papi/nd.h, which is still
  * engine-internal). Members
@@ -181,7 +183,6 @@ XY_DECL(unsigned, map_get, coord_t *, p);
 /* ------------------------------------------------------------------- st */
 
 XY_DECL(int, st_teleport, unsigned, player_ref, uint64_t, pos);
-XY_DECL(int, st_run, unsigned, player_ref, char *, symbol);
 
 /* ------------------------------------------------------------------ wts */
 

@@ -4,12 +4,21 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <syslog.h>
 #include <time.h>
 #include <ttypt/corm.h>
+#include <ttypt/qsys.h>
+/* Host-side region API. NOT xy-mod.h: that header redefines xy_load and
+ * friends as macros through a module-local `static struct xy_ctx xy`, and
+ * this TU is engine code with no injected context -- including it here would
+ * be the two-TU trap (each TU gets its own xy, only one ever injected).
+ * The host globals below resolve to the axil process at dlopen time, the same
+ * way axil_register already does from world.c and mods.c. */
+#include <ttypt/xy.h>
 #include <xxhash.h>
 
 #include "config.h"
@@ -19,6 +28,12 @@
 #include "view.h"
 #include "mcp.h"
 #include "papi/nd.h"
+#include "uapi/entity.h"
+
+/* eng_map_where has no header declaration anywhere (spacetime.c:226 and
+ * friends already call it unprototyped); say it out loud so the region anchor
+ * below does not add another implicit declaration. */
+void eng_map_where(pos_t p, unsigned thing);
 
 #define PRECOVERY
 
@@ -29,7 +44,7 @@
 
 #define ROOM_COST 80
 
-unsigned owner_hd = -1, sl_hd = -1;
+unsigned owner_hd = -1;
 
 typedef void op_a_t(unsigned player_ref, enum exit e);
 typedef int op_b_t(unsigned player_ref, struct cmd_dir cd);
@@ -42,7 +57,6 @@ typedef struct {
 } op_t;
 unsigned g_player_ref;
 OBJ *g_player;
-extern struct nd nd;
 static unsigned *biome_map;
 
 enum exit e_map[] = {
@@ -483,6 +497,9 @@ st_room_at(unsigned player_ref, pos_t pos)
 	biome_map = biome_map_get(* (uint64_t *) pos);
 	unsigned there_ref = eng_object_add(&there, biome_map[bio.bio_idx], 0, (uint64_t) &bio, 0);
 	ROO *rthere = (ROO *) &there.data;
+	/* Carved rooms are permanent; clear RF_TEMP so eng_room_clean
+	 * does not collect the room when empty (§27.3). */
+	rthere->flags &= ~RF_TEMP;
 	map_put(pos, there_ref, 1);
 	exits_infer(there_ref, rthere);
 
@@ -1093,252 +1110,1539 @@ oecho(char *format, ...) {
 	va_end(args);
 }
 
-// st plugin dir follows the world db location (world_db(): AXIL_ND_DB
-// override else STD_DB) so the engine boots in-tree.
-static void
-st_dir(char *buf, size_t len)
-{
-	const char *db = world_db();
-	const char *slash = strrchr(db, '/');
-	size_t n = slash ? (size_t)(slash - db) : 0;
+/* ---------------------------------------------------------------------------
+ * Region rows (ST.md §7.2 as amended by §22.1).
+ *
+ * One corm record per region, keyed "<16 hex id><2 hex plen>". The record
+ * layout is registered once from nd_world_init before the `st` table opens;
+ * every function below degrades to a miss when owner_hd is CM_MISS rather
+ * than indexing corm_heads[CM_MISS], which would be an out-of-bounds read.
+ * --------------------------------------------------------------------------- */
 
-	if (n >= len)
-		n = len - 1;
-	memcpy(buf, db, n);
-	buf[n] = '\0';
+static int
+st_have_hd(void)
+{
+	return owner_hd != CM_MISS;
 }
 
-// load a spacetime shared library and put it in effect
-static void
-st_open(struct st_key st_key, int owner)
+uint32_t
+st_rec_register(void)
 {
-	char filename[BUFSIZ], dir[BUFSIZ];
+	static int done = 0;
+	static uint32_t rec = CM_MISS;
 
-	uint64_t short_key = st_key.key >> st_key.shift;
-	st_dir(dir, sizeof(dir));
-	snprintf(filename, sizeof(filename), "%s/st/%u/%llu/libnd.so", dir, st_key.shift, short_key);
-	void *sl = dlopen(filename, RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
+	if (done)
+		return rec;
+	done = 1;
 
-	if (!sl)
-		syslog(LOG_ERR, "dlopen error for %d, %s: %s", owner, filename, dlerror());
-	else {
-		dlerror();
-		syslog(LOG_INFO, "dlopen %d, %s", owner, filename);
-		struct nd *ind = dlsym(sl, "nd");
-		if (ind)
-			*ind = nd;
-		else
-			fprintf(stderr, "%u's st module didn't link agains libnd\n", owner);
-		corm_put(sl_hd, &st_key, &sl);
-	}
+	rec = corm_record_register("st_rec", sizeof(struct st_rec),
+		(corm_record_field_t[]){
+			{ .name = "owner", .type = CM_U32,
+			  .offset = offsetof(struct st_rec, owner),
+			  .max_size = sizeof(uint32_t) },
+			{ .name = "plen", .type = CM_U32,
+			  .offset = offsetof(struct st_rec, plen),
+			  .max_size = sizeof(uint32_t) },
+			{ .name = "nmods", .type = CM_U32,
+			  .offset = offsetof(struct st_rec, nmods),
+			  .max_size = sizeof(uint32_t) },
+			{ .name = "flags", .type = CM_U32,
+			  .offset = offsetof(struct st_rec, flags),
+			  .max_size = sizeof(uint32_t) },
+			{ .name = "mods", .type = CM_STR,
+			  .offset = offsetof(struct st_rec, mods),
+			  .max_size = sizeof(((struct st_rec *)0)->mods) },
+		}, 5);
+	if (rec == CM_MISS)
+		WARN("st_rec_register: corm_record_register failed\n");
+	return rec;
+}
 
-	/* hash_put(owner_hd, &st_key, sizeof(st_key), &owner, sizeof(owner)); */
+/* One-field owner read. Up to 65 regions can cover one position and each
+ * probe must not copy a whole row (§22.1). */
+unsigned
+st_owner(uint64_t id, uint8_t plen)
+{
+	char key[ST_ROW_KEY_LEN + 1];
+	char q[ST_ROW_KEY_LEN + 1 + sizeof(":owner")];
+	const uint32_t *o;
+
+	if (!st_have_hd())
+		return NOTHING;
+	st_row_key(key, sizeof(key), id, plen);
+	snprintf(q, sizeof(q), "%s:owner", key);
+	o = corm_get(owner_hd, q);
+	if (!o)
+		return NOTHING;
+	return *o;
+}
+
+int
+st_can(unsigned ref, uint64_t id, uint8_t plen)
+{
+	return st_owner(id, plen) == ref;
+}
+
+int
+st_row_get(uint64_t id, uint8_t plen, struct st_rec *out)
+{
+	char key[ST_ROW_KEY_LEN + 1];
+	const struct st_rec *r;
+
+	if (!st_have_hd())
+		return 0;
+	st_row_key(key, sizeof(key), id, plen);
+	r = corm_get(owner_hd, key);
+	if (!r)
+		return 0;
+	if (out)
+		memcpy(out, r, sizeof(*out));
+	return 1;
 }
 
 void
-st_put(unsigned owner_ref, uint64_t key, unsigned shift) {
-	char buf[BUFSIZ], dir[BUFSIZ];
-	struct st_key st_key = st_key_new(key, shift);
-	st_dir(dir, sizeof(dir));
-	size_t len = snprintf(buf, sizeof(buf), "%s/st/%u/", dir, shift);
-	mkdir(buf, 0750);
-	snprintf(buf + len, sizeof(buf) - len, "%llu", key >> shift);
-	mkdir(buf, 0750);
-	st_open(st_key, owner_ref);
+st_row_put(uint64_t id, uint8_t plen, const struct st_rec *rec)
+{
+	char key[ST_ROW_KEY_LEN + 1];
+
+	if (!st_have_hd() || !rec)
+		return;
+	st_row_key(key, sizeof(key), id, plen);
+	corm_put(owner_hd, key, rec);
+}
+
+void
+st_row_del(uint64_t id, uint8_t plen)
+{
+	char key[ST_ROW_KEY_LEN + 1];
+
+	if (!st_have_hd())
+		return;
+	st_row_key(key, sizeof(key), id, plen);
+	corm_del(owner_hd, key);
+}
+
+/* ---------------------------------------------------------------------------
+ * Region claim + module load/unload (ST.md §22.3).
+ * --------------------------------------------------------------------------- */
+
+/* xy_with_region takes only (fn, ud), so the module stem rides in ud (§15).
+ * xy_load takes a mutable char *, so the trampoline's ud must point at a
+ * writable buffer -- every caller below passes a stack copy, never a literal. */
+static int
+st_load_tramp(void *ud)
+{
+	return xy_load((char *)ud);
+}
+
+static int
+st_unload_tramp(void *ud)
+{
+	return xy_unload((char *)ud);
+}
+
+int
+st_region_load(uint64_t id, uint8_t plen, char *name)
+{
+	int rc;
+
+	if (!name || !*name || strchr(name, '/'))
+		return XY_ERR_INVALID;
+	/* Claim first: it is idempotent, and on success the region is current,
+	 * so even a bare xy_load would land in it. The with_region wrapper is
+	 * the belt to that suspender -- an explicit address, not a reliance on
+	 * retained currentness. */
+	rc = xy_claim_at(id, plen, NULL, NULL);
+	if (rc != XY_OK)
+		return rc;
+	return xy_with_region(id, plen, st_load_tramp, name);
+}
+
+int
+st_region_unload(uint64_t id, uint8_t plen, char *name)
+{
+	if (!name || !*name || strchr(name, '/'))
+		return XY_ERR_INVALID;
+	/* No claim here: the region must already exist, and with_region reports
+	 * XY_ERR_NOTFOUND when it does not. */
+	return xy_with_region(id, plen, st_unload_tramp, name);
+}
+
+int
+st_mod_loaded(uint64_t id, uint8_t plen, const char *name)
+{
+	struct st_rec rec;
+	uint32_t i;
+
+	if (!name || !st_row_get(id, plen, &rec))
+		return 0;
+	for (i = 0; i < rec.nmods && i < ND_ST_MAX_MODS; i++) {
+		if (strncmp(rec.mods[i], name, ND_ST_MOD_NAME) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* st_mod_add records the stem; it does NOT load. The caller loads first, so a
+ * failure leaves the row exactly as it was -- a typo must not persist forever
+ * and make every boot log the same failure (§22.5, §7.6). */
+int
+st_mod_add(uint64_t id, uint8_t plen, const char *name)
+{
+	struct st_rec rec;
+
+	if (!name || !*name || strchr(name, '/') ||
+	    strlen(name) >= ND_ST_MOD_NAME)
+		return XY_ERR_INVALID;
+	if (!st_row_get(id, plen, &rec))
+		return XY_ERR_NOTFOUND;
+	if (st_mod_loaded(id, plen, name))
+		return XY_OK;
+	if (rec.nmods >= ND_ST_MAX_MODS)
+		return XY_ERR_TOOBIG;
+	memset(rec.mods[rec.nmods], 0, ND_ST_MOD_NAME);
+	snprintf(rec.mods[rec.nmods], ND_ST_MOD_NAME, "%s", name);
+	rec.nmods++;
+	st_row_put(id, plen, &rec);
+	return XY_OK;
+}
+
+int
+st_mod_del(uint64_t id, uint8_t plen, const char *name)
+{
+	struct st_rec rec;
+	uint32_t i, j;
+
+	if (!name || !st_row_get(id, plen, &rec))
+		return XY_ERR_NOTFOUND;
+	for (i = 0; i < rec.nmods && i < ND_ST_MAX_MODS; i++) {
+		if (strncmp(rec.mods[i], name, ND_ST_MOD_NAME) == 0)
+			break;
+	}
+	if (i >= rec.nmods || i >= ND_ST_MAX_MODS)
+		return XY_ERR_NOTFOUND;
+	for (j = i; j + 1 < rec.nmods && j + 1 < ND_ST_MAX_MODS; j++)
+		memcpy(rec.mods[j], rec.mods[j + 1], ND_ST_MOD_NAME);
+	rec.nmods--;
+	memset(rec.mods[rec.nmods], 0, ND_ST_MOD_NAME);
+	st_row_put(id, plen, &rec);
+	return XY_OK;
+}
+
+/* The caller's position-derived region (§7.3 as amended by §22.4): the room's
+ * pos_t through pos_morton, then the deepest covering region. Deliberately
+ * not eng_map_mwhere, which reinterprets the 8 pos_t bytes as a word. */
+int
+st_region_of_player(unsigned player_ref, uint64_t *id, uint8_t *plen)
+{
+	OBJ player;
+	pos_t pos;
+	uint64_t code, rid;
+	uint8_t w;
+
+	if (!id || !plen)
+		return XY_ERR_INVALID;
+	if (player_ref == NOTHING || player_ref == (unsigned)-1)
+		return XY_ERR_INVALID;
+	memset(&player, 0, sizeof(player));
+	corm_get_copy(obj_hd, &player_ref, &player);
+	eng_map_where(pos, player.location);
+	code = pos_morton(pos);
+	rid = xy_region_at(code, ST_PLEN_CELL, &w);
+	if (rid == XY_REGION_INVALID)
+		return XY_ERR_NOTFOUND;
+	*id = rid;
+	*plen = w;
+	return XY_OK;
+}
+
+/* Boot restore (ST.md §7.6, §22.2): snapshot every row, sort by plen
+ * ascending, then claim and load. The sort is load-bearing, not tidy:
+ * corm_iter order is unspecified, and xy_claim_at attaches to the nearest
+ * EXISTING ancestor, so a child restored before its parent would land under
+ * the wrong one. A failed load never clears the row -- a missing binary is
+ * not a reason to forget the intent (§7.6) -- so a later boot retries it. */
+struct st_restore_row {
+	uint64_t id;
+	uint8_t plen;
+	struct st_rec rec;
+};
+
+static int
+st_restore_cmp(const void *a, const void *b)
+{
+	const struct st_restore_row *ra = a, *rb = b;
+
+	if (ra->rec.plen < rb->rec.plen)
+		return -1;
+	if (ra->rec.plen > rb->rec.plen)
+		return 1;
+	if (ra->id < rb->id)
+		return -1;
+	if (ra->id > rb->id)
+		return 1;
+	return 0;
 }
 
 void
 st_init(void) {
 	unsigned c = corm_iter(owner_hd, NULL, 0);
 	const void *kp, *vp;
-	struct st_key st_key;
-	int owner;
+	struct st_restore_row *rows = NULL;
+	size_t n = 0, cap = 0;
+
+	if (!st_have_hd())
+		return;
 
 	while (corm_next(&kp, &vp, c)) {
-		st_key = *(const struct st_key *)kp;
-		owner = *(const int *)vp;
-		st_open(st_key, owner);
+		const char *key = kp;
+		const struct st_rec *rec = vp;
+		uint64_t id;
+		uint8_t plen;
+
+		/* Anything that is not an 18-char row key is a legacy binary
+		 * st_key from a pre-record store: refused, never parsed (§22.1)
+		 * and left in place for the operator to drop, not reinterpreted. */
+		if (st_row_key_parse(key, &id, &plen) != 0) {
+			WARN("st_restore: refusing unparseable row key\n");
+			continue;
+		}
+		if (rec->plen != plen) {
+			WARN("st_restore: plen mismatch, refusing row\n");
+			continue;
+		}
+		if (n >= cap) {
+			size_t ncap = cap ? cap * 2 : 8;
+			struct st_restore_row *nrows =
+				realloc(rows, ncap * sizeof(*nrows));
+			if (!nrows) {
+				WARN("st_restore: out of memory, stopping\n");
+				break;
+			}
+			rows = nrows;
+			cap = ncap;
+		}
+		rows[n].id = id;
+		rows[n].plen = plen;
+		memcpy(&rows[n].rec, rec, sizeof(rows[n].rec));
+		n++;
 	}
+	corm_fin(c);
+
+	qsort(rows, n, sizeof(*rows), st_restore_cmp);
+
+	for (size_t i = 0; i < n; i++) {
+		int rc;
+		uint32_t m;
+		char namebuf[ND_ST_MOD_NAME + 1];
+
+		rc = xy_claim_at(rows[i].id, rows[i].plen, NULL, NULL);
+		if (rc != XY_OK) {
+			WARN("st_restore: claim failed for region\n");
+			continue;
+		}
+		/* WARN, not syslog: the suite greps the axil stderr capture for
+		 * these lines, and syslog goes to /dev/log (§22.6). */
+		WARN("st_restore: region id=0x%016llx plen=%u\n",
+			(unsigned long long)rows[i].id, rows[i].plen);
+
+		for (m = 0; m < rows[i].rec.nmods && m < ND_ST_MAX_MODS; m++) {
+			memcpy(namebuf, rows[i].rec.mods[m], ND_ST_MOD_NAME);
+			namebuf[ND_ST_MOD_NAME] = '\0';
+			if (!namebuf[0])
+				continue;
+			rc = st_region_load(rows[i].id, rows[i].plen, namebuf);
+			if (rc != XY_OK) {
+				WARN("st_restore: module %s failed to load, keeping row\n",
+					namebuf);
+				continue;
+			}
+			WARN("st_restore: loaded %s\n", namebuf);
+		}
+	}
+	free(rows);
 }
 
-void st_dlclose(void) {
-	unsigned c = corm_iter(sl_hd, NULL, 0);
+/* ---------------------------------------------------------------------------
+ * Planet commands (ST.md §7.5 as amended by §22.5).
+ *
+ * `teleport` resolves a named object, never a world number, so there is no
+ * in-game way to stand in world N and no honest way to derive "the caller's
+ * current region" for a moderator who is elsewhere. The region-targeting
+ * commands therefore take an explicit world: `loadmod <name> [world]`,
+ * `modlist [world]`. Without one, the caller's position-derived region is
+ * used. `here` is always position-derived.
+ *
+ * The gate on every mutating command is region ownership, never the module
+ * list itself: the list is the enabled set, and loadmod is
+ * the ruler's act of adding to it, so gating loadmod on membership would
+ * deadlock an empty planet (§22.5). The code gate an outer ruler imposes is
+ * xy_deny, enforced inside libxylem at load time.
+ *
+ * Every return path below flushes: eng_nd_write is a history+dedup buffer,
+ * not a socket write, and nd_command only resets the dedup counter -- without
+ * an explicit eng_nd_flush the reply sits in ioc[fd].buf until some later,
+ * different write displaces it, which presents as a command that runs (the
+ * row is written, the log shows it) but never answers (§5.3).
+ * --------------------------------------------------------------------------- */
+
+/* The one authorization rule for the region-tree primitives (`room`, `deny`):
+ * you may act in a region you rule, and the cosmos ruler may act in ANY region.
+ *
+ * The cosmos clause is what makes the Phase 3 gate's bootstrap work at all.
+ * §27.3's `room 0 0 0 1` necessarily runs BEFORE `planet 1`, so at that moment
+ * world 1 has no row and no owner -- there is nobody whose ownership could
+ * authorize it. The seeded cosmos row (world.c, owner = 1, the first player) is
+ * the actor that can carve the first room out of a fresh world, exactly as
+ * do_planet already requires cosmos ownership for a new planet claim.
+ *
+ * There is no wizard override here, and there never was one in practice: the
+ * EF_WIZARD clause that used to sit at the top was unreachable (nothing in the
+ * port ever set the flag), so deleting it left this function's reach
+ * bit-identical. ST.md §27.6(1), NO_WIZ.md §3.
+ *
+ * Keep the reach narrow on purpose. The three loadmod/unloadmod/release callers
+ * below gate on st_can() exactly, NOT on this function -- widening them to the
+ * cosmos ruler would hand one player authority over every planet's module set,
+ * which no decision asked for.
+ */
+/* "May this actor act anywhere in (id,plen)?"
+ *
+ * One loop over every ancestor width instead of "exact owner, else cosmos",
+ * because the decision says a ruler governs what is UNDER them, not only what
+ * they are. Masking (id,plen) down to width w yields the ancestor region id at
+ * that width, so the candidate set is exactly {ancestors of (id,plen)}, and the
+ * two cases the old shape special-cased are just the two ends of it: w == plen
+ * is exact ownership, w == 0 is the cosmos, whose row covers the whole address
+ * space.
+ *
+ * Widths 32 and 48 cannot hold a row today, so they are two wasted corm probes
+ * per call. They are here rather than omitted because they are the difference
+ * between "ancestor ownership" as a stated rule and as an accident of the
+ * current tree depth: the day a row lands at 32, this keeps working with no
+ * edit, and the omission would be a silent behaviour change nobody would catch.
+ *
+ * w > plen is skipped because a region cannot be its own ancestor's ancestor:
+ * narrowing to a width the query does not span would invent a region that
+ * does not contain the thing being asked about. */
+int
+st_can_region(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	static const uint8_t widths[] = {
+		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
+	};
+	uint64_t mask;
+	size_t i;
+
+	/* A prefix width above 64 is not a region. ST_SEL_UNSET is 255, so a
+	 * caller that forgot to resolve "unspecified" lands here rather than
+	 * masking by a nonsense width. */
+	if (plen > ST_PLEN_CELL)
+		return 0;
+
+	for (i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+		uint8_t w = widths[i];
+
+		if (w > plen)
+			continue;
+		mask = w ? (~0ULL << (64 - w)) : 0ULL;
+		if (st_can(player_ref, id & mask, w))
+			return 1;
+	}
+	return 0;
+}
+
+/* Who governs (id,plen)? The same ancestor walk as st_can_region, but it
+ * answers with the owner instead of a yes/no, and it stops at the FIRST
+ * ancestor that has a row -- deepest wins, so a cell inside a ruled planet
+ * names the planet's ruler and not the cosmos ruler who also, technically,
+ * covers it.
+ *
+ * This exists because "you may not" is not an answer a player can act on: the
+ * whole point of naming the ruler on a refusal (the do_room template) is to
+ * tell them who to ask. Returning the shallowest owner would name the cosmos
+ * ruler for every refusal on the planet, which is true and useless.
+ *
+ * Returns NOTHING when no ancestor has a row, i.e. the region is unclaimed --
+ * distinct from "claimed by ref 0". st_can_region returning 0 with
+ * st_region_ruler returning NOTHING means nobody rules here; with a real owner
+ * it means somebody else does, which is the case a refusal must name. */
+unsigned
+st_region_ruler(uint64_t id, uint8_t plen)
+{
+	static const uint8_t widths[] = {
+		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
+	};
+	/* Same widths as st_can_region, but walked deepest-first: the array is
+	 * ascending, so it is walked in reverse. Reversing one array and not the
+	 * other is the kind of thing that silently answers the wrong question, so
+	 * both are derived from this one list below rather than each naming their
+	 * own. */
+	uint64_t mask;
+	size_t i;
+
+	if (plen > ST_PLEN_CELL)
+		return NOTHING;
+
+	for (i = sizeof(widths) / sizeof(widths[0]); i-- > 0; ) {
+		uint8_t w = widths[i];
+
+		if (w > plen)
+			continue;
+		mask = w ? (~0ULL << (64 - w)) : 0ULL;
+		unsigned owner = st_owner(id & mask, w);
+
+		if (owner != NOTHING)
+			return owner;
+	}
+	return NOTHING;
+}
+
+/* The region a pos_t falls in: the same derivation as st_region_of_player
+ * (pos_t through pos_morton, then the deepest covering region), for a position
+ * that is not necessarily where anybody stands. */
+static int
+st_region_of_pos(coord_t *pos, uint64_t *id, uint8_t *plen)
+{
+	uint64_t code, rid;
+	uint8_t w;
+
+	if (!pos || !id || !plen)
+		return XY_ERR_INVALID;
+	/* `coord_t *pos`, not `const pos_t *`: pos_t is an array, so a caller
+	 * must pass the decayed `pos`, and pos_morton takes a non-const. */
+	code = pos_morton(pos);
+	rid = xy_region_at(code, ST_PLEN_CELL, &w);
+	if (rid == XY_REGION_INVALID)
+		return XY_ERR_NOTFOUND;
+	*id = rid;
+	*plen = w;
+	return XY_OK;
+}
+
+/* Prefix containment, exactly as xy_region_at() documents it: (oid,oplen)
+ * covers (iid,iplen) iff oplen <= iplen and masking iid down to oplen bits
+ * yields oid. Pure arithmetic -- no tree walk, no ancestor chain, no row
+ * reads -- which is why this is the test the ban guard uses rather than a
+ * region lookup: given a destination morton code, "is it under the banned
+ * region" is five mask-and-compare operations.
+ *
+ * plen == 0 needs the shift-by-64 guard: ~0ULL << 64 is undefined, and the
+ * cosmos is exactly the case where it would bite. Masking to 0 bits yields 0,
+ * so the root covers everything, which is the whole of "the cosmos ruler is
+ * world-wide" and needs no special case at either end of this function. */
+int
+st_region_covers(uint64_t o_id, uint8_t o_plen, uint64_t i_id, uint8_t i_plen)
+{
+	uint64_t mask;
+
+	if (o_plen > i_plen)
+		return 0;
+	mask = o_plen ? (~0ULL << (64 - o_plen)) : 0ULL;
+	return (i_id & mask) == o_id;
+}
+
+/* Is (id,plen) inside the actor's authority?
+ *
+ * With an explicit selection this is just containment: the selected region and
+ * everything under it. With no selection it is the union of every region the
+ * actor owns, walked from the persisted rows -- NOT st_can_region, which would
+ * let one planet claim the whole address space through the cosmos fallback and
+ * turn "my regions" into "everywhere".
+ *
+ * The cosmos row is (0,0), and (0,0) covers every point, so an actor who rules
+ * the cosmos passes every query here without a special case. That is the one
+ * place world-wide authority comes from, and it is a consequence of the
+ * containment rule rather than a clause bolted on.
+ *
+ * sel_plen 0 with sel_id 0 is ambiguous -- it is both "the cosmos" and "no
+ * selection" -- so callers pass ST_SEL_UNSET to mean the latter. */
+int
+st_in_scope(unsigned actor, uint64_t sel_id, uint8_t sel_plen, uint64_t id,
+	uint8_t plen)
+{
+	unsigned c;
 	const void *kp, *vp;
-	struct st_key key;
-	void *sl;
 
+	if (sel_plen != ST_SEL_UNSET)
+		return st_region_covers(sel_id, sel_plen, id, plen);
+
+	if (!st_have_hd())
+		return 0;
+	c = corm_iter(owner_hd, NULL, 0);
 	while (corm_next(&kp, &vp, c)) {
-		key = *(const struct st_key *)kp;
-		sl = *(void **)vp;
-		dlclose(sl);
+		const char *key = kp;
+		const struct st_rec *rec = vp;
+		uint64_t rid;
+		uint8_t rplen;
+
+		if (st_row_key_parse(key, &rid, &rplen) != 0)
+			continue;  /* the ":owner" sidecars, and any legacy key */
+		if (rec->plen != rplen || rec->owner != actor)
+			continue;
+		if (st_region_covers(rid, rplen, id, plen)) {
+			corm_fin(c);
+			return 1;
+		}
 	}
+	corm_fin(c);
+	return 0;
 }
 
-typedef void (*st_run_cb)(unsigned player_ref);
+/* Region containing an arbitrary object, by walking containment up to the
+ * first room.
+ *
+ * Only rooms are ever mapped (w_hd's sole writer is map_put from st_room_at),
+ * so "walk until TYPE_ROOM" is the shortest correct path and needs no
+ * positional knowledge about items or entities. Depth is capped against
+ * entity cycles -- two entities each holding the other would otherwise spin.
+ *
+ * An UNMAPPED room resolves to its void coordinates, (0,0,0,0), which is in
+ * the cosmos. That is not §27.1's forbidden move. §27.1 is about event
+ * anchoring and asks "does this event have a specific anchor?"; its answer for
+ * an unmapped room is "no", which falls through to a global dispatch from the
+ * root -- the cosmos. This function asks a different question, "whose authority
+ * covers this object", and for the void the honest answer is the same region
+ * §27.1's fallback lands in. What §27.1 forbids is mistaking the void for a
+ * specific PLANET, and this does not: it reports the root, or fails if even the
+ * root row is gone.
+ *
+ * It matters that the void is not "no region". Players log in into an unmapped
+ * room, so treating that as unresolvable would put every player who has not yet
+ * been moved somewhere under nobody's authority -- a region ruler could not
+ * teleport them out, and eng_controls would refuse every command that resolves
+ * them by name. The void is part of the cosmos and the cosmos ruler governs it.
+ *
+ * Returns XY_ERR_NOTFOUND only when the walk genuinely dead-ends: ref 0 /
+ * NOTHING, a location with no OBJ row, or no room within the depth cap. Every
+ * caller treats that as "not in scope", which is the conservative direction --
+ * an object nobody can locate is an object nobody controls. */
+int
+st_region_of_obj(unsigned ref, uint64_t *id, uint8_t *plen)
+{
+	unsigned cur = ref;
+	int depth;
+
+	if (!id || !plen)
+		return XY_ERR_INVALID;
+
+	for (depth = 0; depth < 8; depth++) {
+		OBJ o;
+
+		if (cur == 0 || cur == NOTHING)
+			return XY_ERR_NOTFOUND;
+		/* corm_get_copy returns void, so probe with corm_get first. */
+		if (!corm_get(obj_hd, &cur))
+			return XY_ERR_NOTFOUND;
+		memset(&o, 0, sizeof(o));
+		corm_get_copy(obj_hd, &cur, &o);
+		if (o.type == TYPE_ROOM) {
+			pos_t pos;
+
+			/* No eng_map_has() gate: an unmapped room means the void
+			 * (eng_map_where's own comment says "unmapped room:
+			 * void/limbo coords"), and the void is the cosmos. See
+			 * the note above on why that is not §27.1's trap. */
+			eng_map_where(pos, cur);
+			/* pos, not &pos: pos_t is coord_t[4], so the name already
+			 * decays to coord_t *, which is what the helper takes. */
+			return st_region_of_pos(pos, id, plen);
+		}
+		cur = o.location;
+	}
+	return XY_ERR_NOTFOUND;
+}
+
+/* Region bans (ST.md §27.6(1) §7). Keys are fixed-width strings
+ * "PPPPPPPPPP:IIIIIIIIIIIIIIII:PP" (player, hex id, plen): zero-padded so
+ * lexicographic order IS (player, id, plen) order, keeping one player's rows
+ * contiguous for range scans. A builtin CM_STR key. Exact-key put/get/del
+ * are all any caller uses. */
+#define BAN_KEY_LEN 32
+
+static void
+st_ban_key(char *k, size_t len, unsigned player, uint64_t id, uint8_t plen)
+{
+	snprintf(k, len, "%010u:%016llx:%02u", player,
+		(unsigned long long)id, plen);
+}
+
+unsigned ban_hd = (unsigned)-1;
+static const char *ban_db = NULL;
+
+static int
+st_ban_have(void)
+{
+	return ban_hd != (unsigned)-1 && ban_hd != CM_MISS;
+}
 
 int
-st_get(uint64_t key, unsigned shift) {
-	struct st_key st_key = st_key_new(key, shift);
-	int owner;
-
-	const void *__bv = corm_get(owner_hd, &st_key);
-	if (!__bv)
-		return -1;
-
-	owner = *(const int *)__bv;
-	return owner;
-}
-
-inline static int
-_st_can(int ref, uint64_t key, unsigned shift) {
-	struct st_key st_key = st_key_new(key, shift);
-	int owner;
-
-	const void *__bv = corm_get(owner_hd, &st_key);
-	if (!__bv)
-		return 0;
-
-	owner = *(const int *)__bv;
-	return owner == ref;
-}
-
-static long int
-st_high_shift(unsigned player_ref, uint64_t position)
+st_ban_init(const char *db)
 {
-	int ref = player_ref;
-
-	if (_st_can(ref, 0, 64))
-		return 64;
-
-	for (int i = 63; i >= 0; i--)
-		if (_st_can(ref, position, i))
-			return i;
-
-	return -1;
+	ban_db = db;
+	ban_hd = corm_open(db, "region_ban", CM_STR, CM_U32, 0xFFFF, 0);
+	if (!st_ban_have())
+		WARN("st_ban_init: ban table unavailable, bans unenforced\n");
+	return st_ban_have();
 }
 
-inline static int
-_st_run(unsigned player_ref, char *symbol, uint64_t key, unsigned shift) {
-	struct st_key st_key = st_key_new(key, shift);
-	void *sl;
+void
+st_ban_put(unsigned player_ref, uint64_t id, uint8_t plen, unsigned banner)
+{
+	char k[BAN_KEY_LEN];
 
-	const void *__bv = corm_get(sl_hd, &st_key);
-	if (!__bv)
+	if (!st_ban_have())
+		return;
+	st_ban_key(k, sizeof(k), player_ref, id, plen);
+	corm_put(ban_hd, k, &banner);
+}
+
+int
+st_ban_lookup(unsigned player_ref, uint64_t id, uint8_t plen,
+	unsigned *banner)
+{
+	char k[BAN_KEY_LEN];
+	const void *v;
+
+	if (!st_ban_have())
 		return 0;
-
-	sl = *(void **)__bv;
-	st_run_cb cb = (st_run_cb) dlsym(sl, symbol);
-
-	if (!cb)
+	st_ban_key(k, sizeof(k), player_ref, id, plen);
+	v = corm_get(ban_hd, k);
+	if (!v)
 		return 0;
-
-	(*cb)(player_ref);
+	if (banner)
+		*banner = *(const unsigned *)v;
 	return 1;
 }
 
-void
-eng_st_run(unsigned player_ref, char *symbol) {
-	OBJ player;
-	/* System calls pass NOTHING/-1 (e.g. mod_init before any player
-	 * exists); there is no record to read, so start zeroed. A real ref
-	 * must exist: miss is a bug and CBUGs. Never fall through to garbage:
-	 * the old corm_get + if left player uninitialized on miss. */
-	memset(&player, 0, sizeof(player));
-	if (player_ref != NOTHING && player_ref != (unsigned)-1)
-		corm_get_copy(obj_hd, &player_ref, &player);
-	uint64_t position = eng_map_mwhere(player.location), mask = 0;
-	int i;
-	g_player_ref = player_ref;
+int
+st_ban_del(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	unsigned banner;
 
-	_st_run(player_ref, symbol, 0, 64);
-
-	for (i = 63; i >= 0; i--)
-		mask |= _st_run(player_ref, symbol, position, i) << i;
-
-	syslog(LOG_INFO, "eng_st_run %s %llx", symbol, mask);
-}
-
-void
-do_stchown(int fd, int argc, char *argv[]) {
-	unsigned player_ref = eng_fd_player(fd);
-
-	if (argc < 2) {
-		nd_writef(player_ref, "Requires at least an argument\n");
-		return;
-	}
-
-	unsigned who_ref = player_get(argv[1]);
-
-	if (who_ref == NOTHING) {
-		nd_writef(player_ref, "Invalid target\n");
-		return;
-	}
-
-	OBJ who;
-	corm_get_copy(obj_hd, &who_ref, &(who));
-
-	if (!(who.flags & OF_PLAYER)) {
-		nd_writef(player_ref, "Invalid target\n");
-		return;
-	}
-
-	OBJ player;
-	corm_get_copy(obj_hd, &player_ref, &(player));
-
-	uint64_t position = argc > 2
-		? strtoull(argv[3], NULL, 10)
-		: eng_map_mwhere(player.location);
-
-	long int high_shift = st_high_shift(player_ref, position);
-
-	unsigned shift = argc < 3 ? high_shift : strtoul(argv[2], NULL, 10);
-
-	long long unsigned key = shift > 63 ? 0 : position;
-
-	if (high_shift < shift) {
-		nd_writef(player_ref, "Permission denied\n");
-		return;
-	}
-
-	st_put(who_ref, key, shift);
-	nd_writef(player_ref, "Set shift %d ownership to %s\n", shift, who.name);
-}
-
-void
-do_streload(int fd, int argc, char *argv[]) {
-	unsigned player_ref = eng_fd_player(fd);
-	OBJ player;
-	corm_get_copy(obj_hd, &player_ref, &(player));
-
-	uint64_t position = argc > 2
-		? strtoull(argv[2], NULL, 10)
-		: eng_map_mwhere(player.location);
-
-	long int high_shift = st_high_shift(player_ref, position);
-
-	unsigned shift = argc < 2 ? high_shift : strtoul(argv[1], NULL, 10);
-
-	long long unsigned key = shift > 63 ? 0 : position;
-
-	struct st_key st_key = st_key_new(key, shift);
-	unsigned owner;
-	void *sl;
-
-	const void *__bv = corm_get(owner_hd, &st_key);
-	if (!__bv || *(const unsigned *)__bv != player_ref)
+	if (!st_ban_lookup(player_ref, id, plen, &banner))
+		return 0;
 	{
+		char k[BAN_KEY_LEN];
+
+		st_ban_key(k, sizeof(k), player_ref, id, plen);
+		corm_del(ban_hd, k);
+	}
+	return 1;
+}
+
+int
+st_ban_at(unsigned player_ref, uint64_t id, uint8_t plen,
+	uint64_t *ban_id, uint8_t *ban_plen)
+{
+	if (!st_ban_lookup(player_ref, id, plen, NULL))
+		return 0;
+	if (ban_id)
+		*ban_id = id;
+	if (ban_plen)
+		*ban_plen = plen;
+	return 1;
+}
+
+int
+st_ban_check(unsigned player_ref, uint64_t code,
+	uint64_t *ban_id, uint8_t *ban_plen)
+{
+	static const uint8_t widths[] = {
+		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
+	};
+	size_t i;
+
+	if (!st_ban_have())
+		return 0;
+	for (i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+		uint64_t mask = widths[i] ? (~0ULL << (64 - widths[i])) : 0ULL;
+
+		if (st_ban_at(player_ref, code & mask, widths[i],
+				ban_id, ban_plen))
+			return 1;
+	}
+	return 0;
+}
+
+/* The retired EF_BAN bit, kept as a literal for the migration read below.
+ * The enum member is gone (ST.md §27.6(1) §7 supersedes the bit with this
+ * table); nothing sets bit 16 anymore, so any row still carrying it is a ban
+ * from before the upgrade. */
+#define EF_BAN_LEGACY 16
+
+void
+st_ban_migrate(void)
+{
+	unsigned c;
+	const void *kp, *vp;
+
+	if (!st_ban_have())
+		return;
+	c = corm_iter(ent_hd, NULL, 0);
+	while (corm_next(&kp, &vp, c)) {
+		unsigned ref = *(const unsigned *)kp;
+		ENT e = *(const ENT *)vp;
+
+		if (!(e.flags & EF_BAN_LEGACY))
+			continue;
+		/* Banner unknown for legacy bans: NOTHING, which no live ref can
+		 * collide with. Region rulers can still unban through the region
+		 * rule; nobody can claim to be the original banner. */
+		if (!st_ban_have())
+			continue;
+		st_ban_put(ref, 0, ST_PLEN_ROOT, NOTHING);
+		e.flags &= ~EF_BAN_LEGACY;
+		eng_ent_set(ref, &e);
+	}
+	corm_fin(c);
+}
+
+/* Name a banned place for messages: the world number when it has one, the
+ * honest "everywhere" for a cosmos ban, "this region" otherwise. Shared by
+ * the ban/unban confirmations and the entry refusal so the place never has
+ * three spellings. */
+void
+st_ban_place(uint64_t id, uint8_t plen, char *buf, size_t len)
+{
+	if (plen == ST_PLEN_ROOT)
+		snprintf(buf, len, "everywhere");
+	else if (plen == ST_PLEN_WORLD)
+		snprintf(buf, len, "world %u", st_world_of(id));
+	else
+		snprintf(buf, len, "this region");
+}
+
+void
+st_ban_refuse(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	char place[64];
+
+	st_ban_place(id, plen, place, sizeof(place));
+	nd_writef(player_ref, "You are banned from %s.\n", place);
+	eng_nd_flush(player_ref);
+}
+
+/* The ruler's display name for a row header: the OBJ name when the ref still
+ * resolves, otherwise the bare number. corm_get_copy returns void, so
+ * existence is tested first -- a released owner's ref must not print garbage. */
+static void
+st_owner_name(unsigned owner_ref, char *buf, size_t len)
+{
+	OBJ o;
+
+	if (corm_get(obj_hd, &owner_ref)) {
+		memset(&o, 0, sizeof(o));
+		corm_get_copy(obj_hd, &owner_ref, &o);
+		snprintf(buf, len, "%s", o.name);
+	} else {
+		snprintf(buf, len, "%u", owner_ref);
+	}
+}
+
+/* The one refusal message every region gate uses, so "why" never depends on
+ * which command you typed. do_room already had this shape inline; it is here
+ * so the six gates do not each invent a wording, and because naming the ruler
+ * is only possible if the caller can ask who the ruler is.
+ *
+ * Flushes: every gate that calls this returns immediately afterwards, and
+ * nd_writef buffers per fd until the NEXT command (io.c), so an unflushed
+ * refusal is indistinguishable from silence -- which is how five of the six
+ * commands managed to look like no-ops for so long (ST.md §27.6(1)). */
+void
+st_refuse_region(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	char oname[64];
+	unsigned ruler = st_region_ruler(id, plen);
+
+	if (ruler == NOTHING)
+		nd_writef(player_ref, "Permission denied (this area is unclaimed)\n");
+	else {
+		st_owner_name(ruler, oname, sizeof(oname));
+		nd_writef(player_ref, "Permission denied (ruled by %s)\n", oname);
+	}
+	eng_nd_flush(player_ref);
+}
+
+static void
+st_row_header(unsigned player_ref, uint64_t id, uint8_t plen,
+	const struct st_rec *rec)
+{
+	char oname[64];
+
+	st_owner_name(rec->owner, oname, sizeof(oname));
+	if (plen == ST_PLEN_WORLD) {
+		nd_writef(player_ref, "[id=0x%016llx plen=%u world=%u owner=%s mods=%u]\n",
+			(unsigned long long)id, plen, st_world_of(id),
+			oname, rec->nmods);
+	} else {
+		nd_writef(player_ref, "[id=0x%016llx plen=%u owner=%s mods=%u]\n",
+			(unsigned long long)id, plen, oname, rec->nmods);
+	}
+}
+
+/* CMD_REGION.md §5.3: ONE region selector token, shared by every command that
+ * takes one plus `target`. `cosmos` is the root and is deliberately NOT
+ * `world 0`: st_planet_id(0) is (0, ST_PLEN_WORLD) = (0, 16), the first child of
+ * the cosmos, and libxylem is explicit that "(0,0) and (0,16) share" an id.
+ * Without this keyword the cosmos would be unreachable from these commands. */
+int
+st_cmd_world(const char *tok, uint64_t *id, uint8_t *plen)
+{
+	char *end = NULL;
+	unsigned long w;
+
+	if (!tok || !*tok || !id || !plen)
+		return XY_ERR_INVALID;
+	if (strcmp(tok, "cosmos") == 0) {
+		*id = 0;
+		*plen = ST_PLEN_ROOT;
+		return XY_OK;
+	}
+	/* The *end check rejects trailing junk. strtoul also tolerates leading
+	 * whitespace and a leading '+', which is harmless here: the caller's
+	 * tokens arrive already split on whitespace. */
+	w = strtoul(tok, &end, 10);
+	if (!end || end == tok || *end || w > 65535)
+		return XY_ERR_INVALID;
+	*id = st_planet_id((unsigned)w);
+	*plen = ST_PLEN_WORLD;
+	return XY_OK;
+}
+
+/* CMD_REGION.md §4.1: the sentinel is translated HERE and never returned. See
+ * st.h for why that discipline is load-bearing rather than tidiness. */
+int
+st_target_get(unsigned player_ref, uint64_t *id, uint8_t *plen)
+{
+	ENT e = eng_ent_get(player_ref);
+
+	if (e.target_plen == ST_SEL_UNSET)
+		return 0;
+	if (id)
+		*id = e.target_id;
+	if (plen)
+		*plen = e.target_plen;
+	return 1;
+}
+
+/* Read-modify-write, like every other ENT mutation in the engine: the row is
+ * re-read before the write, so no field is clobbered by a stale copy. */
+void
+st_target_set(unsigned player_ref, uint64_t id, uint8_t plen)
+{
+	ENT e = eng_ent_get(player_ref);
+
+	e.target_id = id;
+	e.target_plen = plen;
+	eng_ent_set(player_ref, &e);
+}
+
+void
+st_target_clear(unsigned player_ref)
+{
+	st_target_set(player_ref, 0, ST_SEL_UNSET);
+}
+
+/* CMD_REGION.md §4.3: THE default resolution. Explicit argument -> the player's
+ * default target -> the player's position. Seven commands route through this,
+ * which is the whole point: before it, `wall` resolved its no-argument case
+ * directly and would have ignored a setting the other six honoured. */
+int
+st_target_or_position(unsigned player_ref, uint64_t *id, uint8_t *plen)
+{
+	if (st_target_get(player_ref, id, plen))
+		return XY_OK;
+	return st_region_of_player(player_ref, id, plen);
+}
+
+/* argv[world_arg] names a region outright; without it the caller's default
+ * target region, or failing that their position-derived region. Returns XY_OK
+ * with (*id, *plen) set, or a negative XY_ERR_* with nothing set. */
+int
+st_cmd_region(unsigned player_ref, int argc, char *argv[], int world_arg,
+	uint64_t *id, uint8_t *plen)
+{
+	if (argc > world_arg && argv[world_arg] && *argv[world_arg]) {
+		if (st_cmd_world(argv[world_arg], id, plen) == XY_OK)
+			return XY_OK;
+		return XY_ERR_INVALID;
+	}
+	return st_target_or_position(player_ref, id, plen);
+}
+
+void
+do_planet(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	uint64_t id;
+	uint8_t plen = ST_PLEN_WORLD;
+	struct st_rec rec;
+	int have;
+	char *end = NULL;
+	unsigned long w;
+	char oname[64];
+
+	if (argc < 2 || !argv[1] || !*argv[1]) {
+		nd_writef(player_ref, "Usage: planet <world>\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	w = strtoul(argv[1], &end, 10);
+	if (!end || *end || w > 65535) {
+		nd_writef(player_ref, "Invalid world (0-65535)\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	id = st_planet_id((unsigned)w);
+
+	have = st_row_get(id, plen, &rec);
+	if (have && rec.owner != player_ref && rec.owner != NOTHING) {
+		st_owner_name(rec.owner, oname, sizeof(oname));
+		nd_writef(player_ref, "Planet %lu is already claimed by %s\n",
+			w, oname);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	/* A new claim is a cosmos-level decision: only the cosmos ruler may
+	 * carve a planet out of it. A reclaim only needs the row to be
+	 * unclaimed or the actor's own. */
+	if (!have && !st_can(player_ref, 0, ST_PLEN_ROOT)) {
 		nd_writef(player_ref, "Permission denied\n");
+		eng_nd_flush(player_ref);
 		return;
 	}
-	owner = *(const unsigned *)__bv;
-
-	const void *__bv2 = corm_get(sl_hd, &st_key);
-	if (!__bv2) {
-		nd_writef(player_ref, "Not open\n");
+	if (xy_claim_at(id, plen, NULL, NULL) != XY_OK) {
+		nd_writef(player_ref, "Planet %lu could not be claimed (%s)\n",
+			w, xy_strerror(xy_errno()));
+		eng_nd_flush(player_ref);
 		return;
 	}
-	sl = *(void **)__bv2;
+	/* A reclaim keeps the module set: the new ruler inherits the planet's
+	 * code and unloads what they do not want. */
+	if (!have) {
+		memset(&rec, 0, sizeof(rec));
+		rec.plen = plen;
+	}
+	rec.owner = player_ref;
+	st_row_put(id, plen, &rec);
 
-	dlclose(sl);
-	st_open(st_key, owner);
+	st_owner_name(player_ref, oname, sizeof(oname));
+	nd_writef(player_ref,
+		"planet %lu established: region id=0x%016llx plen=%u world=%lu owner=%s mods=%u\n",
+		w, (unsigned long long)id, plen, w, oname, rec.nmods);
+	eng_nd_flush(player_ref);
+}
+
+void
+do_planets(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
+{
+	unsigned player_ref = eng_fd_player(fd);
+	unsigned c = corm_iter(owner_hd, NULL, 0);
+	const void *kp, *vp;
+	int n = 0;
+
+	if (!st_have_hd())
+		return;
+	while (corm_next(&kp, &vp, c)) {
+		const char *key = kp;
+		const struct st_rec *rec = vp;
+		uint64_t id;
+		uint8_t plen;
+
+		if (st_row_key_parse(key, &id, &plen) != 0)
+			continue;
+		if (rec->plen != plen)
+			continue;
+		st_row_header(player_ref, id, plen, rec);
+		n++;
+	}
+	corm_fin(c);
+	if (!n)
+		nd_writef(player_ref, "No regions claimed.\n");
+	eng_nd_flush(player_ref);
+}
+
+void
+do_here(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
+{
+	unsigned player_ref = eng_fd_player(fd);
+	uint64_t id;
+	uint8_t plen;
+	struct st_rec rec;
+
+	if (st_region_of_player(player_ref, &id, &plen) != XY_OK) {
+		nd_writef(player_ref, "You are nowhere.\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_row_get(id, plen, &rec)) {
+		memset(&rec, 0, sizeof(rec));
+		rec.owner = NOTHING;
+		rec.plen = plen;
+	}
+	st_row_header(player_ref, id, plen, &rec);
+	eng_nd_flush(player_ref);
+}
+
+/* CMD_REGION.md §6: the player's default target region -- the region that
+ * wall/ban/unban/loadmod/unloadmod/modlist/deny act on when no selector is
+ * given. Bare `target` PRINTS (it is the discovery path for the whole feature,
+ * so it also says what it affects); `select` by contrast sets unconditionally. */
+void
+do_target(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	uint64_t id;
+	uint8_t plen;
+	char place[64];
+	const char *arg = (argc > 1 && argv[1]) ? argv[1] : "";
+
+	if (!*arg) {
+		if (st_target_get(player_ref, &id, &plen)) {
+			st_ban_place(id, plen, place, sizeof(place));
+			nd_writef(player_ref,
+				"Default target region: %s.\n", place);
+			nd_writef(player_ref,
+				"Commands without a region act there: wall, ban, "
+				"unban, loadmod, unloadmod, modlist, deny.\n");
+		} else {
+			nd_writef(player_ref,
+				"No default target region set (commands act on "
+				"your current region).\n");
+			nd_writef(player_ref,
+				"Set one with `target <region>', `target here', "
+				"or clear it with `target none'.\n");
+		}
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	if (strcmp(arg, "none") == 0) {
+		st_target_clear(player_ref);
+		nd_writef(player_ref, "Default target region cleared.\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* `target here` stores the region the player is standing in -- whatever
+	 * st_region_of_player() resolves, which is the deepest CLAIMED region, not
+	 * necessarily a cell. Only worlds are claimed (via `planet`), so in practice
+	 * this is a world or the cosmos. A raw cell (the full 64-bit position) is
+	 * deliberately NOT stored: recipients resolve to world granularity, so a
+	 * cell selector would cover nobody and the default would be a setting that
+	 * refuses everything it touches.
+	 *
+	 * This is still more than a `target <n>` alias: it needs no world number,
+	 * and from the void it stores the cosmos, which no number can name. */
+	if (strcmp(arg, "here") == 0) {
+		if (st_region_of_player(player_ref, &id, &plen) != XY_OK) {
+			nd_writef(player_ref, "You are nowhere.\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+	} else if (st_cmd_world(arg, &id, &plen) != XY_OK) {
+		nd_writef(player_ref,
+			"Usage: target [<world> | cosmos | here | none]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* Authorization at SET time, not at use time (CMD_REGION.md §6.3): a default
+	 * the player cannot use is a setting that appears to work and then refuses
+	 * every command -- the silent-no-op class of bug NO_WIZ.md §13.3 documents.
+	 * st_can_region (not the exact-ownership st_can that loadmod/unloadmod use)
+	 * because that asymmetry is honest: module loading attaches to one specific
+	 * region row, while a wall or ban is scoped to a subtree. A default naming a
+	 * descendant the player does not own exactly is settable here and refused by
+	 * those two commands, which is correct rather than surprising. */
+	if (!st_can_region(player_ref, id, plen)) {
+		st_refuse_region(player_ref, id, plen);
+		return;
+	}
+	st_target_set(player_ref, id, plen);
+	st_ban_place(id, plen, place, sizeof(place));
+	nd_writef(player_ref, "Default target region set to %s.\n", place);
+	eng_nd_flush(player_ref);
+}
+
+void
+do_room(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	pos_t pos;
+	unsigned there_ref;
+	uint64_t rid;
+	uint8_t rplen;
+	char oname[64];
+	char *end;
+	long v;
+	int i;
+
+	/* §27.3: this is the ENABLING primitive for the Phase 3 gate. Every room
+	 * inherits pos[3] from the room it was carved from (st_pos -> pos_move),
+	 * so the fresh world's rooms all sit at pos[3] == 0 and NOTHING in-game
+	 * reaches a non-zero world -- while "a module in planet A must not fire
+	 * for an event anchored in planet B" needs an anchor *in* planet B.
+	 *
+	 * It creates-or-finds the room AND enters it. The entering part is not
+	 * optional: do_teleport cannot make this move for a non-wizard because
+	 * its eng_controls path requires control of the caller's current
+	 * location, while room is already authorized for the target region. This
+	 * is the same create-or-find-then-enter shape as eng_st_teleport.
+	 *
+	 * Coordinates are explicit rather than derived, which is the whole point:
+	 * deriving them would inherit the world being 0 and reproduce the bug.
+	 */
+	if (argc < 5) {
+		nd_writef(player_ref, "Usage: room <x> <y> <z> <w>\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* strtol, not strtoul, and the range is checked: pos_t is signed and
+	 * pos_morton() reads it as unsigned, so -1 and 65535 would be two names
+	 * for the same cell. Refusing both is the only way the printed
+	 * coordinates can be read back as the coordinates that were stored. */
+	for (i = 0; i < 4; i++) {
+		if (!argv[1 + i] || !*argv[1 + i]) {
+			nd_writef(player_ref, "Usage: room <x> <y> <z> <w>\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		v = strtol(argv[1 + i], &end, 10);
+		if (end == argv[1 + i] || *end || v < COORD_MIN || v > COORD_MAX) {
+			nd_writef(player_ref, "Usage: room <x> <y> <z> <w>\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		pos[i] = (coord_t)v;
+	}
+
+	/* Authorize against the region the TARGET position falls in, not the one
+	 * the caller is standing in -- otherwise this would be a room-creating
+	 * privilege for anyone who happened to be anywhere, and would not stop a
+	 * planet's ruler from reaching into their neighbour. See st_can_region for
+	 * why the cosmos clause exists. */
+	if (st_region_of_pos(pos, &rid, &rplen) != XY_OK) {
+		nd_writef(player_ref, "Couldn't place a room there.\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_can_region(player_ref, rid, rplen)) {
+		st_owner_name(rid == 0 ? 0 : st_owner(rid, rplen), oname,
+			sizeof(oname));
+		nd_writef(player_ref, "Permission denied (ruled by %s)\n", oname);
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	/* Create-or-find. Asking the map first means the command is idempotent,
+	 * which matters because the gate calls it on both boots: re-creating a
+	 * room would hand out a fresh ref every time and any stored ref would
+	 * silently dangle. */
+	there_ref = eng_map_get(pos);
+	if (there_ref != NOTHING) {
+		const void *ov = corm_get(obj_hd, &there_ref);
+		if (ov && ((const OBJ *)ov)->type == TYPE_ROOM) {
+			eng_enter(player_ref, there_ref, E_NULL);
+			nd_writef(player_ref, "room %u at %d %d %d %d (existing)\n",
+				there_ref, pos[0], pos[1], pos[2], pos[3]);
+			eng_nd_flush(player_ref);
+			return;
+		}
+	}
+
+	there_ref = st_room_at(player_ref, pos);
+	if (there_ref == NOTHING) {
+		nd_writef(player_ref, "Couldn't make a room there.\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	eng_enter(player_ref, there_ref, E_NULL);
+	nd_writef(player_ref, "room %u at %d %d %d %d\n",
+		there_ref, pos[0], pos[1], pos[2], pos[3]);
+	eng_nd_flush(player_ref);
+}
+
+struct st_deny_arg {
+	char what[ND_ST_MOD_NAME + 32];
+	xy_deny_type_t type;
+	int rc;
+};
+
+static int
+st_deny_tramp(void *ud)
+{
+	struct st_deny_arg *a = ud;
+
+	a->rc = xy_deny(a->what, a->type);
+	return XY_OK;
+}
+
+/* deny <hook|module> <name> [world] -- ST.md §4.x delegation.
+ *
+ * SEMANTICS, which are dispatch-time and not load-time: libxylem consults a
+ * module deny only from the dispatch walker (module_is_denied() is reached
+ * from libxylem-dispatch.c and nowhere else), so a denied module still LOADS
+ * and is still recorded in the region's set -- it simply never gets to run
+ * there. That is the honest reading of xy.h's "a module that may not be loaded
+ * inside this region's subtree" only in the sense that matters, and it is what
+ * the Phase 3 gate asserts.
+ *
+ * There is NO removal API for a deny (xy_deny only prepends), so a deny is
+ * permanent for the life of the process and does not survive a reboot -- the
+ * deny sets live in region entries, and regions are rebuilt from the st rows.
+ * A "release" therefore cannot lift one either.
+ */
+void
+do_deny(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	struct st_deny_arg a;
+	uint64_t id;
+	uint8_t plen;
+	xy_deny_type_t type;
+	int rc;
+
+	if (argc < 3 || !argv[1] || !*argv[1] || !argv[2] || !*argv[2]) {
+		nd_writef(player_ref, "Usage: deny <hook|module> <name> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!strcmp(argv[1], "hook"))
+		type = XY_DENY_HOOK;
+	else if (!strcmp(argv[1], "module"))
+		type = XY_DENY_MODULE;
+	else {
+		nd_writef(player_ref, "Usage: deny <hook|module> <name> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (st_cmd_region(player_ref, argc, argv, 3, &id, &plen) != XY_OK) {
+		nd_writef(player_ref, "Invalid world\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_can_region(player_ref, id, plen)) {
+		nd_writef(player_ref, "Permission denied\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_row_get(id, plen, NULL)) {
+		/* A deny is a statement about a region's SUBTREE, so unlike `room`
+		 * there is no bootstrap case: there is no subtree to restrict until
+		 * the region exists. Refusing here keeps `deny` from silently
+		 * creating a region row as a side effect of a permission check. */
+		nd_writef(player_ref, "No such region\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+
+	snprintf(a.what, sizeof(a.what), "%s", argv[2]);
+	a.type = type;
+	a.rc = XY_ERR_INVALID;
+
+	/* claim first (idempotent, and it makes the region current), then
+	 * ADDRESS it explicitly -- the same claim-then-with_region shape as
+	 * st_region_load, rather than a reliance on retained currentness. */
+	rc = xy_claim_at(id, plen, NULL, NULL);
+	if (rc == XY_OK)
+		rc = xy_with_region(id, plen, st_deny_tramp, &a);
+	if (rc != XY_OK || a.rc != XY_OK) {
+		nd_writef(player_ref, "deny failed (%s)\n",
+			xy_strerror(rc != XY_OK ? rc : a.rc));
+		eng_nd_flush(player_ref);
+		return;
+	}
+	/* Report the FULL identity, not just the world: a cell-level deny is
+	 * legal and "denied in planet N" would name the wrong region for one. */
+	nd_writef(player_ref, "denied: %s %s in region id=0x%016llx plen=%u\n",
+		type == XY_DENY_HOOK ? "hook" : "module", argv[2],
+		(unsigned long long)id, plen);
+	eng_nd_flush(player_ref);
+}
+
+void
+do_loadmod(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	char namebuf[ND_ST_MOD_NAME + 1];
+	uint64_t id;
+	uint8_t plen;
+	int rc;
+
+	if (argc < 2 || !argv[1] || !*argv[1]) {
+		nd_writef(player_ref, "Usage: loadmod <name> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (strchr(argv[1], '/') || strlen(argv[1]) >= ND_ST_MOD_NAME) {
+		nd_writef(player_ref, "Invalid module name (stems only)\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	snprintf(namebuf, sizeof(namebuf), "%s", argv[1]);
+
+	if (st_cmd_region(player_ref, argc, argv, 2, &id, &plen) != XY_OK) {
+		nd_writef(player_ref, "Invalid world\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_can(player_ref, id, plen)) {
+		nd_writef(player_ref, "Permission denied\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_row_get(id, plen, NULL)) {
+		nd_writef(player_ref, "No such region\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (st_mod_loaded(id, plen, namebuf)) {
+		nd_writef(player_ref, "%s is already loaded\n", namebuf);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	/* Load FIRST, record after: a failed load leaves the row exactly as it
+	 * was, so a typo cannot persist and haunt every boot (§22.5). */
+	rc = st_region_load(id, plen, namebuf);
+	if (rc != XY_OK) {
+		nd_writef(player_ref, "%s failed to load (%s)\n",
+			namebuf, xy_strerror(xy_errno()));
+		eng_nd_flush(player_ref);
+		return;
+	}
+	st_mod_add(id, plen, namebuf);
+	nd_writef(player_ref, "%s loaded into region id=0x%016llx plen=%u\n",
+		namebuf, (unsigned long long)id, plen);
+	eng_nd_flush(player_ref);
+}
+
+void
+do_unloadmod(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	char namebuf[ND_ST_MOD_NAME + 1];
+	uint64_t id;
+	uint8_t plen;
+	int rc;
+
+	if (argc < 2 || !argv[1] || !*argv[1]) {
+		nd_writef(player_ref, "Usage: unloadmod <name> [world]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (strchr(argv[1], '/') || strlen(argv[1]) >= ND_ST_MOD_NAME) {
+		nd_writef(player_ref, "Invalid module name (stems only)\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	snprintf(namebuf, sizeof(namebuf), "%s", argv[1]);
+
+	if (st_cmd_region(player_ref, argc, argv, 2, &id, &plen) != XY_OK) {
+		nd_writef(player_ref, "Invalid world\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_can(player_ref, id, plen)) {
+		nd_writef(player_ref, "Permission denied\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_mod_loaded(id, plen, namebuf)) {
+		nd_writef(player_ref, "%s is not loaded\n", namebuf);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	rc = st_region_unload(id, plen, namebuf);
+	if (rc != XY_OK && rc != XY_ERR_NOTFOUND) {
+		nd_writef(player_ref, "%s failed to unload (%s)\n",
+			namebuf, xy_strerror(xy_errno()));
+		eng_nd_flush(player_ref);
+		return;
+	}
+	st_mod_del(id, plen, namebuf);
+	nd_writef(player_ref, "%s unloaded from region id=0x%016llx plen=%u\n",
+		namebuf, (unsigned long long)id, plen);
+	eng_nd_flush(player_ref);
+}
+
+void
+do_modlist(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	uint64_t id;
+	uint8_t plen;
+	struct st_rec rec;
+	uint32_t i;
+
+	if (st_cmd_region(player_ref, argc, argv, 1, &id, &plen) != XY_OK) {
+		nd_writef(player_ref, "Invalid world\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_row_get(id, plen, &rec)) {
+		nd_writef(player_ref, "No such region\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	st_row_header(player_ref, id, plen, &rec);
+	for (i = 0; i < rec.nmods && i < ND_ST_MAX_MODS; i++)
+		nd_writef(player_ref, "  %s\n", rec.mods[i]);
+	eng_nd_flush(player_ref);
+}
+
+void
+do_release(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	uint64_t id;
+	uint8_t plen;
+	struct st_rec rec;
+	uint32_t i;
+	char namebuf[ND_ST_MOD_NAME + 1];
+	char *end = NULL;
+	unsigned long w;
+
+	if (argc < 2 || !argv[1] || !*argv[1]) {
+		nd_writef(player_ref, "Usage: release <world>\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	w = strtoul(argv[1], &end, 10);
+	if (!end || *end || w > 65535) {
+		nd_writef(player_ref, "Invalid world (0-65535)\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	id = st_planet_id((unsigned)w);
+	plen = ST_PLEN_WORLD;
+
+	if (!st_can(player_ref, id, plen)) {
+		nd_writef(player_ref, "Permission denied\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!st_row_get(id, plen, &rec)) {
+		nd_writef(player_ref, "No such region\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	/* Best effort: one stuck module must not veto the release of the rest.
+	 * The row is deleted regardless, so nothing unloaded here comes back. */
+	for (i = 0; i < rec.nmods && i < ND_ST_MAX_MODS; i++) {
+		memcpy(namebuf, rec.mods[i], ND_ST_MOD_NAME);
+		namebuf[ND_ST_MOD_NAME] = '\0';
+		if (!namebuf[0])
+			continue;
+		if (st_region_unload(id, plen, namebuf) != XY_OK)
+			nd_writef(player_ref, "%s would not unload (%s)\n",
+				namebuf, xy_strerror(xy_errno()));
+	}
+	st_row_del(id, plen);
+	/* The region entry itself stays, inert: region entries are never
+	 * destroyed, and a later `planet` with the same number reuses it (§4.6). */
+	nd_writef(player_ref, "planet %lu released\n", w);
+	eng_nd_flush(player_ref);
 }

@@ -91,9 +91,13 @@ void do_say(int fd, int argc, char *argv[]);
 void do_select(int fd, int argc, char *argv[]);
 void do_status(int fd, int argc, char *argv[]);
 void do_teleport(int fd, int argc, char *argv[]);
+void do_unban(int fd, int argc, char *argv[]);
+void do_room(int fd, int argc, char *argv[]);
+void do_deny(int fd, int argc, char *argv[]);
 void do_toad(int fd, int argc, char *argv[]);
 void do_view(int fd, int argc, char *argv[]);
 void do_wall(int fd, int argc, char *argv[]);
+void do_target(int fd, int argc, char *argv[]);
 
 static unsigned nd_player_login(int fd, char *user);
 
@@ -124,47 +128,10 @@ void
 close_all(int i)
 {
 	map_sync();
+	mod_close();
 	corm_save();
 
-	mod_close();
-
-	corm_close(dplayer_hd);
-	corm_close(fds_hd);
-
-	st_dlclose();
-	corm_close(owner_hd);
-	corm_close(sl_hd);
-
-	corm_close(vtf_hd);
-	corm_close(situc_hd);
-	corm_close(sica_hd);
-	corm_close(sican_hd);
-	corm_close(bcp_hd);
-	corm_close(hd_hd);
-
-	corm_close(action_hd);
-	corm_close(type_hd);
-	corm_close(ent_hd);
-	corm_close(player_hd);
-	corm_close(obj_hd);
-	corm_close(contents_hd);
-	corm_close(obs_hd);
-	map_close(0);
-
-	corm_close(skel_hd);
-	corm_close(drop_hd);
-	corm_close(adrop_hd);
-	corm_close(element_hd);
-	corm_close(wts_hd);
-	corm_close(awts_hd);
-	corm_close(biome_hd);
-
-	corm_close(mod_hd);
-	corm_close(mod_id_hd);
-
 	closelog();
-	if (!i)
-		corm_save();
 	sync();
 	if (i)
 		exit(i);
@@ -333,9 +300,10 @@ shared_init(void)
 	nd_hds[HD_ELEMENT] = element_hd;
 	nd_hds[HD_HD] = hd_hd;
 
-	/* The legacy `struct nd` vtable goes away in Phase 3; until then it has
-	 * to agree with nd_hds[], so fill it from the same values rather than
-	 * repeating the mapping. */
+	/* The `struct nd` vtable has to agree with nd_hds[], so fill it from the
+	 * same values rather than repeating the mapping. The st_run slot went
+	 * away with the retired sl_hd dlopen table in Phase 3 (§27); st_teleport
+	 * stays, wired to eng_st_teleport. */
 	nd.hds[HD_FD] = fds_hd;
 	nd.hds[HD_SKEL] = skel_hd;
 	nd.hds[HD_DROP] = drop_hd;
@@ -369,7 +337,6 @@ shared_init(void)
 	nd.map_get = eng_map_get;
 
 	nd.st_teleport = eng_st_teleport;
-	nd.st_run = eng_st_run;
 
 	nd.wts_plural = plural;
 
@@ -447,7 +414,6 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	unsigned drop_type = corm_reg(sizeof(DROP));
 	unsigned element_type = corm_reg(sizeof(element_t));
 	unsigned biome_type = corm_reg(sizeof(unsigned) * BIOME_MAX);
-	unsigned st_type = corm_reg(sizeof(struct st_key));
 	unsigned ai_type = corm_reg(sizeof(action_t));
 	unsigned pair_type = corm_reg(sizeof(unsigned) * 2);
 	unsigned vtf_type = corm_reg(sizeof(vtf_t));
@@ -458,8 +424,18 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	nd_io_init();
 	signal(SIGSEGV, close_all);
 
-	owner_hd = corm_open(db, "st", st_type, CM_U32, 0xFFFF, 0);
-	sl_hd = corm_open(db, "sl", st_type, CM_PTR, 0xFFFF, 0);
+	/* The region table is record-aware with a string key (ST.md §22.1): one
+	 * row per region holding owner + width + module set. The record layout
+	 * must be registered before the open, and both halves of the open --
+	 * vtype and CM_RECORD(id) -- must name the same registration, or the
+	 * open refuses with CM_MISS and every region call below degrades to a
+	 * miss instead of indexing corm_heads[CM_MISS]. */
+	uint32_t st_rec = st_rec_register();
+	owner_hd = st_rec == CM_MISS ? CM_MISS :
+		corm_open(db, "st", CM_STR, corm_record_type_id(st_rec),
+			0xFFFF, CM_RECORD(st_rec));
+	if (owner_hd == CM_MISS)
+		WARN("nd_world_init: region table unavailable, planets disabled\n");
 
 	vtf_hd = corm_open(NULL, "vtf", CM_U32, vtf_type, 0xFF, CM_AINDEX);
 	situc_hd = corm_open(NULL, NULL, pair_type, CM_PTR, 0xFF, 0);
@@ -510,6 +486,10 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 
 	mod_id_hd = corm_open(db, "module_id", CM_U32, CM_PTR, 0xFF, CM_AINDEX);
 	mod_hd = corm_open(NULL, "mod", CM_STR, CM_U32, 0xFF, 0);
+
+	/* The ban table opens here, at boot with the other engine tables (see
+	 * st_ban_init): a table opened later loses its rows at shutdown. */
+	st_ban_init(db);
 
 	/* obj_hd persists, so room 0 distinguishes fresh from existing. Decided
 	 * once here, before any seeding puts below; every !existed guard in
@@ -611,18 +591,36 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 		void_ref = 16;
 		corm_put(biome_hd, &void_ref, biome_map);
 
-		unsigned owner = 1;
-		sthd_put(owner_hd, 0, 0, &owner);
+		/* The cosmos row (0, 0), owned by root. This is what makes the first
+		 * player the super-moderator: `planet` demands cosmos ownership
+		 * for a new claim, and st_can(player, 0, ST_PLEN_ROOT) answers 1
+		 * for its owner.
+		 * The old seed wrote a binary st_key {0,0} -- shift 0, i.e. plen
+		 * 64, a single cell -- which was never the cosmos at all (§22). */
+		struct st_rec cosmos;
+
+		memset(&cosmos, 0, sizeof(cosmos));
+		cosmos.owner = 1;
+		cosmos.plen = ST_PLEN_ROOT;
+		st_row_put(0, ST_PLEN_ROOT, &cosmos);
 	}
 
 	objects_init();
 
+	/* Retired-bit migration runs on EVERY boot, not just fresh ones: an
+	 * existing store may still carry EF_BAN from before the ban table
+	 * existed, and without this those bans would silently vanish on
+	 * upgrade. st_ban_migrate is idempotent (it clears the bit as it
+	 * goes), so re-running on a clean store is a no-op scan. */
+	st_ban_migrate();
+
+	/* Restored boots re-run every persisted set's xy_install; fresh boots
+	 * need nothing here because nd_mods_load() (from xy_install, after this
+	 * returns) installs mods.load. The old eng_st_run(-1, "mod_init") walked
+	 * the retired sl_hd dlopen table, which is empty on a fresh DB -- a
+	 * no-op that looked load-bearing. */
 	if (existed)
 		mod_load_all();
-	else {
-		st_put(1, 0, 64);
-		eng_st_run(-1, "mod_init");
-	}
 
 	srand(getpid());
 
@@ -639,7 +637,10 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 void
 do_sh(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 {
-	axil_tty_shell(fd);
+	/* Refusal happens in axil-tty; a non-zero return means the gate bit, and
+	 * the log line is the only trace of a probe that never allocated. */
+	if (axil_tty_shell(fd) != 0)
+		WARN("sh refused on %d\n", fd);
 }
 
 void
@@ -647,6 +648,17 @@ do_man(int fd, int argc, char *argv[])
 {
 	const char *topic = (argc > 1 && argv[1] && *argv[1]) ? argv[1] : "begin";
 	char path[BUFSIZ];
+
+	/* The topic reaches an execve argv below. A slash escapes "man/<topic>.10"
+	 * into an arbitrary-file read (man -l preprocesses through cat), and a
+	 * leading dash turns the fallback branch's positional into a man flag
+	 * (-K, --pager=). Legitimate topics are bare command names, so refuse all
+	 * three outright. */
+	if (strchr(topic, '/') || strstr(topic, "..") || *topic == '-') {
+		WARN("man: refused topic '%s' on %d\n", topic, fd);
+		axil_write(fd, "No manual entry.\r\n", strlen("No manual entry.\r\n"));
+		return;
+	}
 
 	snprintf(path, sizeof(path), "man/%s.10", topic);
 
@@ -710,6 +722,9 @@ struct cmd_slot cmds[] = {
 		.name = "teleport",
 		.cb = &do_teleport,
 	}, {
+		.name = "unban",
+		.cb = &do_unban,
+	}, {
 		.name = "wall",
 		.cb = &do_wall,
 	}, {
@@ -749,14 +764,47 @@ struct cmd_slot cmds[] = {
 		.name = "select",
 		.cb = &do_select,
 	}, {
-		.name = "stchown",
-		.cb = &do_stchown,
+		.name = "planet",
+		.cb = &do_planet,
 	}, {
-		.name = "streload",
-		.cb = &do_streload,
+		.name = "planets",
+		.cb = &do_planets,
+	}, {
+		.name = "here",
+		.cb = &do_here,
+	}, {
+		.name = "loadmod",
+		.cb = &do_loadmod,
+	}, {
+		.name = "unloadmod",
+		.cb = &do_unloadmod,
+	}, {
+		.name = "modlist",
+		.cb = &do_modlist,
+	}, {
+		.name = "release",
+		.cb = &do_release,
 	}, {
 		.name = "status",
 		.cb = &do_status,
+	}, {
+		/* CMD_REGION.md §6: the default region for every command that takes an
+		 * optional region selector. Arity is validated on the STRING in the
+		 * handler, never on argc: axil delivers a bare verb with argc >= 2 and
+		 * an empty argv[1] (NO_WIZ.md §13.2). */
+		.name = "target",
+		.cb = &do_target,
+	}, {
+		/* ST.md §27.3: the enabling primitive -- create a room at an explicit
+		 * 4D position, because every carved room otherwise inherits pos[3]
+		 * from its parent and no non-zero world is reachable in-game. */
+		.name = "room",
+		.cb = &do_room,
+	}, {
+		/* ST.md §4.x delegation: dispatch-time refusal, scoped to the
+		 * region's subtree, and permanent for the process. */
+		.name = "deny",
+		.cb = &do_deny,
 	}, {
 		.name = NULL,
 		.cb = NULL,
@@ -874,18 +922,36 @@ nd_player_login(int fd, char *user)
 
 		nd_evt_new_player(player_ref);
 	} else {
-		ENT eplayer = eng_ent_get(player_ref);
-
-		if (eplayer.flags & EF_BAN) {
-			nd_writef(player_ref, "You are banned.\n");
-			return 0;
-		}
-
+		/* Entry-only enforcement (ST.md §27.6(1) §7): login is always
+		 * allowed, and a ban bites on arrival instead. "Excluded from
+		 * region R" is meaningless for a login that spawns into the
+		 * void, and a login refusal would turn a cosmos-wide ban into a
+		 * permanent lockout. */
 		nd_io_attach(fd, player_ref);
 	}
 
+	/* axil_auth() is called for what it DOES, not for what it returns: it
+	 * records the passwd entry and flips DF_AUTHENTICATED, which cmd_proc's
+	 * auth gate requires before any command runs. Its return is ADVISORY and
+	 * means "this name has no passwd entry", not "not authenticated" --
+	 * axil.h: "Returns 0 on success, 1 if the name is unknown to the system
+	 * (the connection is still marked authenticated)", and "The 0/1 return is
+	 * ADVISORY ... A caller that wants to reject an unknown name must check
+	 * for itself".
+	 *
+	 * Reading that 1 as a rejection silently degraded every site login: every
+	 * axil-auth-registered account has no passwd entry -- getpwnam() fails
+	 * for all of them -- so the login bailed out here, BEFORE
+	 * mcp_auth_success/mcp_actions/do_view. A site user got a working
+	 * connection but never received AUTH_SUCCESS, their room view, or their
+	 * action table at login. An account with a session cookie is
+	 * authenticated -- auth() only gets here with REMOTE_USER set, which
+	 * axil's platform auth populates from that session or from -A -- and the
+	 * privilege fallback for a name with no passwd entry runs as the server's
+	 * own identity, never uid 0 (axil.h), so completing the login grants
+	 * nothing extra. Keep it visible, though: the name is not a system user. */
 	if (axil_auth(fd, user))
-		return NOTHING;
+		WARN("'%s': no passwd entry; authenticated by session only\n", user);
 
 	mcp_auth_success(player_ref);
 	mcp_actions(player_ref);
@@ -902,15 +968,98 @@ nd_player_login(int fd, char *user)
 
 void nd_event_announce(unsigned player_ref, unsigned loc_ref);
 
+/* Credential check owned by axil-auth, reached through the xy bus. Declared
+ * (not implemented) here, exactly like axil_tty_exec above: XY_DECL expands to
+ * a dispatcher. Non-zero means valid BY CONVENTION -- the bus zero-fills the
+ * result when no module implements the hook, so a "0 means valid" predicate
+ * would authenticate everyone the moment axil-auth is absent. */
+XY_DECL(int, auth_password_matches,
+	const char *, username,
+	const char *, password);
+
+/* Whether xy_install() managed to load libaxil-auth. The bus convention above
+ * already fails closed without it; this flag exists so the prompt can say so
+ * instead of hanging at "Password: ". */
+static int nd_auth_ready = 0;
+
+void
+nd_set_auth_ready(int ready)
+{
+	nd_auth_ready = ready ? 1 : 0;
+}
+
 void
 do_connect(int fd, int argc, char *argv[])
 {
-	if (argc < 2) {
+	char pending[64];
+
+	/* Passworded login in two phases: `connect <name>` arms a one-shot
+	 * password prompt on this descriptor, and the next line is the password.
+	 * A name alone never authenticates -- the old passwordless form is gone.
+	 * Pending state lives in the descriptor environment, which axil frees on
+	 * close, so a recycled fd can never inherit someone else's prompt. */
+	if (argc < 2 || !argv[1] || !*argv[1]) {
 		axil_write(fd, "Usage: connect <name>\r\n", strlen("Usage: connect <name>\r\n"));
 		return;
 	}
 
-	unsigned player_ref = nd_player_login(fd, argv[1]);
+	/* The pending slot is 63 chars; a longer name can never verify (auth
+	 * usernames are bounded well below that), so refuse it here rather than
+	 * storing a truncated name that fails confusingly later. */
+	if (strlen(argv[1]) >= sizeof(pending)) {
+		axil_write(fd, "Usage: connect <name>\r\n", strlen("Usage: connect <name>\r\n"));
+		return;
+	}
+
+	if (axil_env_get(fd, pending, sizeof(pending), "ND_PWPEND") == 0 && *pending) {
+		axil_write(fd, "Answer the pending password prompt first.\r\n",
+		    strlen("Answer the pending password prompt first.\r\n"));
+		return;
+	}
+
+	if (!nd_auth_ready) {
+		axil_write(fd, "Password authentication is unavailable.\r\n",
+		    strlen("Password authentication is unavailable.\r\n"));
+		return;
+	}
+
+	axil_env_put(fd, "ND_PWPEND", argv[1]);
+	/* IAC WILL ECHO: "I will echo, you will not." The server then sends
+	 * nothing back for the password line, so it never appears on screen or
+	 * in scrollback. Restored to WONT ECHO once the line is read. The prompt
+	 * ends with a newline: line-oriented readers (and this engine's own
+	 * transcript drains) can otherwise lose a newline-less prompt when
+	 * their read times out mid-line. */
+	static const unsigned char will_echo[] = { 255, 251, 1 };
+	axil_write(fd, (void *)will_echo, sizeof(will_echo));
+	axil_write(fd, "Password: \r\n", strlen("Password: \r\n"));
+}
+
+/* Second phase of connect: the line that arrived while ND_PWPEND was armed.
+ * Called from on_axil_parse (libaxil-nd.c), which already stripped telnet
+ * negotiation and cut the line. Clears the prompt before verifying, fails
+ * closed and uniformly, and closes on failure so each guess costs a reconnect. */
+void
+nd_password_line(int fd, const char *name, const char *password)
+{
+	static const unsigned char wont_echo[] = { 255, 252, 1 };
+
+	axil_env_put(fd, "ND_PWPEND", "");
+	axil_write(fd, (void *)wont_echo, sizeof(wont_echo));
+	axil_write(fd, "\r\n", 2);
+
+	if (!nd_auth_ready || !auth_password_matches(name, password)) {
+		/* Uniform on purpose: unknown user, wrong password, and an
+		 * unavailable service are indistinguishable, so the prompt cannot
+		 * be used to enumerate accounts. */
+		WARN("connect: failed password login for '%s' on %d\n", name, fd);
+		axil_write(fd, "Invalid name or password.\r\n",
+		    strlen("Invalid name or password.\r\n"));
+		axil_close(fd);
+		return;
+	}
+
+	unsigned player_ref = nd_player_login(fd, (char *)name);
 
 	if (player_ref && player_ref != NOTHING) {
 		nd_io_attach(fd, player_ref);

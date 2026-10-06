@@ -2,6 +2,7 @@
 
 #include "mcp.h"
 #include "player.h"
+#include "st.h"
 #include "uapi/entity.h"
 #include "uapi/match.h"
 #include "uapi/type.h"
@@ -82,20 +83,39 @@ do_inventory(int fd, int argc __attribute__((unused)), char *argv[] __attribute_
 }
 
 void
-do_owned(int fd, int argc __attribute__((unused)), char *argv[])
+do_owned(int fd, int argc, char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd), victim_ref, oi_ref;
-	char *name = argv[1];
 	int total = 0;
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
 
-	if ((eng_ent_get(player_ref).flags & EF_WIZARD) && *name) {
-		victim_ref = player_get(name);
-		if (victim_ref == NOTHING) {
-			nd_writef(player_ref, NOMATCH_MESSAGE);
+	victim_ref = player_ref;
+	if (*name) {
+		if (strcmp(name, "me") == 0) {
+			victim_ref = player_ref;
+		} else {
+			victim_ref = eng_ematch_player(name);
+			if (victim_ref == NOTHING) {
+				nd_writef(player_ref, NOMATCH_MESSAGE);
+				eng_nd_flush(player_ref);
+				return;
+			}
+		}
+	}
+
+	if (victim_ref != player_ref) {
+		uint64_t vid = 0;
+		uint8_t vplen = ST_PLEN_ROOT;
+
+		if (st_region_of_obj(victim_ref, &vid, &vplen) != 0) {
+			st_refuse_region(player_ref, 0, ST_PLEN_ROOT);
 			return;
 		}
-	} else
-		victim_ref = player_ref;
+		if (!st_can_region(player_ref, vid, vplen)) {
+			st_refuse_region(player_ref, vid, vplen);
+			return;
+		}
+	}
 
 	OBJ victim, oi;
 	corm_get_copy(obj_hd, &victim_ref, &(victim));
@@ -104,10 +124,22 @@ do_owned(int fd, int argc __attribute__((unused)), char *argv[])
 	while (corm_next(&kp, &vp, c)) {
 		oi_ref = *(const unsigned *)kp;
 		oi = *(const OBJ *)vp;
-		if (oi.owner == victim.owner) {
-			nd_writef(player_ref, "%s\n", eng_unparse(oi_ref));
-			total++;
+		if (oi.owner != victim.owner)
+			continue;
+		if (victim_ref != player_ref) {
+			uint64_t oid;
+			uint8_t oplen;
+
+			if (st_region_of_obj(oi_ref, &oid, &oplen) != 0)
+				continue;
+			if (!st_in_scope(player_ref, 0, ST_SEL_UNSET, oid,
+					oplen))
+				continue;
 		}
+		nd_writef(player_ref, "%s\n", eng_unparse(oi_ref));
+		total++;
 	}
+	corm_fin(c);
 	nd_writef(player_ref, "%d objects found.\n", total);
+	eng_nd_flush(player_ref);
 }
