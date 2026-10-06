@@ -43,6 +43,15 @@ Changed
   deleted: symbol dispatch is hook dispatch (`nd_scope_dispatch` walk),
   per-shift ownership is per-region ownership (`st_can` on id/plen rows) and
   per-shift reload is `loadmod`/`unloadmod` over the persisted set.
+- **`npm install` is JS-only.** The root `postinstall: make` hook is gone, and
+  `@tty-pt/axil-tty` is bumped to 1.3.2, which drops its own: installing ran
+  `make` inside `node_modules/@tty-pt/axil-tty`, whose Makefile gets every
+  rule from `-include ./../mk/include.mk` — a path that only exists as a dev
+  sibling checkout, never under `node_modules` — so a plain `npm i` died with
+  `make: no target to make` (prod hit exactly that). The C side is the
+  system-installed axil stack and the checkout's own `make`, which is what
+  README "Build from source" documents anyway; nothing consumed the
+  node_modules build.
 
 Added
 - **Region primitives** (NO_WIZ.md §4): `st_region_covers()` (pure

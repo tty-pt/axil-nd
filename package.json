@@ -31,8 +31,7 @@
     "doc": "docs"
   },
   "scripts": {
-    "build": "scripts build && tailwindcss -i src/app.css -o htdocs/app.css --minify && node tools/verify-css.mjs",
-    "postinstall": "make"
+    "build": "scripts build && tailwindcss -i src/app.css -o htdocs/app.css --minify && node tools/verify-css.mjs"
   },
   "repository": {
     "type": "git",
@@ -46,7 +45,7 @@
   "homepage": "https://tty.pt",
   "devDependencies": {
     "@popperjs/core": "^2.11.0",
-    "@tty-pt/axil-tty": "^1.3.0",
+    "@tty-pt/axil-tty": "^1.3.2",
     "@tty-pt/scripts": "^0.8.0",
     "@tty-pt/sub": "^2.3.0",
     "@xterm/addon-fit": "^0.11.0",
