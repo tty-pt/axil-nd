@@ -54,6 +54,7 @@ void nd_io_attach(unsigned fd, unsigned player_ref);
 void nd_io_detach(unsigned fd);
 void nd_io_reset(unsigned fd);
 void nd_mods_load(void);
+void st_init(void);
 void nd_demo_announce(unsigned player_ref);
 void nd_event_announce(unsigned player_ref, unsigned loc_ref);
 /* same-TU XY providers from nd_xy.c (declared for the axil hooks above). */
@@ -441,6 +442,35 @@ XY_IMPL(int, on_axil_exit, int, i)
   return 0;
 }
 
+/* The content-load window. axil fires this once from axil_init(), after -C
+ * has done its chroot()/chdir() and before the first bind -- so a file these
+ * loaders resolve is resolved inside the jail, and no request can arrive
+ * before they finish.
+ *
+ * Both used to run pre-chroot (st_init() at the tail of nd_world_init(),
+ * nd_mods_load() in xy_install() below), and both are exactly the two things
+ * that open FILES rather than merely registering: the persisted planet
+ * modules and the flat mods.load list. Everything that only registers --
+ * engine boot, deps, commands, handlers, the DB open -- stays where it was,
+ * because none of it needs the jail and moving it would risk a boot that
+ * works today.
+ *
+ * Order is the old one: st_init() first (it used to end nd_world_init()),
+ * then the list. The guard makes a second fire -- a host that calls the hook
+ * again, or an exit-time re-entry -- a no-op rather than a double load. */
+XY_IMPL(int, on_axil_post_chroot, void)
+{
+  static int loaded;
+
+  if (loaded)
+    return 0;
+  loaded = 1;
+
+  st_init();
+  nd_mods_load();
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* HTTP handlers                                                       */
 /* ------------------------------------------------------------------ */
@@ -506,7 +536,10 @@ xy_install(void)
    * axil-tty's on_axil_connect opens the PTY and sets auto_shell, and its
    * on_axil_parse/on_axil_tick are what make a shell live here at all. */
   axil_register_handler("GET:" ND_TTY_ROUTE, axil_tty_handle_tty);
-  nd_mods_load();
+  /* nd_mods_load() and st_init() are NOT here: they open files (the list,
+   * the persisted modules), so they run from on_axil_post_chroot() above --
+   * after -C's chroot, before the first bind. Everything here registers
+   * rather than resolves, so it stays pre-chroot where it has always run. */
   xy_load("axil-tty");
   /* Passworded connect authenticates through axil-auth's exported credential
    * check. The bus convention (non-zero means valid) already fails closed when

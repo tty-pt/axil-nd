@@ -615,17 +615,18 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	st_ban_migrate();
 
 	/* Restored boots re-run every persisted set's xy_install; fresh boots
-	 * need nothing here because nd_mods_load() (from xy_install, after this
-	 * returns) installs mods.load. The old eng_st_run(-1, "mod_init") walked
-	 * the retired sl_hd dlopen table, which is empty on a fresh DB -- a
-	 * no-op that looked load-bearing. */
+	 * need nothing here -- st_init() (persisted regions) and nd_mods_load()
+	 * (the flat mods.load list) both run from on_axil_post_chroot(), i.e.
+	 * after -C has done its chroot, so everything they load resolves inside
+	 * the jail. mod_load_all() stays here, pre-chroot: it walks the retired
+	 * sl_hd dlopen table, which is empty on a fresh DB -- a no-op that
+	 * looked load-bearing. */
 	if (existed)
 		mod_load_all();
 
 	srand(getpid());
 
 	setenv("TERM", "xterm-256color", 1);
-	st_init();
 
 	axil_register_handler("/test", &test_handler);
 

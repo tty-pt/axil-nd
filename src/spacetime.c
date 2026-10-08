@@ -1461,6 +1461,20 @@ st_init(void) {
 		}
 	}
 	free(rows);
+
+	/* Restore root currentness. Every xy_claim_at() above makes its region
+	 * current, and nothing puts it back: xy_with_region() only restores
+	 * what was current when it was entered (the just-claimed planet), and
+	 * the XY hook dispatch only restores the caller's region when the
+	 * callee lives in a different one -- the engine lives at root, so a
+	 * hook that calls this leaks the last planet as the process-wide
+	 * current region. xy_call() dispatches to the current region's subtree,
+	 * so from a planet every root module (engine, axil-tty, axil-auth)
+	 * goes invisible and input lines vanish with XY_ERR_NOTFOUND. The old
+	 * xy_install() containment (mod_load_enter/restore_context) did this
+	 * implicitly; any caller outside it needs it done here. Root re-claim
+	 * is explicitly clean (it is its own best match). */
+	xy_claim_at(0, 0, NULL, NULL);
 }
 
 /* ---------------------------------------------------------------------------
