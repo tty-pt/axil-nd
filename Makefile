@@ -1,7 +1,6 @@
 all := libaxil-nd
 SONAME-libaxil-nd := axil-nd
 
-LDFLAGS-libaxil-nd := -L../axil-tty/lib
 LDFLAGS-libaxil-nd-Darwin := -undefined dynamic_lookup
 
 share != find ./htdocs -type f
