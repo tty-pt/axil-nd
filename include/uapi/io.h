@@ -86,6 +86,7 @@ void nd_io_init(void);
 void nd_io_attach(unsigned fd, unsigned player_ref);
 void nd_io_detach(unsigned fd);
 void nd_io_reset(unsigned fd);
+void nd_io_flush_fd(unsigned fd);
 
 typedef unsigned (nd_put_t)(unsigned, void *, void *);
 nd_put_t nd_put, nd_get;

@@ -5,8 +5,9 @@
  * x/interface.c main() and is currently ALSO carried privately in
  * x/nd_xy.c — Phase 2 deletes the nd_xy.c copy and keeps these.
  *
- * Per-fd typewriter buffer (history×dedup) kept here; axil_flush() is the
- * "after any command" hook slot axil calls.
+ * Per-fd typewriter buffer (history×dedup) kept here; nd_io_flush_fd() is the
+ * fd-level flush exposed to the on_axil_flush XY hook (libaxil-nd.c), the
+ * "after any command" slot axil invokes.
  */
 
 #include "uapi/io.h"
@@ -156,7 +157,7 @@ ioc_flush(int fd)
 }
 
 void
-axil_flush(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
+nd_io_flush_fd(unsigned fd)
 {
 	ioc_flush(fd);
 }

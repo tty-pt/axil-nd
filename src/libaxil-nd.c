@@ -53,6 +53,7 @@ void nd_io_init(void);
 void nd_io_attach(unsigned fd, unsigned player_ref);
 void nd_io_detach(unsigned fd);
 void nd_io_reset(unsigned fd);
+void nd_io_flush_fd(unsigned fd);
 void nd_mods_load(void);
 void st_init(void);
 void nd_demo_announce(unsigned player_ref);
@@ -215,9 +216,12 @@ XY_IMPL(int, on_axil_connect, socket_t, fd)
      * this the descriptor and its TCP socket stay open indefinitely (the
      * pre-fix behaviour: `ws_init` in the log, then silence, no disconnect
      * ever). The client that probed it held a live, silent connection for
-     * its whole timeout, one fd per probe. Close it: the close frame first
-     * (a spec-correct peer then terminates its own side), then the full
-     * teardown so the socket does not linger for peers that ignore the frame.
+     * its whole timeout, one fd per probe. axil_close() sends the close frame
+     * (ws_close(), since DF_WEBSOCKET is set) and then tears the socket down,
+     * so a spec-correct peer terminates its own side and peers that ignore the
+     * frame do not leave it lingering. Calling axil_ws_close() first would send
+     * a second close frame, which the browser rejects as "Close received after
+     * close", so the teardown's own frame is the only one.
      * axil_close() inside this hook is safe: it runs the disconnect hooks
      * (nd's own nd_disconnect tolerates a missing entry, axil-tty's tolerates
      * a missing pty since S5.4) and the post-hook `d->flags |= DF_CONNECTED`
@@ -225,7 +229,6 @@ XY_IMPL(int, on_axil_connect, socket_t, fd)
      *
      * The reachable case is an unauthenticated /nd upgrade: no REMOTE_USER, so
      * auth() already sent mcp_auth_fail and returned 0. */
-    axil_ws_close(fd);
     axil_close(fd);
     return 0;
   }
@@ -432,6 +435,17 @@ XY_IMPL(int, on_axil_update, unsigned long long, dt)
    * dt * 1000 treated microseconds as milliseconds and ran the world 1000x
    * fast. */
   nd_update(dt);
+  return 0;
+}
+
+/* The tail flush libaxil calls after every dispatched command (libaxil.c:1176).
+ * Wiring the executable's axil_flush bridge to this hook is what makes the
+ * history+dedup buffer in io.c drain without an explicit eng_nd_flush. */
+XY_IMPL(int, on_axil_flush, socket_t, fd, int, argc, char **, argv)
+{
+  (void)argc;
+  (void)argv;
+  nd_io_flush_fd(fd);
   return 0;
 }
 
