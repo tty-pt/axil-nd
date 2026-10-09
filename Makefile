@@ -21,7 +21,7 @@ libaxil-nd-obj-y := ${ENGINE-obj-y}
 # carries <ttypt/xy.h>. It used to be the default `ttypt`, which is why this
 # needed a bespoke install-papi writing to $(PREFIX)/include/axil-nd/papi/ -- a
 # directory on no default include path, so every module carried a private -I for
-# it. Every module is an installed library now (see `mods:` below), so this is
+# it. Every module is an installed library now, so this is
 # the only include path a module needs beyond its own.
 FOLDER := nd
 # FOLDER no longer creates include/ttypt, so the engine's own header has to
@@ -83,6 +83,9 @@ check-lib:
 .PHONY: check-lib
 
 demo: mods/demo/demo.so
+# demo is the engine's own in-tree module: built here, then granted to a
+# region with `loadmod libnd-demo`, like every other module. There is no
+# module list and no `mods:` build-list target.
 # The installed xylem headers are prerequisites, not just an -I path. demo.so
 # embeds XY_CTX_ABI_DESC at compile time, so bumping XY_CTX_ABI_VER in
 # $(PREFIX)/include/ttypt/xy.h invalidates nothing else -- `make` sees only
@@ -93,44 +96,6 @@ XY_HDRS := /usr/include/ttypt/xy.h /usr/include/ttypt/xy-mod.h
 mods/demo/demo.so: mods/demo/demo.c include/nd/xy.h $(XY_HDRS)
 	cd mods && cc -shared -fPIC -I../include -I/usr/include -o demo/demo.so demo/demo.c
 .PHONY: demo
-
-MODS_LOAD := mods.load
-modnames != sed -n 's/^\([A-Za-z0-9_.\/-][A-Za-z0-9_.\/-]*\).*/\1/p' \
-	${MODS_LOAD} 2>/dev/null
-modnames := $(sort ${modnames})
-
-# Names containing `/` are dev-tree checkouts; bare names are either in-tree or
-# an installed library. nd_mods_load() (src/nd_xy.c) splits them the same way.
-slashmods := $(foreach n,${modnames},$(if $(findstring /,${n}),${n}))
-baremods  := $(filter-out ${slashmods},${modnames})
-inmods    := $(foreach n,${baremods},$(if $(wildcard mods/$(n)/$(n).c),${n}))
-
-mods: $(foreach m,${inmods},mods/${m}/${m}.so) \
-	$(foreach m,${slashmods},${m}.$(SO))
-
-# in-tree module: a bare name, so mods/<n>/<n>.so
-mods/%.so: mods/%/%.c include/nd/xy.h $(XY_HDRS)
-	cd mods/$* && $(CC) -shared -fPIC -I../../include -I/usr/include \
-		-o $*.so $*.c
-
-# A bare name with no module in this tree is an INSTALLED library, so there is
-# nothing to build here: its soname symlink is all `make install` has to produce
-# and dlopen() resolves it at boot. Deliberately not a prerequisite, so `make
-# mods` does not require it to be installed first; a missing one is reported by
-# nd_mods_load() and the engine still boots (mods.load says so too).
-
-# A path-named module builds ITSELF: delegate to that directory's own Makefile
-# and ask it for <stem>. This used to hand it the engine's nd-mod.mk with MOD=
-# and ND_INC= set, which is how a bare main.c at the root of a sibling checkout
-# became <stem>.so. nd-mod.mk is deleted now that every module is an installed
-# library, so a path entry has to carry its own rule -- which is the honest
-# contract, and is why nothing in the tracked mods.load uses this form any more.
-# The test fixture in test.sh is the one remaining caller.
-$(foreach m,${slashmods},$(m).$(SO)): FORCE
-	$(MAKE) -C $(patsubst %/,%,$(dir $(basename $@))) $(notdir $@)
-
-FORCE:
-.PHONY: mods FORCE
 
 test: all
 	@./test.sh

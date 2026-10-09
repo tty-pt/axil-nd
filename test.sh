@@ -60,33 +60,21 @@ persist_pid_b=
 planet_pid_a=
 planet_pid_b=
 planet_pid_c=
-# mods.load is tracked, so the fixture below registers the test module in it
-# for this run and the trap puts the shipped list back. The trap is installed
-# BEFORE anything can fail -- an earlier version created the fixture and ran
-# `make mods` first, so a build error left the fixture named in a tracked file
-# and every later run inherited a module that did not exist.
-mods_load_saved=$(mktemp)
-cp mods.load "$mods_load_saved"
-# Restores the tracked mods.load even on FAILURE or interrupt: a suite that
-# leaves a test fixture committed in the shipped module list is worse than one
-# that fails to clean up its temp dir.
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
+# The trap is installed BEFORE anything can fail and covers the temp dir,
+# all daemon pids, and the lib/ symlinks the suite adds below.
+trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
-# MODS.md §0.4 out-of-tree module fixture.
+# Out-of-tree module fixture.
 #
 # The engine only ever had modules inside its own tree, so nothing has ever
 # exercised the sibling-repo layout: a separate directory, its own Makefile,
-# built on its own, named in mods.load by its own path. That is the single
-# riskiest seam -- a path that is silently reshaped to `mods/<n>/<n>` fails with
-# no error at all, just a hook that stopped firing.
+# built on its own. It is granted to the root region below by its installed
+# soname (the lib/ symlink), exactly like a real module package.
 #
 # So build one here rather than trusting a hand-made probe. The fixture's
-# Makefile is SELF-CONTAINED and used to include the engine's nd-mod.mk, which
-# is deleted now that every real module is an installed library built by
-# mk/include.mk. That is the point: the path form of mods.load no longer has a
-# shared driver, so anything named by path brings its own rule, and `make mods`
-# drives it with exactly that -- `$(MAKE) -C <dir> <stem>`.
+# Makefile is SELF-CONTAINED: anything loadable brings its own rule, built
+# with `make -C` below.
 #
 # $(pwd) below is expanded HERE, to the engine root: the fixture is built with
 # -C, so it cannot reach back for the engine's headers itself. ${PREFIX:-/usr}
@@ -97,9 +85,9 @@ rm -rf "$probe"
 mkdir -p "$probe"
 cat > "$probe/Makefile" <<EOF
 # Deliberately minimal, and deliberately NOT the house library shape: this
-# fixture exists to prove the path form of mods.load loads a module built
+# fixture exists to prove an out-of-tree module loads when built
 # outside the engine tree, so it should be as close to hand-written as a real
-# one can get. Same rule 'make mods' drives it with.
+# one can get. Granted to the root region by soname in the warm-up below.
 testprobe.so: testprobe.c
 	\$(CC) -shared -fPIC -I$(pwd)/include -I${PREFIX:-/usr}/include \\
 		-o \$@ \$<
@@ -137,9 +125,6 @@ XY_IMPL(int, on_enter, unsigned, player_ref, unsigned, loc_ref)
 }
 EOF
 
-# Register it by path for this run only; the trap above restores mods.load.
-printf '%s\n' "$probe/testprobe" >> mods.load
-
 # ---------------------------------------------------------------------------
 # Passworded-connect fixture: libaxil-auth plus a loader that initialises it.
 #
@@ -152,8 +137,8 @@ authfix=../axil-nd-authfix
 rm -rf "$authfix"
 mkdir -p "$authfix"
 cat > "$authfix/Makefile" <<EOF
-# Same self-contained shape as the testprobe above: built on its own, named in
-# mods.load by its own path, driven by the same 'make mods'.
+# Same self-contained shape as the testprobe above: built on its own, granted
+# to the root region by its installed soname in the warm-up below.
 authfix.so: authfix.c
 	\$(CC) -shared -fPIC -I$(pwd)/../axil-auth/include -I$(pwd)/../libxylem/include -I$(pwd)/../axil/include -I$(pwd)/../libcorm/include -I$(pwd)/../libqsys/include \\
 		-o \$@ \$< \\
@@ -186,20 +171,27 @@ void xy_install(void)
 	fprintf(stderr, "nd-auth-fixture: auth initialised at %s\n", d);
 }
 EOF
-printf '%s\n' "$authfix/authfix" >> mods.load
+# Build every fixture module before booting. Every module is an installed
+# library now, built by its own Makefile; the .so beside the engine (lib/ is
+# on LD_LIBRARY_PATH and the engine's module-load path) is what makes each
+# one resolvable by bare soname at warm-up `loadmod` time. A module that no
+# longer compiles would otherwise be discovered as "the hook silently stopped
+# firing" deep in the suite -- the exact failure mode this explicit build
+# guards against.
+make --no-print-directory demo
+make --no-print-directory -C "$probe"
+make --no-print-directory -C "$authfix"
 
 # libaxil-auth.so beside the engine so nd's xy_load("libaxil-auth") resolves
 # through the loader even where LD_LIBRARY_PATH does not reach.
 ln -sf ../axil-auth/lib/libaxil-auth.so lib/libaxil-auth.so
-
-# Build every module named in mods.load before booting (MODS.md §0.4). The
-# engine loads whatever is in that list, so a module that no longer compiles
-# would otherwise be discovered as "the hook silently stopped firing" deep in
-# the suite, which is the exact failure mode Phase 1 makes worse: modules move
-# into sibling repos and a stale .so on disk will happily keep serving the old
-# code. `make mods` also re-checks that a mods.load path entry actually
-# resolves, since the path-aware nd_mods_load() now trusts it verbatim.
-make --no-print-directory mods
+# demo, testprobe and authfix beside the engine under their loadable sonames,
+# so the warm-up `loadmod` below resolves them by bare stem. Note the depth:
+# these links live in lib/, so the sibling checkouts above the engine root
+# need two levels of `..`; demo's own tree needs one.
+ln -sf ../mods/demo/demo.so lib/libnd-demo.so
+ln -sf ../../axil-nd-testprobe/testprobe.so lib/libaxil-testprobe.so
+ln -sf ../../axil-nd-authfix/authfix.so lib/libaxil-authfix.so
 
 # Scratch account database for the fixture above. The login name is the same
 # real account the old suite required (connect used to need a passwd entry);
@@ -263,6 +255,80 @@ ndlogin() { # fd user pass marker capture tries?
 	return 0
 }
 
+# bounded-poll for a marker in the server log ($log): hook WARNs land there
+# asynchronously after the socket marker that proves the login completed.
+ndlogwait() { # marker tries?
+	local _m=$1 _t=${2:-60}
+	while [ $_t -gt 0 ]; do
+		grep -qF "$_m" "$log" 2>/dev/null && return 0
+		_t=$((_t - 1)); sleep 0.1
+	done
+	return 1
+}
+
+# Unmasked WS binary frame (zero mask key leaves the payload unchanged). The
+# trailing newline is load-bearing: axil's cmd_parse dispatches complete
+# lines, and a payload without one never runs.
+ndws() { # fd text
+	local _fd=$1 _len=$((${#2} + 1))
+	printf "\x82\x$(printf '%02x' $((_len | 128)))\x00\x00\x00\x00%s\n" "$2" >&"$_fd"
+}
+
+# Warm-up: grant stems to the root region of a fresh server via `loadmod`.
+# There is no boot list, so a fresh store boots with no modules at all. The
+# -A server auto-authenticates this socket as the OS user, whose first player
+# owns the cosmos, so bare `loadmod <stem>` (the caller's own region, the
+# root) is permitted. Each grant is confirmed on the socket before the next.
+# fd 13 is used throughout: no section opens it for anything else.
+ndwarm() { # port log capfile stem...
+	local _port=$1 _log=$2 _cap=$3 _key _req _tries _m
+	shift 3
+	_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+	printf -v _req 'GET /nd HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n' \
+		"$_port" "$_key"
+	exec 13<>/dev/tcp/127.0.0.1/$_port
+	printf '%s' "$_req" >&13
+	while IFS= read -r -t3 line <&13; do
+		line="${line%$'\r'}"
+		[ -z "$line" ] && break
+	done
+	: >"$_cap"
+	stdbuf -i0 -o0 cat <&13 >"$_cap" &
+	_warm_cat=$!
+	_tries=60
+	while [ $_tries -gt 0 ]; do
+		grep -qF "nd_player_login: '$user'" "$_log" 2>/dev/null && break
+		_tries=$((_tries - 1)); sleep 0.1
+	done
+	[ $_tries -eq 0 ] && { echo "FAIL: warm-up login not seen on $_port" >&2; return 1; }
+	for _m in "$@"; do
+		ndws 13 "loadmod $_m"
+		_tries=80
+		while [ $_tries -gt 0 ]; do
+			grep -qaF "$_m loaded into" "$_cap" && break
+			_tries=$((_tries - 1)); sleep 0.05
+		done
+		[ $_tries -eq 0 ] && { echo "FAIL: warm-up loadmod $_m not confirmed on $_port" >&2; return 1; }
+	done
+	# The warm-up player was created before any module loaded, so vanilla's
+	# on_new_player never teleported them: they are still self-located, and
+	# a self location resolves to no region (st_region_of_obj self-loops to
+	# depth 8), which denies authority over everything they own or carry.
+	# Entering an explicit room lands them in a real room in the cosmos,
+	# the shape the old boot list produced via vanilla at creation.
+	ndws 13 "room 0 0 0 0"
+	_tries=80
+	while [ $_tries -gt 0 ]; do
+		grep -qaF "at 0 0 0 0" "$_cap" && break
+		_tries=$((_tries - 1)); sleep 0.05
+	done
+	[ $_tries -eq 0 ] && { echo "FAIL: warm-up room 0 0 0 0 not confirmed on $_port" >&2; return 1; }
+	kill -9 $_warm_cat 2>/dev/null || true
+	wait $_warm_cat 2>/dev/null || true
+	exec 13<&-
+	return 0
+}
+
 # the real engine boot opens its store here (world_db(): AXIL_ND_DB else
 # /var/nd/std.db, unwritable on dev hosts).
 export AXIL_ND_DB="$tmpdb/std.db"
@@ -296,6 +362,20 @@ while [ $tries -gt 0 ]; do
 done
 [ $tries -eq 0 ] && { echo "FAIL: axil did not become ready" >&2; exit 1; }
 sleep 0.05
+
+# ---------------------------------------------------------------------------
+# Warm-up: grant the game modules to the root region via `loadmod`.
+#
+# There is no boot list: a fresh store has region rows with no modules, so the
+# engine boots with none loaded. demo first for the announce frames, then the
+# slice in dependency order (shop after core), then the two fixtures. The
+# second player below (not this warm-up connection) is what fires the
+# creation-time hooks with the modules present.
+warm_out="$tmpdb/warm.out"
+ndwarm "$port" /tmp/axil_test.log "$warm_out" \
+	libnd-demo libnd-core libnd-other libnd-level libnd-vanilla libnd-shop \
+	libaxil-authfix libaxil-testprobe \
+	|| exit 1
 
 # Now open the real connection
 exec 3<>/dev/tcp/127.0.0.1/$port
@@ -410,8 +490,9 @@ echo "$hex" | grep -qiF "5b64656d6f5d206e645f7072696e7466" \
 	|| { echo "FAIL: nd_printf output not on the wire" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# MODS.md §6 Phase 1 vertical slice. Four real modules in four sibling repos,
-# named in the TRACKED mods.load by path, built by `make mods` above.
+# MODS.md §6 Phase 1 vertical slice. Five real modules in sibling repos,
+# installed libraries granted to the root region by the warm-up `loadmod`
+# above.
 #
 # All of these are CONNECT-TIME hooks (on_icon, on_add, on_new_player,
 # xy_install), so they are asserted on the log right after the WS handshake.
@@ -420,11 +501,29 @@ echo "$hex" | grep -qiF "5b64656d6f5d206e645f7072696e7466" \
 # src/entity.c:236) -- it is not a connect-time event. The earlier version of
 # this block asserted the "Level" line against the connect-time capture, which
 # could never contain it; the assertion was right, its timing was not.
-grep -qF "nd-core: on_icon TYPE_ROOM -> ch='-'" "$log" \
+# The warm-up connection created the first player before any module was
+# granted, so that login consumed the creation-time events with no listeners
+# installed. A second, genuinely new player fires them with the modules
+# present: the fixture $mp_guest over raw telnet (passworded `connect`, like
+# every later raw login). Its creation fires on_add, its new-player landing
+# fires on_new_player, and its initial view render fires on_icon for the
+# room -- the same three the first connection asserted before the warm-up
+# existed.
+mp_txt="$tmpdb/mp_newplayer.out"
+: >"$mp_txt"
+exec 10<>/dev/tcp/127.0.0.1/$port
+stdbuf -i0 -o0 cat <&10 >"$mp_txt" &
+mp_cat=$!
+ndlogin 10 "$mp_guest" "$guestpass" "on_enter" "$mp_txt" \
+	|| { echo "FAIL: second-player login missing" >&2; exit 1; }
+kill -9 $mp_cat 2>/dev/null || true
+wait $mp_cat 2>/dev/null || true
+exec 10<&-
+ndlogwait "nd-core: on_icon TYPE_ROOM -> ch='-'" \
 	|| { echo "FAIL: nd-core's on_icon did not fire for a room (struct return across the bus)" >&2; exit 1; }
-grep -qF "nd-other: on_add first call" "$log" \
+ndlogwait "nd-other: on_add first call" \
 	|| { echo "FAIL: nd-other's on_add never fired" >&2; exit 1; }
-grep -qF "nd-vanilla: on_new_player teleported" "$log" \
+ndlogwait "nd-vanilla: on_new_player teleported" \
 	|| { echo "FAIL: nd-vanilla's on_new_player did not fire" >&2; exit 1; }
 # nd-level's table must be a TAGGED module handle (0x80000001), never a bare
 # corm handle that could alias HD_*. Asserted on the real value, because
@@ -440,44 +539,27 @@ grep -qF "nd-core: core_icon_decorate #1" "$log" \
 	|| { echo "FAIL: nd-shop did not register an icon decorator with nd-core" >&2; exit 1; }
 grep -qF "nd-shop: xy_install, commands shop/buy/sell" "$log" \
 	|| { echo "FAIL: nd-shop's xy_install did not run" >&2; exit 1; }
-# Every slice module must be present, and none may have failed to load: a
-# missing module in mods.load produces no error, just silence.
+# Every slice module must be present, and none may have failed to load: an
+# unloaded module produces no error, just silence. The warm-up confirms each
+# grant on the socket; this re-checks the set from the boot log.
 for m in core other level vanilla; do
 	grep -qF "nd-$m: xy_install" "$log" \
 		|| { echo "FAIL: nd-$m did not install" >&2; exit 1; }
 done
-! grep -qF "failed to load" "$log" \
-	|| { echo "FAIL: a mods.load entry failed to load" >&2; exit 1; }
+! grep -qaF "failed to load" "$warm_out" \
+	|| { echo "FAIL: a warm-up loadmod failed to load" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# MODS.md §0.4 out-of-tree build + path-aware loader. `make mods` above is
-# the build half; this is the load half.
-#
-# A sibling module repo (~/axil-nd-<mod>) is named in mods.load by its STEM,
-# e.g. `../axil-nd-probe/probe`, and nd_mods_load() must hand that to xy_load()
-# verbatim instead of reshaping it to `mods/<n>/<n>`. The .so for this
-# fixture is NOT in mods/, so nothing but the path branch can load it.
-#
-# The suite creates the fixture itself rather than depending on a checkout
-# left lying around, so this stays green on a fresh clone.
-probe=../axil-nd-testprobe
-probe_mod=$(grep -cE "^${probe}/" mods.load || true)
-if [ "$probe_mod" -ge 1 ]; then
-	[ -f "${probe}/testprobe.so" ] \
-		|| { echo "FAIL: make mods did not build the out-of-tree ${probe}" >&2; exit 1; }
-	grep -qF "testprobe module installed from '${probe}/testprobe'" "$log" \
-		|| { echo "FAIL: out-of-tree module was not loaded from its mods.load path" >&2; exit 1; }
-	# Proves the whole §0.2/§0.3 contract again from a SECOND, genuinely
-	# out-of-tree TU: a module built by its own Makefile with no access to
-	# the engine tree, against nothing but nd/ and ttypt/ on the include path.
-	grep -qF "testprobe on_enter: HD_OBJ=resolved (ok) hd=tagged" "$log" \
-		|| { echo "FAIL: out-of-tree module could not resolve HD_OBJ / tag a handle" >&2; exit 1; }
-else
-	# Not in the list: assert the loader did NOT try to reshape it into
-	# mods/<n>/<n>, which is the regression this branch guards.
-	! grep -qF "testprobe module installed" "$log" \
-		|| { echo "FAIL: a module loaded that is not in mods.load" >&2; exit 1; }
-fi
+# Out-of-tree module: built by its own Makefile with no access to the engine
+# tree, granted by soname in the warm-up. Asserts it installed (xy_install
+# ran) and proves the whole §0.2/§0.3 contract again from a SECOND, genuinely
+# out-of-tree TU, against nothing but nd/ and ttypt/ on the include path.
+[ -f "${probe}/testprobe.so" ] \
+	|| { echo "FAIL: the out-of-tree ${probe} was not built" >&2; exit 1; }
+grep -qF "testprobe module installed from" "$log" \
+	|| { echo "FAIL: out-of-tree module was not granted to the root region" >&2; exit 1; }
+grep -qF "testprobe on_enter: HD_OBJ=resolved (ok) hd=tagged" "$log" \
+	|| { echo "FAIL: out-of-tree module could not resolve HD_OBJ / tag a handle" >&2; exit 1; }
 
 # Real verb round-trip: "say pong" over WS dispatches through cmds[] →
 # do_say → "You say: pong." (mask key = 00 00 00 00 → payload unchanged)
@@ -783,6 +865,33 @@ ws_code=$(curl -s -o /dev/null -w "%{http_code}" -c "$ws_jar" -X POST \
 [ "$ws_code" = "303" ] || { echo "FAIL: cookie-terminal login got $ws_code" >&2; exit 1; }
 ws_tok=$(awk '/QSESSION/ {print $NF}' "$ws_jar")
 [ -n "$ws_tok" ] || { echo "FAIL: no session token for cookie terminals" >&2; exit 1; }
+
+# Warm-up: this store is fresh, so no module is loaded. Grant demo to the root
+# region, so the cookie /nd login below fires on_enter (the marker the
+# assertion below waits on). Same warm-up as the main server, cookie-flavoured:
+# connect with the session token, `loadmod libnd-demo` as the cosmos owner.
+ws_warm_key=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+exec 12<>/dev/tcp/127.0.0.1/$wsp
+printf 'GET /nd HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCookie: QSESSION=%s\r\n\r\n' \
+	"$wsp" "$ws_warm_key" "$ws_tok" >&12
+while IFS= read -r -t3 line <&12; do
+	line="${line%$'\r'}"
+	[ -z "$line" ] && break
+done
+ws_warm_out="$tmpdb/ws_warm.out"
+: >"$ws_warm_out"
+stdbuf -i0 -o0 cat <&12 >"$ws_warm_out" &
+ws_warm_cat=$!
+ndws 12 "loadmod libnd-demo"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qaF "libnd-demo loaded into" "$ws_warm_out" && break
+	tries=$((tries - 1)); sleep 0.05
+done
+[ $tries -eq 0 ] && { echo "FAIL: ws warm-up loadmod libnd-demo not confirmed" >&2; exit 1; }
+kill -9 $ws_warm_cat 2>/dev/null || true
+wait $ws_warm_cat 2>/dev/null || true
+exec 12<&-
 
 # /nd with the cookie: game login first (on_enter proves it), then terminals.
 ws_nd_out="$tmpdb/ws_nd.out"
@@ -1118,14 +1227,11 @@ s54_pid=$!
 #
 # This must be a SUPERSET of the trap at the top, not a replacement for it.
 # `trap ... EXIT` overwrites wholesale, so the short form used to drop the
-# mods.load restore, the tmpdir removal and every other daemon kill: a single
-# FAIL here left a live axil holding $port AND left the tracked mods.load
-# carrying a duplicate ../axil-nd-testprobe/testprobe line for every later run
-# to inherit. Measured while landing ST.md §27.6(1): a cold-start FAIL here
-# leaked `axil -d -A -p <port>` and dirtied mods.load; the next run then booted
-# testprobe twice. The scope section below re-declares the full trap for
-# exactly this reason -- do the same here.
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
+# tmpdir removal and every other daemon kill: a single FAIL here left a live
+# axil holding $port. Measured while landing ST.md §27.6(1): a cold-start
+# FAIL here leaked `axil -d -A -p <port>`. The scope section below re-declares
+# the full trap for exactly this reason -- do the same here.
+trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 s54_settle=50
 while [ $s54_settle -gt 0 ]; do
 	grep -qF "Done." "$s54_log" 2>/dev/null && nc -z 127.0.0.1 "$s54_port" 2>/dev/null && break
@@ -1430,7 +1536,7 @@ sz=$(stat -c %s "$persist_db" 2>/dev/null || echo 0)
 #      (§7.6), so this is asserted in the row, not just in the output
 #
 # The three modules used are the point of §15's ninth bullet: libnd-wts,
-# libnd-stone and libnd-biome are all COMMENTED OUT of mods.load, so none of
+# libnd-stone and libnd-biome are never granted to the root region, so none of
 # them is in the cosmos-wide root tier. Using a root-tier module here would
 # make "a module in planet A never fires for planet B" pass vacuously, since
 # a root module fires for every planet by construction.
@@ -1761,10 +1867,9 @@ killaxil $planet_pid_c; planet_pid_c=
 # The probes are built HERE, from one source, tagged by -D, and installed into
 # $tmpdb/probe which is prepended to LD_LIBRARY_PATH. They must be reachable by
 # BARE SONAME: `loadmod` rejects any name containing '/' (xy would treat it as
-# a path), so the §0.4 by-path fixture shape cannot be used for a planet. And
-# they must not be root-tier, which is why they are not in mods.load -- every
-# module in mods.load is loaded into the root region and therefore fires for
-# every planet by construction.
+# a path). And they must not be root-tier: they are loaded into the planets
+# here, never into the root region, so a probe that fired from the cosmos
+# instead of its own planet would fail the gate below.
 # ---------------------------------------------------------------------------
 
 scopeprobe_dir="$tmpdb/probe"
@@ -1819,7 +1924,7 @@ ld="$tmpdb/scope-a.log"
 le="$tmpdb/scope-b.log"
 scope_pid_a=
 scope_pid_b=
-trap 'cp "$mods_load_saved" mods.load; rm -f "$mods_load_saved" "$tmpout"; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; rm -f lib/libaxil-auth.so; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} 2>/dev/null || true' EXIT
+trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} 2>/dev/null || true' EXIT
 
 # Count a marker in a log. Used as a DELTA around one command, never as a
 # whole-file grep: "probe A did not fire" is only meaningful if the assertion
@@ -2076,6 +2181,14 @@ AXIL_ND_DB="$mpdb/w.db" axil -d -A -p "$mp" -m ./lib/axil-nd >"$mpla" 2>&1 &
 mp_pid=$!
 wait_up "$mpla" "$mp" || { echo "FAIL: S6 ematch boot did not init" >&2; exit 1; }
 
+# Vanilla warm-up: without it fresh players stay self-located, their region
+# unresolvable, and eng_controls denies every teleport of them. Vanilla's
+# on_new_player teleports each newcomer to world 0, which is the shape every
+# `teleport #<guest> here` below was calibrated on (the old boot list loaded
+# it on every server).
+ndwarm "$mp" "$mpla" "$mpdb/warm.out" libnd-vanilla \
+	|| exit 1
+
 # Per-fd send+drain, so each side's transcript is that command's output alone.
 mpcmd() {
 	local fd=$1 file=$2; shift 2
@@ -2241,6 +2354,11 @@ w7_guest_txt="$w7db/guest.txt"
 AXIL_ND_DB="$w7db/w.db" axil -d -A -p "$w7" -m ./lib/axil-nd >"$w7la" 2>&1 &
 w7_pid=$!
 wait_up "$w7la" "$w7" || { echo "FAIL: S7 boot did not init" >&2; exit 1; }
+
+# Vanilla warm-up (see S6): the teleport/chown proofs below need the guest in
+# a real room, not self-located.
+ndwarm "$w7" "$w7la" "$w7db/warm.out" libnd-vanilla \
+	|| exit 1
 
 w7cmd() {
 	local fd=$1 file=$2; shift 2
@@ -2514,6 +2632,10 @@ AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
 b8_pid=$!
 wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot did not init" >&2; exit 1; }
 
+# Vanilla warm-up (see S6): the ban arrival proofs teleport the guest.
+ndwarm "$b8" "$b8la" "$b8db/warm.out" libnd-vanilla \
+	|| exit 1
+
 b8cmd() {
 	local fd=$1 file=$2; shift 2
 	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
@@ -2708,6 +2830,10 @@ b9_guest_txt="$b9db/guest.txt"
 AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m ./lib/axil-nd >"$b9la" 2>&1 &
 b9_pid=$!
 wait_up "$b9la" "$b9" || { echo "FAIL: S9 boot did not init" >&2; exit 1; }
+
+# Vanilla warm-up (see S6): the legs teleport the guest between worlds.
+ndwarm "$b9" "$b9la" "$b9db/warm.out" libnd-vanilla \
+	|| exit 1
 
 b9cmd() {
 	local fd=$1 file=$2; shift 2

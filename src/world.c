@@ -107,8 +107,6 @@ void objects_update(double dt);
 void map_init(void);
 int map_close(unsigned flags);
 int map_sync(void);
-void mod_close(void);
-void mod_load_all(void);
 void base_vtf_init(void);
 
 /* The store lives in the axil data root: axil chdir()s into
@@ -128,7 +126,6 @@ void
 close_all(int i)
 {
 	map_sync();
-	mod_close();
 	corm_save();
 
 	closelog();
@@ -379,13 +376,8 @@ shared_init(void)
 	nd.ematch_near = eng_ematch_near;
 	nd.ematch_all = eng_ematch_all;
 
-	nd.mod_load = mod_load;
-
 	nd.action_register = eng_action_register;
 	nd.vtf_register = eng_vtf_register;
-	nd.sic_areg = sic_areg;
-	nd.sic_get = sic_get;
-	nd.sic_call = sic_call;
 
 	nd.noise_point = eng_noise_point;
 
@@ -415,9 +407,7 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	unsigned element_type = corm_reg(sizeof(element_t));
 	unsigned biome_type = corm_reg(sizeof(unsigned) * BIOME_MAX);
 	unsigned ai_type = corm_reg(sizeof(action_t));
-	unsigned pair_type = corm_reg(sizeof(unsigned) * 2);
 	unsigned vtf_type = corm_reg(sizeof(vtf_t));
-	unsigned sica_type = corm_reg(sizeof(sic_adapter_t));
 
 	const char *db = world_db();
 
@@ -438,20 +428,15 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 		WARN("nd_world_init: region table unavailable, planets disabled\n");
 
 	vtf_hd = corm_open(NULL, "vtf", CM_U32, vtf_type, 0xFF, CM_AINDEX);
-	situc_hd = corm_open(NULL, NULL, pair_type, CM_PTR, 0xFF, 0);
-	sica_hd = corm_open(NULL, "sica", CM_U32, sica_type, 0xFF, CM_AINDEX);
-	sican_hd = corm_open(NULL, NULL, CM_STR, CM_U32, 0xFF, 0);
 	bcp_hd = corm_open(NULL, "bcp", CM_U32, CM_STR, 0xFF, CM_AINDEX);
 	hd_hd = corm_open(NULL, NULL, CM_STR, CM_U32, 0xFF, 0);
 
-	/* action_hd/type_hd are boot-registration maps, not state: modules (and
-	 * the host) register during load, and every consumer either iterates
-	 * the whole map (mcp_actions) or is handed the offsets below fresh each
-	 * boot. Persisting them only let a per-boot re-registration append
-	 * duplicates — the host seeds are guarded by !existed, but
-	 * mod_load_all() re-runs every module's xy_install on every later boot.
-	 * Same family as vtf_hd/sica_hd/bcp_hd just above: transient, and
-	 * repopulated unconditionally below. */
+	/* action_hd/type_hd are boot-registration maps, not state: every
+	 * consumer either iterates the whole map (mcp_actions) or is handed
+	 * the offsets below fresh each boot. Persisting them only let a
+	 * per-boot re-registration append duplicates. Same family as
+	 * vtf_hd/bcp_hd just above: transient, and repopulated
+	 * unconditionally below. */
 	action_hd = corm_open(NULL, "action", CM_U32, ai_type, 0xFFFF, CM_AINDEX);
 	type_hd = corm_open(NULL, "ndt", CM_U32, CM_STR, 0xFFFF, CM_AINDEX);
 	ent_hd = corm_open(db, "entity", CM_U32, ent_type, 0xFFFF, 0);
@@ -484,9 +469,6 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 
 	shared_init();
 
-	mod_id_hd = corm_open(db, "module_id", CM_U32, CM_PTR, 0xFF, CM_AINDEX);
-	mod_hd = corm_open(NULL, "mod", CM_STR, CM_U32, 0xFF, 0);
-
 	/* The ban table opens here, at boot with the other engine tables (see
 	 * st_ban_init): a table opened later loses its rows at shutdown. */
 	st_ban_init(db);
@@ -502,21 +484,20 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	}
 
 	/* The 20 SIC_AREG() calls that used to stand here are gone. SIC_AREG
-	 * was world.c-local (`fname##_id = sic_areg(XSTR(fname), &fname##_sic_adapter)`)
-	 * and registered every adapter explicitly at boot, redundantly with the
-	 * .sic_auto_init sections the SIC_DEFs emitted. Registration is now a
-	 * single path: each XY_DEF's AUTO_INIT constructor in src/nd_events.c
-	 * (folded into libaxil-nd.c) registers its own hook. */
+	 * was world.c-local and registered every adapter explicitly at boot,
+	 * redundantly with the .sic_auto_init sections the SIC_DEFs emitted.
+	 * Registration is now a single path: each XY_DEF's AUTO_INIT
+	 * constructor in src/nd_events.c (folded into libaxil-nd.c) registers
+	 * its own hook. */
 
 	/* type_hd is transient: these two are its only entries, re-registered
 	 * every boot in this fixed order. The order is load-bearing, not
 	 * incidental — object.c:186 reads type_hd + 1 and world.c sets
 	 * nd.hds[HD_RTYPE] = type_hd + 2, both assuming "room" is id 1 and
-	 * "entity" is id 2. These seeds run before mod_load_all()/mod_init
-	 * below, so the host claims those ids first on every boot. If a
-	 * module-facing type registration API is ever added, whoever seeds
-	 * here still has to go first, or those two offsets must become
-	 * by-name lookups. */
+	 * "entity" is id 2. These seeds run before any module loads below, so
+	 * the host claims those ids first on every boot. If a module-facing
+	 * type registration API is ever added, whoever seeds here still has to
+	 * go first, or those two offsets must become by-name lookups. */
 	corm_put(type_hd, NULL, "room");
 	corm_put(type_hd, NULL, "entity");
 
@@ -532,9 +513,9 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	corm_put(bcp_hd, NULL, "action");
 
 	/* action_hd is transient, so these are re-registered every boot —
-	 * unconditionally, like the bcp_hd puts above. They must precede
-	 * mod_load_all()/mod_init below so the built-in actions keep the low
-	 * ids; module-registered actions append after. */
+	 * unconditionally, like the bcp_hd puts above. They must precede any
+	 * module load below so the built-in actions keep the low ids;
+	 * module-registered actions append after. */
 	eng_action_register("look", "\xf0\x9f\x94\x8d");
 	eng_action_register("get", "\xf0\x9f\x96\x90\xef\xb8\x8f");
 	eng_action_register("drop", "\xf0\x9f\xaa\xa3");
@@ -614,15 +595,10 @@ nd_world_init(int argc __attribute__((unused)), char **argv __attribute__((unuse
 	 * goes), so re-running on a clean store is a no-op scan. */
 	st_ban_migrate();
 
-	/* Restored boots re-run every persisted set's xy_install; fresh boots
-	 * need nothing here -- st_init() (persisted regions) and nd_mods_load()
-	 * (the flat mods.load list) both run from on_axil_post_chroot(), i.e.
-	 * after -C has done its chroot, so everything they load resolves inside
-	 * the jail. mod_load_all() stays here, pre-chroot: it walks the retired
-	 * sl_hd dlopen table, which is empty on a fresh DB -- a no-op that
-	 * looked load-bearing. */
-	if (existed)
-		mod_load_all();
+	/* Nothing to do here for modules on any boot: game modules live in
+	 * region rows and restore from on_axil_post_chroot(), i.e. after -C
+	 * has done its chroot, so everything they load resolves inside the
+	 * jail. */
 
 	srand(getpid());
 

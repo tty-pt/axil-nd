@@ -26,7 +26,7 @@
  *     from the caller's identity. Every wrapper below lives in the one TU that
  *     holds libaxil-nd's injected module context (xy, from xy-mod.h), so
  *     events always fire from the engine's own region subtree. Game modules
- *     loaded by nd_mods_load() are children of exactly that region, which is
+ *     loaded into regions are children of exactly that region, which is
  *     what makes them see the events at all.
  */
 

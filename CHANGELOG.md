@@ -1,3 +1,27 @@
+## Unreleased
+
+Changed
+- **No boot-time module list: region modding is the only module lifecycle.**
+  `nd_mods_load()` and the `mods.load` file are gone, with them the
+  `AXIL_ND_GLOBAL_MODS` override and `make mods`. Game modules load only via
+  the region system — in-game `loadmod`/`unloadmod`/`release`/`modlist` into
+  persisted `st` rows, restored every boot by `st_init()` from
+  `on_axil_post_chroot()`. The flat list caused double module installs in
+  production (the override never reached the daemon; the cwd-relative
+  fallback re-read the embedder's own list), and region rows already covered
+  the whole cosmos. `test.sh` grants its fixtures with a warm-up `loadmod`
+  pass instead of a fixture list.
+- **The sl_hd dlopen registry is gone.** `mod_load`/`_mod_load`/`mod_load_all`/
+  `mod_close`, the `module_id`/`mod` tables, and the `sic_call`/`sic_last`/
+  `sic_areg`/`sic_get`/`sic_iter`/`sic_next`/`sic_put` surface are deleted
+  with their `struct nd` slots: libxylem is the dispatch and regions are the
+  loader, and nothing called them. `sic_adapter_t` goes with them;
+  `sic_str_t` stays (it is the event string type, unrelated to the registry).
+- **OpenBSD `su -l` discards daemon environment.** `rc.subr` launches daemons
+  via `su -fl`, so `AXIL_ND_GLOBAL_MODS` (and likewise `AXIL_ND_DB` /
+  `AXIL_ND_HTDOCS`) exported in `/etc/rc.d/axil` never reached the process.
+  Only compiled defaults plus cwd apply there; do not rely on rc.d exports.
+
 ## 1.1.0
 
 The terminal is gated, the region system is real, and the store survives

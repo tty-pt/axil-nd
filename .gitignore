@@ -2,10 +2,6 @@
 *.d
 *.so
 /test
-# mods.load is TRACKED (MODS.md §0.4): the module list is a shipped,
-# source-controlled artifact, not a local scratch file. nd_mods_load() reads it
-# at boot and every module repo has to appear in it, so it cannot be ignored
-# or the list would differ per checkout.
 /man
 /htdocs
 /types

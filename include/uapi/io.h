@@ -118,9 +118,6 @@ typedef void nd_cb_t(int fd, int argc, char *argv[]);
 typedef void nd_register_t(char *, nd_cb_t *, unsigned);
 nd_register_t eng_nd_register;
 
-typedef void mod_load_t(char *fname);
-mod_load_t mod_load;
-
 typedef char *plural_t(char *singular);
 plural_t plural;
 

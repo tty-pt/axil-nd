@@ -11,7 +11,8 @@ A port of the [NeverDark](https://github.com/tty-pt/neverdark) MUCK (a
 rewrite of TinyMUCK/FuzzBall) built on the axil HTTP/server stack and the
 corm database:
 
-- Game engine + `mod_load` content-module loading in-process
+- Game engine + region-modded content modules in-process (`loadmod`/
+  `unloadmod` into persisted `st` rows, restored every boot)
 - WebSocket + telnet protocol served by axil (`GET:/nd` upgrade)
 - Store ported from the legacy `qdb`/`qmap` API to `libcorm`
 - Browser client (xterm 6) plus `art/` and the in-game `man/` help pages,

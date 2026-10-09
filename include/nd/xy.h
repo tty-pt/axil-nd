@@ -60,8 +60,8 @@
  *     dnotify_wts_to — variadic (va_list), engine-side only;
  *   - mod_load / sic_call / sic_areg / sic_get — replaced by xy_load /
  *     xy_call / xy_areg / xy.lib;
- *   - `unsigned hds[HD_MAX]` + `sic_adapter_t *adapter` — data hoisting
- *     moved to hooks/regions (J4.5 #1a);
+ *   - `unsigned hds[HD_MAX]` — data hoisting moved to hooks/regions
+ *     (J4.5 #1a);
  *   - nd_assoc — NOT skipped: brought in below as an XY_DECL, because
  *     nd-race is the one module that needs it (decision 6).
  */

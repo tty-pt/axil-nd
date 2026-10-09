@@ -25,42 +25,12 @@
  * the flags entirely. */
 #define ND_AINDEX 1
 
-/* Legacy SIC adapter descriptor. Once shared, then AX, now only read by the
- * residual dlopen path in src/mods.c; MODS.md Phase 3 deletes it with
- * `struct nd` and the whole sic_* surface. The game events below no longer use
- * it — they are libxylem hooks now. */
-typedef struct {
-	char name[64];
-	size_t arg_size;
-	size_t ret_size;
-	int ran;
-	void (*call)(void *, void *, void *);
-	char ret[5096];
-} sic_adapter_t;
-
-#define STR(x) #x
-#define XSTR(x) STR(x)
-
-typedef void (*mod_cb_t)(void);
-
 typedef struct {
 	char str[256];
 	int pos;
 } sic_str_t;
 
 typedef char small_buf_t[64];
-
-typedef unsigned sic_areg_t(char *name, sic_adapter_t *adapter);
-sic_areg_t sic_areg;
-
-typedef void sic_call_t(void *retp, unsigned id, void *args);
-sic_call_t sic_call;
-
-typedef void sic_last_t(void *ret);
-sic_last_t sic_last;
-
-typedef unsigned sic_get_t(char *name);
-sic_get_t sic_get;
 
 /* --- game events --------------------------------------------------------- */
 /* The engine fires these; game modules listen with XY_IMPL. Bodies are the
@@ -97,7 +67,7 @@ int nd_evt_spawn(unsigned player_ref, unsigned loc_ref, struct bio bio,
 int nd_evt_get(unsigned player_ref, unsigned ref);
 
 extern unsigned type_hd, action_hd, vtf_hd, vtf_max;
-extern unsigned situc_hd, sica_hd, sican_hd, bcp_hd, hd_hd, mod_hd, mod_id_hd;
+extern unsigned bcp_hd, hd_hd;
 
 typedef unsigned action_register_t(char *label, char *icon);
 action_register_t eng_action_register;

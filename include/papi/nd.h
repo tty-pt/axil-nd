@@ -74,13 +74,8 @@ struct nd {
 	ematch_near_t *ematch_near;
 	ematch_all_t *ematch_all;
 
-	mod_load_t *mod_load;
-
 	action_register_t *action_register;
 	vtf_register_t *vtf_register;
-	sic_call_t *sic_call;
-	sic_areg_t *sic_areg;
-	sic_get_t *sic_get;
 
 	noise_point_t *noise_point;
 
@@ -91,7 +86,6 @@ struct nd {
 	mcp_bar_t *mcp_bar;
 
 	unsigned hds[HD_MAX];
-	sic_adapter_t *adapter;
 };
 
 extern struct nd nd;
