@@ -525,8 +525,13 @@ do_bio(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unu
 	OBJ player;
 
 	corm_get_copy(obj_hd, &player_ref, &(player));
+	if (!eng_map_has(player.location)) {
+		nd_writef(player_ref, "You are nowhere.\n");
+		return;
+	}
 	eng_map_where(pos, player.location);
 	bio = eng_noise_point(pos);
+	biome_map = biome_map_get(*(uint64_t *) pos);
 	SKEL biome;
 	corm_get_copy(skel_hd, &biome_map[bio.bio_idx], &(biome));
 	nd_writef(player_ref, "tmp %d rn %u bio %s(%d)\n",
