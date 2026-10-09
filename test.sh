@@ -164,6 +164,7 @@ cat > "$authfix/authfix.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <ttypt/auth.h>
+#include <ttypt/auth-config.h>
 
 void xy_install(void)
 {
@@ -214,6 +215,10 @@ guestpass="ndtest_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 required for fixture hashes" >&2; exit 1; }
 python3 -c "import bcrypt" 2>/dev/null || { echo "FAIL: python bcrypt module required for fixture hashes" >&2; exit 1; }
 export ND_TEST_AUTH_DIR="$tmpdb/auth"
+export AXIL_AUTH_ETC="$tmpdb/auth/etc"
+export AXIL_AUTH_USERS="$tmpdb/auth/users"
+export AXIL_AUTH_HOME="$tmpdb/auth/home"
+export AXIL_AUTH_ROUTE="/testauth"
 mkdir -p "$ND_TEST_AUTH_DIR/etc"
 userhash=$(python3 -c "import bcrypt; print(bcrypt.hashpw('$userpass'.encode(), bcrypt.gensalt()).decode())")
 guesthash=$(python3 -c "import bcrypt; print(bcrypt.hashpw('$guestpass'.encode(), bcrypt.gensalt()).decode())")

@@ -1,6 +1,5 @@
 #include "noise.h"
-#define NOISE_IMPLEMENTATION
-#include "noise_decl.h"
+#include "noise_impl.h"
 #include <string.h>
 #include "xxhash.h"
 #include "st.h"
