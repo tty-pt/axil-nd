@@ -1,0 +1,30 @@
+.TH CONNECT 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+connect \- Log in over a raw connection
+.SH SYNOPSIS
+.B connect
+.I name
+.SH DESCRIPTION
+.PP
+.B connect
+is how a raw\-telnet guest logs in. It is a two\-phase command:
+.BI connect " name"
+arms a one\-shot password prompt on your connection, and the next line you
+type is the password. That line is consumed as a password: it is never
+echoed, never shown in scrollback, and never run as a command. A name alone
+never authenticates.
+.PP
+The password is checked through the axil\-auth credential store. An unknown
+name, a wrong password, and an unavailable authentication service all answer
+the same
+.IR "Invalid name or password." ,
+so the prompt cannot be used to enumerate accounts, and a failed guess closes
+the connection: every guess costs a reconnect.
+.PP
+A brand\-new name creates a player on first login; a known name re\-anchors
+the player to the new connection. A WebSocket login never uses this command:
+the browser session establishes the identity instead, before any command runs.
+.SH SEE ALSO
+.BR begin,help (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

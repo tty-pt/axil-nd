@@ -1,0 +1,23 @@
+.TH MAN 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+man \- Show an in\-game manual page
+.SH SYNOPSIS
+.B man
+.RI [ topic ]
+.SH DESCRIPTION
+.PP
+Show the manual page for
+.IR topic ,
+exactly like \fBhelp\fP: the two commands are the same tool under two names.
+With no topic the beginner's page is shown.
+.B man walk
+.PP
+teaches you to navigate, for example.
+.PP
+Topics are bare command names. A topic containing a slash, a double dot, or
+a leading dash is refused outright: it would otherwise reach the manual
+formatter as a file path or a flag.
+.SH SEE ALSO
+.BR help,begin (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

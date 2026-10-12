@@ -18,6 +18,9 @@ exactly the same rules as every other region selector \fBban\fP, \fBmodlist\fP,
 is the first subregion of the cosmos, and only the \fBcosmos\fP keyword names the
 root. If no region is given, the command uses your \fBdefault target region\fP
 (see \fBtarget\fP(10)), or the region you are standing in if you have set none.
+Regions at other widths (districts, super\-planet regions \-\- see
+\fBgrant\fP(10)) are reached through your default; see \fBtarget\fP(10) for the
+width\-and\-point form.
 .PP
 .SS The leading token
 .PP

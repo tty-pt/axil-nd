@@ -1,0 +1,32 @@
+.TH DENY 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+deny \- Bar a hook or module from a region's subtree
+.SH SYNOPSIS
+.B deny
+.BR hook | module
+.I name
+.RI [ region ]
+.SH DESCRIPTION
+.PP
+Bar the hook or module
+.I name
+from running anywhere inside a region's subtree. A denied module still loads
+and is still recorded in the region's set; it simply never gets to run
+there. The refusal happens at dispatch time, not at load time.
+.PP
+The region is a bare world number (0\-65535) or the keyword \fBcosmos\fP,
+under exactly the same rules as every other region selector. Without one the
+command acts on your \fBdefault target region\fP (see \fBtarget\fP(10)), or
+on the region you are standing in if you have set none. Regions at other
+widths (see \fBgrant\fP(10)) are reached through your default; see
+\fBtarget\fP(10) for the width\-and\-point form. You must rule the
+region, and the region must exist: unlike \fBroom\fP there is no bootstrap
+case, because there is no subtree to restrict until the region exists.
+.PP
+A deny is permanent for the life of the process and does not survive a
+reboot, and there is no command that lifts one: plan a deny as forever, or
+do not issue it.
+.SH SEE ALSO
+.BR target,loadmod,unloadmod,wall,ban (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

@@ -1,0 +1,32 @@
+.TH TELEPORT 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+teleport \- Move yourself, a player, or a thing to a destination
+.SH SYNOPSIS
+.B teleport
+.RI [ victim ]
+.I destination
+.SH DESCRIPTION
+.PP
+Move
+.I victim
+to
+.IR destination .
+With one argument the victim is you:
+.B teleport
+.I destination
+moves yourself. Both names are matched the way \fBlook\fP and
+\fBexamine\fP match them; an unknown name answers that it knows nothing.
+.PP
+Authority stays with possession: you may move only things you control, into
+places you control, with one exception \- a region ruler may move a player
+standing in their region. A player victim feels a wrenching sensation when
+torn away; anything else just arrives.
+.PP
+Entities (players and creatures) may only land in rooms; things may land in
+anything you control. A destination that resolves to nothing, a move onto
+oneself, or a move you are not entitled to make are all refused the same
+way.
+.SH SEE ALSO
+.BR room,here,look,examine (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

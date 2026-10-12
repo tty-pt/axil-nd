@@ -1,0 +1,21 @@
+.TH OWNED 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+owned \- List the objects a player owns
+.SH SYNOPSIS
+.B owned
+.RI [ player ]
+.SH DESCRIPTION
+.PP
+List every object owned by you, or by the named player.
+.B owned me
+is yourself. Each object is printed by name with its reference, and the
+listing ends with a count of objects found.
+.PP
+Listing another player's holdings is scoped, never a way to enumerate the
+world: you must rule the region that player is standing in, and only objects
+standing in regions you can reach are shown. Your own listing shows
+everything you own.
+.SH SEE ALSO
+.BR examine,inventory,here (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

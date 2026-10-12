@@ -1,0 +1,32 @@
+.TH PLANET 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+planet \- Claim a world region
+.SH SYNOPSIS
+.B planet
+.I world
+.SH DESCRIPTION
+.PP
+Claim world
+.I world
+(0\-65535) as a region, and report it back as a region header giving its id,
+width, world number, owner, and loaded module count. The world is yours from
+then on: its rooms fall under your rule, and region\-scoped commands take it
+as a selector.
+.PP
+Carving a new world out of the cosmos is a cosmos\-level decision, so only
+the cosmos ruler may claim a world nobody holds. Taking back your own world,
+or one nobody holds that was claimed before, needs no further leave. A world
+already claimed by someone else answers with its owner's name.
+.PP
+A reclaim keeps the world's module set: the new ruler inherits the planet's
+code and unloads what they do not want. Note that \fBroom\fP never claims:
+carved rooms sit in whatever region covers them until this command claims
+their world.
+.PP
+This command claims one world for yourself. To attribute any region \-\- a
+district, a super\-planet region, or a world for someone else \-\- see
+\fBgrant\fP(10).
+.SH SEE ALSO
+.BR planets,here,release,grant,room,modlist (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

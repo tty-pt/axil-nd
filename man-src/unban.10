@@ -1,0 +1,30 @@
+.TH UNBAN 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+unban \- Lift a player's ban from a region
+.SH SYNOPSIS
+.B unban
+.I player
+.RI [ region ]
+.SH DESCRIPTION
+.PP
+Lift
+.IR player "'s"
+ban from a region. You are told the ban is lifted, and the victim is told
+they were unbanned. Banning nobody answers that the player is not banned
+there.
+.PP
+The region is a bare world number (0\-65535) or the keyword \fBcosmos\fP,
+under exactly the same rules as every other region selector. Without one the
+command acts on your \fBdefault target region\fP (see \fBtarget\fP(10)), or
+on the region you are standing in if you have set none. Regions at other
+widths (districts, super\-planet regions \-\- see \fBgrant\fP(10)) are
+reached through your default; see \fBtarget\fP(10) for the width\-and\-point
+form.
+.PP
+The player who placed the ban, or anyone ruling the region now, may lift it:
+a ban must not outlive the authority that could remove it, and a new ruler
+must not be stuck with the old ruler's bans.
+.SH SEE ALSO
+.BR ban,target,here,planet (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

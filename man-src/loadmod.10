@@ -1,0 +1,32 @@
+.TH LOADMOD 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+loadmod \- Load a module into a region
+.SH SYNOPSIS
+.B loadmod
+.I name
+.RI [ region ]
+.SH DESCRIPTION
+.PP
+Load the game module
+.I name
+into a region, where its commands and event handlers start running. Modules
+are named by stem only: a name containing a slash is refused.
+.PP
+The region is a bare world number (0\-65535) or the keyword \fBcosmos\fP,
+under exactly the same rules as every other region selector. Without one the
+command acts on your \fBdefault target region\fP (see \fBtarget\fP(10)), or
+on the region you are standing in if you have set none. Regions at other
+widths (districts, super\-planet regions \-\- see \fBgrant\fP(10)) are
+reached through your default; see \fBtarget\fP(10) for the width\-and\-point
+form.
+.PP
+Unlike \fBwall\fP and \fBban\fP, which are scoped to a subtree, module
+loading attaches to one specific region row, so it needs exact ownership of
+the named region, not merely rule over an ancestor. The region must exist.
+A failed load leaves the region exactly as it was, so a typo cannot persist
+and haunt every boot; a module that is already loaded says so. Loaded
+modules persist in the region's row and are restored on every boot.
+.SH SEE ALSO
+.BR unloadmod,modlist,release,target,planet (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

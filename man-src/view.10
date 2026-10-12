@@ -1,0 +1,17 @@
+.TH VIEW 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+view \- Redraw your map view
+.SH SYNOPSIS
+.B view
+.SH DESCRIPTION
+.PP
+Redraw the map view of your surroundings. The view is drawn automatically
+when you log in; this command draws it again on demand, for example after
+your client lost track of the screen.
+.PP
+The view shows the tiles around you as the engine sees them: walls, doors,
+players, creatures and things placed by the world and its modules.
+.SH SEE ALSO
+.BR look,here (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

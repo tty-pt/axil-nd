@@ -193,6 +193,7 @@ void st_init(void);
 void do_planet(int fd, int argc, char *argv[]);
 void do_planets(int fd, int argc, char *argv[]);
 void do_here(int fd, int argc, char *argv[]);
+void do_grant(int fd, int argc, char *argv[]);
 void do_loadmod(int fd, int argc, char *argv[]);
 void do_unloadmod(int fd, int argc, char *argv[]);
 void do_modlist(int fd, int argc, char *argv[]);
@@ -215,11 +216,10 @@ int st_can(unsigned ref, uint64_t id, uint8_t plen);
  * ST.md §27.6(1), when the nine dead EF_WIZARD gates were re-pointed at region
  * ownership and needed it from four other translation units.
  *
- * "Ruler above it" is spelled out rather than left implicit: the candidate
- * ancestor widths are walked explicitly, so a row appearing at plen 32 or 48
- * is honoured the day it exists instead of being silently ignored. Today only
- * widths 0 (cosmos) and 16 (planet) can hold a row, so exact-owner and the
- * cosmos fallback are the same two iterations. */
+ * "Ruler above it" is spelled out as a walk over every ancestor width
+ * 0..plen rather than a named list, so a row granted at any width
+ * (`grant`: districts inside a planet, regions containing many planets)
+ * is honoured the day it exists instead of being silently ignored. */
 int st_can_region(unsigned player_ref, uint64_t id, uint8_t plen);
 
 /* Who governs (id,plen): the deepest ancestor row that has an owner, walking

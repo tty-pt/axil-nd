@@ -12,7 +12,9 @@ rewrite of TinyMUCK/FuzzBall) built on the axil HTTP/server stack and the
 corm database:
 
 - Game engine + region-modded content modules in-process (`loadmod`/
-  `unloadmod` into persisted `st` rows, restored every boot)
+  `unloadmod` into persisted `st` rows, restored every boot; `grant`
+  attributes any region — districts, planets, super-planet regions — to any
+  player)
 - WebSocket + telnet protocol served by axil (`GET:/nd` upgrade)
 - Store ported from the legacy `qdb`/`qmap` API to `libcorm`
 - Browser client (xterm 6) plus `art/` and the in-game `man/` help pages,
@@ -74,7 +76,7 @@ AXIL_ND_DB=./var/std.db axil -d -A -p 8080 -m ./lib/libaxil-nd.so
 
 ## The man pages
 
-The 52 in-game help pages (`help <topic>`) are tracked as `man-src/*.10` and
+The 71 in-game help pages (`help <topic>`) are tracked as `man-src/*.10` and
 copied into `man/` by the `man` target, which `all` depends on. `man/` is
 gitignored build output and is resolved relative to the working directory at
 runtime, exactly as `art/` and `htdocs/` are.

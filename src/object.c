@@ -144,6 +144,11 @@ eng_object_add(OBJ *nu, unsigned skel_id, unsigned where_ref, uint64_t v, unsign
 			if (flags & OF_PLAYER)
 				nu->flags |= OF_PLAYER;
 			ent.select = 0;
+			/* No default target region: (0,0) names the cosmos, a
+			 * real region, so a zeroed row would hand every new
+			 * entity cosmos reach until something overwrote it.
+			 * ST_SEL_UNSET falls back to position. */
+			ent.target_plen = ST_SEL_UNSET;
 			eng_object_drop(nu_ref, skel_id);
 			ent.home = 1;
 			eng_ent_set(nu_ref, &ent);

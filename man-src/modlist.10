@@ -1,0 +1,26 @@
+.TH MODLIST 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+modlist \- List the modules loaded in a region
+.SH SYNOPSIS
+.B modlist
+.RI [ region ]
+.SH DESCRIPTION
+.PP
+List the game modules loaded in a region: the region header first, then one
+module stem per line.
+.PP
+The region is a bare world number (0\-65535) or the keyword \fBcosmos\fP,
+under exactly the same rules as every other region selector. Without one the
+command acts on your \fBdefault target region\fP (see \fBtarget\fP(10)), or
+on the region you are standing in if you have set none. Regions at other
+widths (see \fBgrant\fP(10)) are reached through your default; see
+\fBtarget\fP(10) for the width\-and\-point form. A region with no row
+answers that there is no such region.
+.PP
+Unlike its sibling commands this one has no ownership gate: any player may
+list any existing region's module set. What runs where is public record;
+changing it is what \fBloadmod\fP and \fBunloadmod\fP are for.
+.SH SEE ALSO
+.BR loadmod,unloadmod,target,here,planet (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

@@ -1,0 +1,28 @@
+.TH ROOM 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+room \- Carve a room at explicit coordinates and enter it
+.SH SYNOPSIS
+.B room
+.I x y z w
+.SH DESCRIPTION
+.PP
+Create the room at coordinates
+.IR x ,
+.IR y ,
+.IR z ,
+.IR w ,
+or find it if it already exists, and enter it. Each coordinate is a signed
+number within the short range; anything else is a usage error.
+.PP
+Every carved room otherwise inherits its world from the room it was carved
+from, so without this command no non\-zero world is reachable in play. The
+explicit coordinates are the point: they name a world directly.
+.PP
+You must rule the region the target position falls in, or an ancestor of
+it; a neighbour's ruler cannot be reached around through this command. The
+command reports the room back, saying whether it was newly carved or already
+there.
+.SH SEE ALSO
+.BR planet,here,teleport (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

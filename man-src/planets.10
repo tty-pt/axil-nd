@@ -1,0 +1,17 @@
+.TH PLANETS 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+planets \- List the claimed regions
+.SH SYNOPSIS
+.B planets
+.SH DESCRIPTION
+.PP
+List every claimed region, one region header per line: its id, width, world
+number, owner, and loaded module count. With no claimed regions it says so.
+.PP
+The list covers the whole cosmos, not just your own regions; what it shows
+is public record. Authority still lives with the regions themselves: seeing
+a header grants nothing.
+.SH SEE ALSO
+.BR planet,here,release (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

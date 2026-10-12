@@ -1,5 +1,26 @@
 ## Unreleased
 
+Added
+- **Man pages for the 17 engine commands that had none.** Every command in
+  the engine's table (`src/world.c` `cmds[]`) is now documented:
+  `connect`, `ban`/`unban`, `teleport`, `owned`, `view`, `man`, `save`,
+  `planet`/`planets`, `here`, `loadmod`/`unloadmod`/`modlist`, `release`,
+  `room`, `deny`. The pages document the real guards: region-ownership gates,
+  the shared `st_cmd_region` selector dialect (`cosmos` is not `world 0`),
+  exact ownership for module loading, the two-phase passworded `connect`,
+  dispatch-time permanent-until-reboot `deny`, and root-only `save`.
+- **General region attribution: `grant <player> [<width> [point]]`.**
+  `planet` claims whole worlds for the caller only; `grant` attributes any
+  region — a district inside a planet, a planet for someone else, a region
+  containing many planets, or the cosmos itself (explicit only) — to any
+  player, bounded by what the granter rules. Region gates
+  (`st_can_region`/`st_region_ruler`) now walk every ancestor width instead
+  of the fixed `{0,16,32,48,64}` set; `release` and `target` accept a
+  `<width> <point>` form (a lone number stays a world); the cosmos cannot be
+  released, only granted. Fresh entities no longer inherit an implicit cosmos
+  default target (`ST_SEL_UNSET` on creation and on missing-row reads), so a
+  new ruler's commands act on where they stand.
+
 Changed
 - **No boot-time module list: region modding is the only module lifecycle.**
   `nd_mods_load()` and the `mods.load` file are gone, with them the

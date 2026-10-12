@@ -1,0 +1,18 @@
+.TH HERE 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+here \- Show the region you are standing in
+.SH SYNOPSIS
+.B here
+.SH DESCRIPTION
+.PP
+Print the region you are standing in as a region header: its id, width,
+world number, owner, and loaded module count. That is the deepest region the
+engine knows about there \- a claimed world, a granted district, or the
+cosmos from the void \- and it is the region every region\-scoped command
+acts on when you name no region and have set no default target.
+.PP
+A player standing nowhere is told they are nowhere.
+.SH SEE ALSO
+.BR target,planets,planet,grant,modlist (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

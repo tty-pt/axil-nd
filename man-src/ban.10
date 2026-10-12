@@ -1,0 +1,35 @@
+.TH BAN 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+ban \- Ban a player from a region
+.SH SYNOPSIS
+.B ban
+.I player
+.RI [ region ]
+.SH DESCRIPTION
+.PP
+Ban
+.I player
+from a region. The banned player is refused entry there but is told which
+region refused them; you are told the ban landed, and the victim is told
+they were banned.
+.PP
+The region is a bare world number (0\-65535) or the keyword \fBcosmos\fP,
+under exactly the same rules as every other region selector. Without one the
+command acts on your \fBdefault target region\fP (see \fBtarget\fP(10)), or
+on the region you are standing in if you have set none. Regions at other
+widths (districts, super\-planet regions \-\- see \fBgrant\fP(10)) are
+reached through your default; see \fBtarget\fP(10) for the width\-and\-point
+form.
+.PP
+You must rule the region, or an ancestor of it, or the command is refused
+and names the ruler. The root player cannot be banned, and the victim must
+be a player, not a thing.
+.PP
+A ban bites on arrival, not at login: a banned player who is already
+elsewhere may still log in, but cannot enter the region. Login is
+deliberately never refused, so a cosmos\-wide ban cannot lock anyone out of
+the game entirely.
+.SH SEE ALSO
+.BR unban,target,here,planet,deny (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

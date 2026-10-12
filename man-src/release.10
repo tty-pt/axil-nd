@@ -1,0 +1,33 @@
+.TH RELEASE 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+release \- Release a region
+.SH SYNOPSIS
+.B release
+.I world
+.br
+.BI release "width point"
+.SH DESCRIPTION
+.PP
+Release a region: unload its modules and delete its region row. The release is
+reported back when done.
+.PP
+With a lone world number (0\-65535) that world is released, as before. With a
+width and point the width\-wide ancestor of the point is released \-\- the same
+point forms \fBgrant\fP takes (\fBhere\fP, \fBworld\fP \fIN\fP, \fBcosmos\fP, or
+coordinates). A lone number stays a world, so always name the point, even for a
+planet width.
+.PP
+Only the exact owner may release. The cosmos itself cannot be released: deleting
+it would leave nothing ruling anything, so hand it over with \fBgrant\fP instead.
+Unloading is best effort: one
+stuck module is reported but does not veto the release of the rest, and the
+row is deleted regardless, so nothing unloaded here comes back on the next
+boot. The region entry itself stays behind, inert: a later \fBplanet\fP with
+the same number reuses it.
+.PP
+Releasing is the counterpart of claiming, not of banning: it dissolves the
+region's code and record, where \fBban\fP only refuses entry to one player.
+.SH SEE ALSO
+.BR planet,planets,grant,loadmod,unloadmod (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

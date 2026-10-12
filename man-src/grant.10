@@ -1,0 +1,59 @@
+.TH GRANT 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+grant \- Attribute any region to a player
+.SH SYNOPSIS
+.B grant
+.I player
+.RI [ width
+.RI [ here
+|
+.BI world " N"
+|
+.B cosmos
+|
+.IR x " y z w" ]]
+.SH DESCRIPTION
+.PP
+Give a region to
+.IR player ,
+who rules it from then on. The region may be anything you rule: a district
+inside a planet, a whole planet, a region containing many planets, or the
+cosmos itself. This is the general form of what \fBplanet\fP does for one
+world and one owner (yourself).
+.PP
+With one argument the grant is this place: the deepest region you own where
+you are standing.
+.B grant bob
+.PP
+hands Bob the room's region. With a width (a plen, 0\-64) the
+grant is the width\-wide ancestor of the point:
+.B grant bob 32
+carves a district around here;
+.B grant bob 16 world 5
+is planet-sized around world 5;
+.B grant bob 0
+is the cosmos. The point defaults to \fBhere\fP; give explicit coordinates
+or stand where you mean for a lived-in district, since a sub-world
+.B world
+point names the aligned-first sub-region.
+.PP
+The target must be a player (\fBme\fP allowed). You must rule the new region
+or an ancestor of it, and it may be no coarser than your coarsest holding:
+a planet ruler grants planet, districts and cells, never a super-planet or
+the cosmos, while the cosmos ruler grants anything. Refusals name the ruler.
+.PP
+A re-grant keeps the region's module set, like a \fBplanet\fP reclaim; the
+new ruler unloads what they do not want and loads their own code with
+\fBloadmod\fP. The target is told, with the region header.
+.PP
+Delegation grants, it does not secede: ancestors keep ruling underneath,
+deepest wins for naming. And bare
+.B grant bob
+as the cosmos ruler in unclaimed space hands over the cosmos itself \-
+write the width out
+.RB ( grant " bob 0" )
+when that is what you mean.
+.SH SEE ALSO
+.BR planet,release,target,here,planets,loadmod,chown (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

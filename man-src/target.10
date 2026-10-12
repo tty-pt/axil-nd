@@ -10,6 +10,8 @@ target \- Set or show your default target region
 .B target here
 .br
 .B target none
+.br
+.BI target "width point"
 .SH DESCRIPTION
 .PP
 Commands that act on a region \fBwall\fP, \fBban\fP, \fBunban\fP,
@@ -30,10 +32,17 @@ refused and names the ruler.
 .TP
 .B target here
 Set the default to the region you are standing in, without having to name it.
-That is the deepest region the engine knows about there \-\- a claimed world, or
-the cosmos from the void \-\- not a single cell: only worlds are claimed, and a
-cell selector would reach nobody. From the void this stores the cosmos, which no
-world number can name.
+That is the deepest region the engine knows about there \-\- a claimed world,
+a granted district, or the cosmos from the void \-\- not a single cell: only
+rows count, and a cell selector would reach nobody. From the void this stores
+the cosmos, which no world number can name.
+.TP
+.BI target "width point"
+Set the default to the width\-wide ancestor of the point: the same point
+forms \fBgrant\fP takes (\fBhere\fP, \fBworld\fP \fIN\fP, \fBcosmos\fP, or
+coordinates). This is how region commands address districts and super\-planet
+regions no world token names. A lone number stays a world, so always name the
+point, even for a planet width.
 .TP
 .B target none
 Clear the default. Commands go back to acting on your current region.
@@ -52,6 +61,6 @@ change what \fBowned\fP, \fBclone\fP, \fBcreate\fP or \fBchown\fP may reach:
 those are scoped to the region of the \fIobject\fP involved, so setting a default
 is never a way to widen what you can enumerate or act on by name.
 .SH SEE ALSO
-.BR wall,ban,unban,modlist,loadmod,unloadmod,deny,here,planet (10)
+.BR wall,ban,unban,modlist,loadmod,unloadmod,deny,here,planet,grant (10)
 .SH AUTHOR
 quirinpa <quirinpa@tty.pt>

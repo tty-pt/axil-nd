@@ -1,0 +1,29 @@
+.TH UNLOADMOD 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+unloadmod \- Unload a module from a region
+.SH SYNOPSIS
+.B unloadmod
+.I name
+.RI [ region ]
+.SH DESCRIPTION
+.PP
+Unload the game module
+.I name
+from a region, where its commands and event handlers stop running. Modules
+are named by stem only: a name containing a slash is refused.
+.PP
+The region is a bare world number (0\-65535) or the keyword \fBcosmos\fP,
+under exactly the same rules as every other region selector. Without one the
+command acts on your \fBdefault target region\fP (see \fBtarget\fP(10)), or
+on the region you are standing in if you have set none. Regions at other
+widths (districts, super\-planet regions \-\- see \fBgrant\fP(10)) are
+reached through your default; see \fBtarget\fP(10) for the width\-and\-point
+form.
+.PP
+As with \fBloadmod\fP, this needs exact ownership of the named region, and
+the module must be loaded there: unloading what was never loaded says so.
+The removal persists in the region's row and survives the next boot.
+.SH SEE ALSO
+.BR loadmod,modlist,release,target,planet (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

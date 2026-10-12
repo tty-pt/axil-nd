@@ -218,19 +218,22 @@ printf '%s:%s:1001:67::::::\n' "$user" "$userhash" > "$ND_TEST_AUTH_DIR/etc/shad
 printf '%s:%s:1002:67::::::\n' "$mp_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
 printf '%s:x:1001:67::%s/%s:/bin/false\n' "$user" "$ND_TEST_AUTH_DIR" "$user" > "$ND_TEST_AUTH_DIR/etc/passwd"
 printf '%s:x:1002:67::%s/%s:/bin/false\n' "$mp_guest" "$ND_TEST_AUTH_DIR" "$mp_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
-# S7/S8/S9 guests share guestpass: passworded connect refuses any name the
+# S7/S8/S9/S10 guests share guestpass: passworded connect refuses any name the
 # user map does not hold, so those sections' guests need fixture accounts
 # here, not only players in the ND store. $$ is the suite's own pid and never
 # changes, so these bind to exactly the names the sections below use.
 w7_guest="ndwiz$$"
 b8_guest="ndban$$"
 b9_guest="ndtgt$$"
+g10_guest="ndgrant$$"
 printf '%s:%s:1003:67::::::\n' "$w7_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
 printf '%s:%s:1004:67::::::\n' "$b8_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
 printf '%s:%s:1005:67::::::\n' "$b9_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
+printf '%s:%s:1006:67::::::\n' "$g10_guest" "$guesthash" >> "$ND_TEST_AUTH_DIR/etc/shadow"
 printf '%s:x:1003:67::%s/%s:/bin/false\n' "$w7_guest" "$ND_TEST_AUTH_DIR" "$w7_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
 printf '%s:x:1004:67::%s/%s:/bin/false\n' "$b8_guest" "$ND_TEST_AUTH_DIR" "$b8_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
 printf '%s:x:1005:67::%s/%s:/bin/false\n' "$b9_guest" "$ND_TEST_AUTH_DIR" "$b9_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
+printf '%s:x:1006:67::%s/%s:/bin/false\n' "$g10_guest" "$ND_TEST_AUTH_DIR" "$g10_guest" >> "$ND_TEST_AUTH_DIR/etc/passwd"
 printf 'www:x:67:\n' > "$ND_TEST_AUTH_DIR/etc/group"
 
 # Two-phase login helper for raw sockets: `connect <user>`, wait for the
@@ -1924,7 +1927,7 @@ ld="$tmpdb/scope-a.log"
 le="$tmpdb/scope-b.log"
 scope_pid_a=
 scope_pid_b=
-trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} 2>/dev/null || true' EXIT
+trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} ${g10_pid:+$g10_pid} 2>/dev/null || true' EXIT
 
 # Count a marker in a log. Used as a DELTA around one command, never as a
 # whole-file grep: "probe A did not fire" is only meaningful if the assertion
@@ -2329,12 +2332,11 @@ rm -rf "$mpdb"
 # rows: a gate asks st_can_region()/st_in_scope() and a refusal NAMES the ruler.
 #
 # The only two-player authority assertion that is constructible here is
-# owner-yes / guest-no, and NO_WIZ.md §13.7 says why there is no other: a
-# non-cosmos ruler cannot be created (do_planet needs cosmos authority to claim
-# a new planet, do_release deletes the row instead of clearing the owner, no
-# transfer command exists), so in a fresh store the first player owns cosmos
-# (0,0) -- which covers the whole address space -- and every other player rules
-# nothing at all. The owner half is therefore the positive boundary and the
+# owner-yes / guest-no, and NO_WIZ.md §13.7 says why there is no other: in a
+# fresh store the first player owns cosmos (0,0) -- which covers the whole
+# address space -- and every other player rules nothing at all. (`grant`,
+# tested in S10, can create a second ruler, but S7 predates it and keeps the
+# fresh-store boundary.) The owner half is therefore the positive boundary and the
 # guest half is the negative one; there is no third party to be negative
 # against. Selector-scoped wall/ban narrow the same boundary without needing a
 # second ruler.
@@ -3276,5 +3278,212 @@ exec 7<&-
 exec 8<&-
 killaxil $b9_pid
 rm -rf "$b9db"
+
+# --- S10: grant -- attribute any region to a player ---------------------------
+# ---------------------------------------------------------------------------
+# `planet` claims whole worlds for the caller only. `grant` attributes any
+# region -- a district inside a planet, a planet for someone else, a region
+# containing many planets -- to any player, bounded by what the granter
+# rules. Same two-socket, per-fd-transcript discipline as S7/S8/S9; the
+# guest-half legs are absence legs, so each uses a freshly wiped transcript.
+g10=$((20000 + RANDOM % 8000))
+g10db=$(mktemp -d)
+g10la="$g10db/a.log"
+g10_owner_txt="$g10db/owner.txt"
+g10_guest_txt="$g10db/guest.txt"
+: > "$g10_owner_txt"
+: > "$g10_guest_txt"
+
+AXIL_ND_DB="$g10db/w.db" axil -d -A -p "$g10" -m ./lib/axil-nd >"$g10la" 2>&1 &
+g10_pid=$!
+wait_up "$g10la" "$g10" || { echo "FAIL: S10 boot did not init" >&2; exit 1; }
+
+g10cmd() {
+	local fd=$1 file=$2; shift 2
+	printf '%s\n\n' "$*" >&"$fd" 2>/dev/null || return 0
+	local line
+	while read -t 0.5 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+g10wait() {
+	local fd=$1 file=$2 marker=$3 tries=${4:-100} line
+	while [ $tries -gt 0 ]; do
+		grep -qaF "$marker" "$file" && return 0
+		if read -t 0.05 -u "$fd" -r line; then
+			printf '%s\n' "$line" >> "$file"
+			continue
+		fi
+		tries=$((tries - 1)); sleep 0.1
+	done
+	return 1
+}
+g10clean() { tr -d '\033' < "$1" | sed 's/\[[0-9;]*m//g' | tr -d '\r'; }
+# One command per socket, transcript wiped first, so the file provably holds
+# only this command's output and an absence assertion means something.
+g10run() { : > "$2"; g10cmd "$1" "$2" "$3"; }
+# Drain until quiet, appending: used after a g10wait before an ABSENCE
+# assertion, so a missing line is genuinely absent rather than merely late.
+g10settle() {
+	local fd=$1 file=$2 line
+	while read -t 0.4 -u "$fd" -r line; do
+		printf '%s\n' "$line" >> "$file"
+	done
+	return 0
+}
+
+exec 7<>/dev/tcp/127.0.0.1/$g10
+g10cmd 7 "$g10_owner_txt" "connect $user"
+g10wait 7 "$g10_owner_txt" "Password:" \
+	|| { echo "FAIL: S10 owner no password prompt" >&2; exit 1; }
+g10cmd 7 "$g10_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$g10la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S10 owner login not seen" >&2; exit 1; }
+exec 8<>/dev/tcp/127.0.0.1/$g10
+g10cmd 8 "$g10_guest_txt" "connect $g10_guest"
+g10wait 8 "$g10_guest_txt" "Password:" \
+	|| { echo "FAIL: S10 guest no password prompt" >&2; exit 1; }
+g10cmd 8 "$g10_guest_txt" "$guestpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$g10_guest'" "$g10la" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S10 guest login not seen" >&2; exit 1; }
+
+# --- 1. bootstrap: carve into world 1, claim it ------------------------------
+# §27.3 order: `room` before `planet` -- no non-zero world is reachable until
+# a room is carved at explicit coords, and the cosmos owner may carve it.
+g10run 7 "$g10_owner_txt" "room 0 0 0 1"
+g10wait 7 "$g10_owner_txt" "at 0 0 0 1" \
+	|| { echo "FAIL: S10 room 0 0 0 1 did not carve" >&2; exit 1; }
+g10run 7 "$g10_owner_txt" "planet 1"
+g10wait 7 "$g10_owner_txt" "planet 1 established" \
+	|| { echo "FAIL: S10 planet 1 did not establish" >&2; exit 1; }
+
+# --- 2. guest baseline: rules nothing, wall refused --------------------------
+g10run 8 "$g10_guest_txt" "wall hi"
+g10wait 8 "$g10_guest_txt" "Permission denied" \
+	|| { echo "FAIL: S10 guest wall was not refused pre-grant" >&2; exit 1; }
+
+# --- 3. grant a planet to someone else ---------------------------------------
+g10run 7 "$g10_owner_txt" "grant $g10_guest 16 world 2"
+g10wait 7 "$g10_owner_txt" "plen=16" \
+	|| { echo "FAIL: S10 grant planet 2 never answered" >&2; exit 1; }
+g10clean "$g10_owner_txt" | grep -qaF "world=2" \
+	|| { echo "FAIL: S10 grant planet 2 misidentified the world" >&2; exit 1; }
+g10clean "$g10_owner_txt" | grep -qaF "owner=$g10_guest" \
+	|| { echo "FAIL: S10 grant planet 2 did not record the guest" >&2; exit 1; }
+g10wait 8 "$g10_guest_txt" "granted you a region" \
+	|| { echo "FAIL: S10 grant planet 2 never notified the guest" >&2; exit 1; }
+
+# --- 4. a planet owner cannot grant upward -----------------------------------
+# The guest rules world 2 only; a plen-8 region containing many planets has
+# no owned ancestor, so the grant must fail naming the cosmos ruler.
+g10run 8 "$g10_guest_txt" "grant $user 8"
+g10wait 8 "$g10_guest_txt" "Permission denied" \
+	|| { echo "FAIL: S10 upward grant was not refused" >&2; exit 1; }
+
+# --- 5. grant a district inside the planet -----------------------------------
+g10run 7 "$g10_owner_txt" "grant $g10_guest 32"
+g10wait 7 "$g10_owner_txt" "plen=32" \
+	|| { echo "FAIL: S10 grant district never answered" >&2; exit 1; }
+g10clean "$g10_owner_txt" | grep -qaF "owner=$g10_guest" \
+	|| { echo "FAIL: S10 grant district did not record the guest" >&2; exit 1; }
+g10run 7 "$g10_owner_txt" "planets"
+g10wait 7 "$g10_owner_txt" "plen=32" \
+	|| { echo "FAIL: S10 planets does not list the district" >&2; exit 1; }
+
+# --- 6. the new ruler can act there ------------------------------------------
+# The guest enters the district through its own room (exact owner, so the
+# carve is authorized), sees it in `here`, and passes the exact-ownership
+# gate: `loadmod` of a missing module fails LOUDLY (`failed to load`),
+# which proves the gate passed -- pre-grant the same command is refused.
+g10run 8 "$g10_guest_txt" "room 0 0 0 1"
+g10wait 8 "$g10_guest_txt" "(existing)" \
+	|| { echo "FAIL: S10 guest could not enter the district room" >&2; exit 1; }
+g10run 8 "$g10_guest_txt" "here"
+g10wait 8 "$g10_guest_txt" "plen=32" \
+	|| { echo "FAIL: S10 guest here does not report the district (tail: $(g10clean "$g10_guest_txt" | tr '\n' '|' | tail -c 300))" >&2; exit 1; }
+g10clean "$g10_guest_txt" | grep -qaF "owner=$g10_guest" \
+	|| { echo "FAIL: S10 guest here does not name the guest ruler (tail: $(g10clean "$g10_guest_txt" | tr '\n' '|' | tail -c 300))" >&2; exit 1; }
+g10run 8 "$g10_guest_txt" "loadmod libnd-nosuchthing"
+g10wait 8 "$g10_guest_txt" "failed to load" \
+	|| { echo "FAIL: S10 guest loadmod did not pass the district gate (tail: $(g10clean "$g10_guest_txt" | tr '\n' '|' | tail -c 300))" >&2; exit 1; }
+
+# --- 7. grant a region containing many planets -------------------------------
+g10run 7 "$g10_owner_txt" "grant $g10_guest 8"
+g10wait 7 "$g10_owner_txt" "plen=8" \
+	|| { echo "FAIL: S10 grant super-region never answered" >&2; exit 1; }
+g10clean "$g10_owner_txt" | grep -qaF "owner=$g10_guest" \
+	|| { echo "FAIL: S10 grant super-region did not record the guest" >&2; exit 1; }
+# Reachable through the default target, which is how subtree commands name
+# a region no world token can address.
+g10run 8 "$g10_guest_txt" "target 8 world 2"
+g10wait 8 "$g10_guest_txt" "Default target region set" \
+	|| { echo "FAIL: S10 guest could not target the super-region" >&2; exit 1; }
+g10run 8 "$g10_guest_txt" "loadmod libnd-nosuchthing"
+g10wait 8 "$g10_guest_txt" "failed to load" \
+	|| { echo "FAIL: S10 guest loadmod did not pass the super-region gate" >&2; exit 1; }
+
+# --- 8. release a district; the cosmos is not releasable ---------------------
+g10run 8 "$g10_guest_txt" "release 32 here"
+g10wait 8 "$g10_guest_txt" "plen=32" \
+	|| { echo "FAIL: S10 district release never answered" >&2; exit 1; }
+g10run 8 "$g10_guest_txt" "planets"
+g10wait 8 "$g10_guest_txt" "plen=8" \
+	|| { echo "FAIL: S10 planets never answered after release" >&2; exit 1; }
+g10settle 8 "$g10_guest_txt"
+g10clean "$g10_guest_txt" | grep -qaF "plen=32" \
+	&& { echo "FAIL: S10 released district still listed" >&2; exit 1; }
+g10run 7 "$g10_owner_txt" "release 0 here"
+g10wait 7 "$g10_owner_txt" "cannot be released" \
+	|| { echo "FAIL: S10 cosmos release was not refused" >&2; exit 1; }
+
+# --- 9. reboot: granted rows persist like planet rows ------------------------
+g10run 7 "$g10_owner_txt" "save"
+sleep 0.3
+exec 7<&-
+exec 8<&-
+killaxil $g10_pid; g10_pid=
+g10b=$((20000 + RANDOM % 8000))
+g10lb="$g10db/b.log"
+AXIL_ND_DB="$g10db/w.db" axil -d -A -p "$g10b" -m ./lib/axil-nd >"$g10lb" 2>&1 &
+g10_pid=$!
+wait_up "$g10lb" "$g10b" || { echo "FAIL: S10 boot B did not init" >&2; exit 1; }
+grep -qaF "plen=16" "$g10lb" \
+	|| { echo "FAIL: S10 boot B did not restore the granted planet" >&2; exit 1; }
+grep -qaF "plen=8" "$g10lb" \
+	|| { echo "FAIL: S10 boot B did not restore the super-region" >&2; exit 1; }
+exec 7<>/dev/tcp/127.0.0.1/$g10b
+g10cmd 7 "$g10_owner_txt" "connect $user"
+g10wait 7 "$g10_owner_txt" "Password:" \
+	|| { echo "FAIL: S10 boot B no password prompt" >&2; exit 1; }
+g10cmd 7 "$g10_owner_txt" "$userpass"
+tries=80
+while [ $tries -gt 0 ]; do
+	grep -qF "nd_player_login: '$user'" "$g10lb" 2>/dev/null && break
+	tries=$((tries - 1)); sleep 0.1
+done
+[ $tries -eq 0 ] && { echo "FAIL: S10 boot B login not seen" >&2; exit 1; }
+g10run 7 "$g10_owner_txt" "planets"
+g10wait 7 "$g10_owner_txt" "plen=8" \
+	|| { echo "FAIL: S10 reboot lost the super-region row" >&2; exit 1; }
+g10clean "$g10_owner_txt" | grep -qaF "owner=$g10_guest" \
+	|| { echo "FAIL: S10 reboot lost the super-region owner" >&2; exit 1; }
+
+# --- 10. the new command is documented ----------------------------------------
+g10run 7 "$g10_owner_txt" "man grant"
+g10wait 7 "$g10_owner_txt" "grant - " \
+	|| { echo "FAIL: S10 man grant did not render" >&2; exit 1; }
+
+exec 7<&-
+killaxil $g10_pid
+rm -rf "$g10db"
 
 echo "axil-nd ok"

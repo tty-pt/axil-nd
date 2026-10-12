@@ -94,6 +94,7 @@ void do_teleport(int fd, int argc, char *argv[]);
 void do_unban(int fd, int argc, char *argv[]);
 void do_room(int fd, int argc, char *argv[]);
 void do_deny(int fd, int argc, char *argv[]);
+void do_grant(int fd, int argc, char *argv[]);
 void do_toad(int fd, int argc, char *argv[]);
 void do_view(int fd, int argc, char *argv[]);
 void do_wall(int fd, int argc, char *argv[]);
@@ -782,6 +783,9 @@ struct cmd_slot cmds[] = {
 		 * region's subtree, and permanent for the process. */
 		.name = "deny",
 		.cb = &do_deny,
+	}, {
+		.name = "grant",
+		.cb = &do_grant,
 	}, {
 		.name = NULL,
 		.cb = NULL,

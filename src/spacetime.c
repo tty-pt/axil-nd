@@ -29,6 +29,7 @@
 #include "mcp.h"
 #include "papi/nd.h"
 #include "uapi/entity.h"
+#include "uapi/match.h"
 
 /* eng_map_where has no header declaration anywhere (spacetime.c:226 and
  * friends already call it unprototyped); say it out loud so the region anchor
@@ -1535,23 +1536,16 @@ st_init(void) {
  * is exact ownership, w == 0 is the cosmos, whose row covers the whole address
  * space.
  *
- * Widths 32 and 48 cannot hold a row today, so they are two wasted corm probes
- * per call. They are here rather than omitted because they are the difference
- * between "ancestor ownership" as a stated rule and as an accident of the
- * current tree depth: the day a row lands at 32, this keeps working with no
- * edit, and the omission would be a silent behaviour change nobody would catch.
- *
- * w > plen is skipped because a region cannot be its own ancestor's ancestor:
- * narrowing to a width the query does not span would invent a region that
- * does not contain the thing being asked about. */
+ * Every ancestor width 0..plen is walked, not a fixed set: `grant` persists
+ * rows at any width (districts inside a planet, regions containing many
+ * planets), and a named list would silently ignore them. Each probe is one
+ * in-memory corm point-get and the walk exits on the first hit; ascending
+ * keeps the old hit order (cosmos first, exact ownership last). */
 int
 st_can_region(unsigned player_ref, uint64_t id, uint8_t plen)
 {
-	static const uint8_t widths[] = {
-		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
-	};
 	uint64_t mask;
-	size_t i;
+	unsigned w;
 
 	/* A prefix width above 64 is not a region. ST_SEL_UNSET is 255, so a
 	 * caller that forgot to resolve "unspecified" lands here rather than
@@ -1559,13 +1553,9 @@ st_can_region(unsigned player_ref, uint64_t id, uint8_t plen)
 	if (plen > ST_PLEN_CELL)
 		return 0;
 
-	for (i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
-		uint8_t w = widths[i];
-
-		if (w > plen)
-			continue;
+	for (w = 0; w <= plen; w++) {
 		mask = w ? (~0ULL << (64 - w)) : 0ULL;
-		if (st_can(player_ref, id & mask, w))
+		if (st_can(player_ref, id & mask, (uint8_t)w))
 			return 1;
 	}
 	return 0;
@@ -1589,27 +1579,18 @@ st_can_region(unsigned player_ref, uint64_t id, uint8_t plen)
 unsigned
 st_region_ruler(uint64_t id, uint8_t plen)
 {
-	static const uint8_t widths[] = {
-		ST_PLEN_ROOT, ST_PLEN_WORLD, 32, 48, ST_PLEN_CELL
-	};
-	/* Same widths as st_can_region, but walked deepest-first: the array is
-	 * ascending, so it is walked in reverse. Reversing one array and not the
-	 * other is the kind of thing that silently answers the wrong question, so
-	 * both are derived from this one list below rather than each naming their
-	 * own. */
+	/* Deepest-first over every ancestor width: plen..0. Same walk as
+	 * st_can_region in the opposite direction (see above for why the set
+	 * is the full range rather than a named list). */
 	uint64_t mask;
-	size_t i;
+	unsigned w;
 
 	if (plen > ST_PLEN_CELL)
 		return NOTHING;
 
-	for (i = sizeof(widths) / sizeof(widths[0]); i-- > 0; ) {
-		uint8_t w = widths[i];
-
-		if (w > plen)
-			continue;
+	for (w = (unsigned)plen + 1; w-- > 0; ) {
 		mask = w ? (~0ULL << (64 - w)) : 0ULL;
-		unsigned owner = st_owner(id & mask, w);
+		unsigned owner = st_owner(id & mask, (uint8_t)w);
 
 		if (owner != NOTHING)
 			return owner;
@@ -2090,6 +2071,247 @@ st_cmd_region(unsigned player_ref, int argc, char *argv[], int world_arg,
 	return st_target_or_position(player_ref, id, plen);
 }
 
+/* The caller's own cell ("here" as a point): pos_morton of their room's
+ * position. Unmapped rooms read as the void (0,0,0,0), which is in the
+ * cosmos -- the same answer st_region_of_obj gives for authority, so a
+ * grant from the void anchors at the cosmos rather than failing. */
+static int
+st_here_cell(unsigned player_ref, uint64_t *cell)
+{
+	OBJ player;
+	pos_t pos;
+
+	if (!cell || player_ref == NOTHING || player_ref == (unsigned)-1)
+		return XY_ERR_INVALID;
+	corm_get_copy(obj_hd, &player_ref, &(player));
+	eng_map_where(pos, player.location);
+	*cell = pos_morton(pos);
+	return XY_OK;
+}
+
+/* axil delivers trailing empty argv entries (a bare verb arrives with
+ * argc >= 2 and an empty argv[1]); trim them so arity checks mean what they
+ * say. argv[0] is the verb and never empty. Non-empty positions are kept,
+ * so the shared world/point parsers are unaffected. */
+static int
+st_argc_trim(int argc, char *argv[])
+{
+	while (argc > 1 && (!argv[argc - 1] || !*argv[argc - 1]))
+		argc--;
+	return argc;
+}
+
+/* A point naming a cell, for the ownership commands (`grant`, extended
+ * `release`/`target`). Strict: argv[arg] must exist. Forms: "here" (the
+ * caller), "cosmos" (cell 0), "world <N>" (that world's base cell), or four
+ * coords (same discipline as `room`: signed, ranged, no aliasing).
+ * Sets *consumed to the tokens used so the caller can reject trailing junk.
+ * XY_OK or XY_ERR_INVALID (XY_ERR_NOTFOUND only when "here" unresolves). */
+static int
+st_cmd_point(unsigned player_ref, int argc, char *argv[], int arg,
+	uint64_t *cell, int *consumed)
+{
+	pos_t pos;
+	char *end;
+	long v;
+	int i;
+	unsigned long w;
+
+	if (!cell || !consumed || arg >= argc || !argv[arg] || !*argv[arg])
+		return XY_ERR_INVALID;
+	*consumed = 0;
+	if (strcmp(argv[arg], "here") == 0) {
+		if (st_here_cell(player_ref, cell) != XY_OK)
+			return XY_ERR_NOTFOUND;
+		*consumed = 1;
+		return XY_OK;
+	}
+	if (strcmp(argv[arg], "cosmos") == 0) {
+		*cell = 0;
+		*consumed = 1;
+		return XY_OK;
+	}
+	if (strcmp(argv[arg], "world") == 0) {
+		if (arg + 1 >= argc || !argv[arg + 1] || !*argv[arg + 1])
+			return XY_ERR_INVALID;
+		w = strtoul(argv[arg + 1], &end, 10);
+		if (!end || end == argv[arg + 1] || *end || w > 65535)
+			return XY_ERR_INVALID;
+		*cell = st_planet_id((unsigned)w);
+		*consumed = 2;
+		return XY_OK;
+	}
+	if (arg + 3 >= argc)
+		return XY_ERR_INVALID;
+	for (i = 0; i < 4; i++) {
+		if (!argv[arg + i] || !*argv[arg + i])
+			return XY_ERR_INVALID;
+		v = strtol(argv[arg + i], &end, 10);
+		if (end == argv[arg + i] || *end || v < COORD_MIN || v > COORD_MAX)
+			return XY_ERR_INVALID;
+		pos[i] = (coord_t)v;
+	}
+	*cell = pos_morton(pos);
+	*consumed = 4;
+	return XY_OK;
+}
+
+/* Finest width the actor owns covering a cell: max plen over owned rows
+ * covering (cell,64). The `grant` default ("this place"). Returns 1 with
+ * *plen set, 0 when nothing owned covers the cell. */
+static int
+st_finest_owned_plen(unsigned ref, uint64_t cell, uint8_t *plen)
+{
+	unsigned c;
+	const void *kp, *vp;
+	int found = 0;
+	uint8_t best = 0;
+
+	if (!st_have_hd() || !plen)
+		return 0;
+	c = corm_iter(owner_hd, NULL, 0);
+	while (corm_next(&kp, &vp, c)) {
+		const char *key = kp;
+		const struct st_rec *rec = vp;
+		uint64_t rid;
+		uint8_t rplen;
+
+		if (st_row_key_parse(key, &rid, &rplen) != 0)
+			continue;  /* the ":owner" sidecars, and any legacy key */
+		if (rec->plen != rplen || rec->owner != ref)
+			continue;
+		if (!st_region_covers(rid, rplen, cell, ST_PLEN_CELL))
+			continue;
+		if (!found || rplen > best) {
+			best = rplen;
+			found = 1;
+		}
+	}
+	corm_fin(c);
+	if (!found)
+		return 0;
+	*plen = best;
+	return 1;
+}
+
+/* grant <player> [<width> [point]] -- attribute any region to a player.
+ *
+ * Flexible and easy on purpose: `grant bob` gives Bob this place (the
+ * deepest region you own where you stand); `grant bob 32` carves a district
+ * around here; `grant bob 16 world 5` a planet-sized region around world 5;
+ * `grant bob 0` the cosmos -- explicit only, never the default. Width is a
+ * plen 0..64; point is here (default) | world <N> | cosmos | <x> <y> <z> <w>.
+ * A sub-world `world <N>` point names the aligned-first sub-region; to grant
+ * a lived-in district, stand in it or give coords.
+ *
+ * Gates: the target must be a player (`me` allowed; no ROOT exclusion unlike
+ * ban -- ownership by root is coherent, root already rules everything), and
+ * the granter must rule the new region or an ancestor of it. That one gate
+ * subsumes the old high_shift bound (grant only as fine-or-finer than your
+ * coarsest holding): with ancestor-aware st_can_region, anything coarser
+ * than what you own has no owned ancestor and fails here. Refusals name the
+ * ruler so the granter knows who to ask.
+ *
+ * Effect is ownership-only (legacy stchown shape): the region is created if
+ * needed and its row assigned; a re-grant keeps the module set
+ * (planet-reclaim rule) and the new ruler unloads what they do not want.
+ * The target is told, with the header. Delegation grants, it does not
+ * secede: ancestors keep ruling underneath (deepest wins for naming). */
+void
+do_grant(int fd, int argc, char *argv[])
+{
+	unsigned player_ref = eng_fd_player(fd);
+	char *name = (argc > 1 && argv[1]) ? argv[1] : "";
+	char *wstr = (argc > 2 && argv[2]) ? argv[2] : "";
+	unsigned target_ref;
+	uint64_t cell, id, mask;
+	uint8_t plen, fine;
+	int consumed = 0;
+	struct st_rec rec;
+	int have;
+	char *end = NULL;
+	unsigned long w;
+	OBJ target, granter;
+
+	argc = st_argc_trim(argc, argv);
+	if (!*name) {
+		nd_writef(player_ref, "Usage: grant <player> [<width> [here | world <N> | cosmos | <x> <y> <z> <w>]]\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (strcmp(name, "me") == 0)
+		target_ref = player_ref;
+	else {
+		target_ref = player_get(name);
+		if (target_ref == NOTHING) {
+			nd_writef(player_ref, NOMATCH_MESSAGE);
+			eng_nd_flush(player_ref);
+			return;
+		}
+	}
+	corm_get_copy(obj_hd, &target_ref, &(target));
+	if (target.type != TYPE_ENTITY) {
+		nd_writef(player_ref, CANTDO_MESSAGE);
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (argc > 3) {
+		if (st_cmd_point(player_ref, argc, argv, 3, &cell, &consumed) != XY_OK ||
+		    consumed <= 0 || 3 + consumed != argc) {
+			nd_writef(player_ref, "Usage: grant <player> [<width> [here | world <N> | cosmos | <x> <y> <z> <w>]]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+	} else if (st_here_cell(player_ref, &cell) != XY_OK) {
+		nd_writef(player_ref, "You are nowhere.\n");
+		eng_nd_flush(player_ref);
+		return;
+	}
+	if (!*wstr) {
+		if (!st_finest_owned_plen(player_ref, cell, &fine)) {
+			st_refuse_region(player_ref, cell, ST_PLEN_CELL);
+			return;
+		}
+		plen = fine;
+	} else {
+		w = strtoul(wstr, &end, 10);
+		if (!end || *end || w > ST_PLEN_CELL) {
+			nd_writef(player_ref, "Usage: grant <player> [<width> [here | world <N> | cosmos | <x> <y> <z> <w>]]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		plen = (uint8_t)w;
+	}
+	mask = plen ? (~0ULL << (64 - plen)) : 0ULL;
+	id = cell & mask;
+	if (!st_can_region(player_ref, id, plen)) {
+		st_refuse_region(player_ref, id, plen);
+		return;
+	}
+	if (xy_claim_at(id, plen, NULL, NULL) != XY_OK) {
+		nd_writef(player_ref, "Region could not be established (%s)\n",
+			xy_strerror(xy_errno()));
+		eng_nd_flush(player_ref);
+		return;
+	}
+	have = st_row_get(id, plen, &rec);
+	if (!have) {
+		memset(&rec, 0, sizeof(rec));
+		rec.plen = plen;
+	}
+	rec.owner = target_ref;
+	st_row_put(id, plen, &rec);
+
+	st_row_header(player_ref, id, plen, &rec);
+	if (target_ref != player_ref) {
+		corm_get_copy(obj_hd, &player_ref, &(granter));
+		nd_writef(target_ref, "%s granted you a region:\n", granter.name);
+		st_row_header(target_ref, id, plen, &rec);
+		eng_nd_flush(target_ref);
+	}
+	eng_nd_flush(player_ref);
+}
+
 void
 do_planet(int fd, int argc, char *argv[])
 {
@@ -2215,7 +2437,10 @@ do_target(int fd, int argc, char *argv[])
 	uint64_t id;
 	uint8_t plen;
 	char place[64];
-	const char *arg = (argc > 1 && argv[1]) ? argv[1] : "";
+	const char *arg;
+
+	argc = st_argc_trim(argc, argv);
+	arg = (argc > 1 && argv[1]) ? argv[1] : "";
 
 	if (!*arg) {
 		if (st_target_get(player_ref, &id, &plen)) {
@@ -2245,12 +2470,12 @@ do_target(int fd, int argc, char *argv[])
 	}
 
 	/* `target here` stores the region the player is standing in -- whatever
-	 * st_region_of_player() resolves, which is the deepest CLAIMED region, not
-	 * necessarily a cell. Only worlds are claimed (via `planet`), so in practice
-	 * this is a world or the cosmos. A raw cell (the full 64-bit position) is
-	 * deliberately NOT stored: recipients resolve to world granularity, so a
-	 * cell selector would cover nobody and the default would be a setting that
-	 * refuses everything it touches.
+	 * st_region_of_player() resolves, which is the deepest region with a
+	 * row, not necessarily a cell. That is a world, a granted district, or
+	 * the cosmos. A raw cell (the full 64-bit position) is deliberately NOT
+	 * stored: recipients resolve to world granularity, so a cell selector
+	 * would cover nobody and the default would be a setting that refuses
+	 * everything it touches.
 	 *
 	 * This is still more than a `target <n>` alias: it needs no world number,
 	 * and from the void it stores the cosmos, which no number can name. */
@@ -2260,9 +2485,31 @@ do_target(int fd, int argc, char *argv[])
 			eng_nd_flush(player_ref);
 			return;
 		}
+	} else if (argc > 2 && *arg) {
+		/* <width> <point...> form: an explicit point is what
+		 * disambiguates a width from a world number (a lone number stays
+		 * a world, back-compat). This is how subtree commands address
+		 * super-planet regions no world token can name. */
+		char *end = NULL;
+		unsigned long wp = strtoul(arg, &end, 10);
+		uint64_t cell;
+		uint64_t mask;
+		int consumed = 0;
+
+		if (!end || *end || wp > ST_PLEN_CELL ||
+		    st_cmd_point(player_ref, argc, argv, 2, &cell, &consumed) != XY_OK ||
+		    consumed <= 0 || 2 + consumed != argc) {
+			nd_writef(player_ref,
+				"Usage: target [<world> | cosmos | here | none | <width> <point>]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		plen = (uint8_t)wp;
+		mask = plen ? (~0ULL << (64 - plen)) : 0ULL;
+		id = cell & mask;
 	} else if (st_cmd_world(arg, &id, &plen) != XY_OK) {
 		nd_writef(player_ref,
-			"Usage: target [<world> | cosmos | here | none]\n");
+			"Usage: target [<world> | cosmos | here | none | <width> <point>]\n");
 		eng_nd_flush(player_ref);
 		return;
 	}
@@ -2616,27 +2863,62 @@ void
 do_release(int fd, int argc, char *argv[])
 {
 	unsigned player_ref = eng_fd_player(fd);
-	uint64_t id;
+	uint64_t id, cell, mask;
 	uint8_t plen;
 	struct st_rec rec;
 	uint32_t i;
 	char namebuf[ND_ST_MOD_NAME + 1];
 	char *end = NULL;
 	unsigned long w;
+	int consumed = 0;
+	int is_world = 0;
 
+	argc = st_argc_trim(argc, argv);
 	if (argc < 2 || !argv[1] || !*argv[1]) {
-		nd_writef(player_ref, "Usage: release <world>\n");
+		nd_writef(player_ref, "Usage: release [<world> | <width> [here | world <N> | cosmos | <x> <y> <z> <w>]]\n");
 		eng_nd_flush(player_ref);
 		return;
 	}
-	w = strtoul(argv[1], &end, 10);
-	if (!end || *end || w > 65535) {
-		nd_writef(player_ref, "Invalid world (0-65535)\n");
+	/* A single bare number stays a world (back-compat); more tokens mean
+	 * <width> [point...], so an explicit point is what disambiguates a
+	 * width from a world number. */
+	if (argc == 2) {
+		w = strtoul(argv[1], &end, 10);
+		if (!end || *end || w > 65535) {
+			nd_writef(player_ref, "Usage: release [<world> | <width> [here | world <N> | cosmos | <x> <y> <z> <w>]]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		id = st_planet_id((unsigned)w);
+		plen = ST_PLEN_WORLD;
+		is_world = 1;
+	} else {
+		w = strtoul(argv[1], &end, 10);
+		if (!end || *end || w > ST_PLEN_CELL) {
+			nd_writef(player_ref, "Usage: release [<world> | <width> [here | world <N> | cosmos | <x> <y> <z> <w>]]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		if (st_cmd_point(player_ref, argc, argv, 2, &cell, &consumed) != XY_OK ||
+		    consumed <= 0 || 2 + consumed != argc) {
+			nd_writef(player_ref, "Usage: release [<world> | <width> [here | world <N> | cosmos | <x> <y> <z> <w>]]\n");
+			eng_nd_flush(player_ref);
+			return;
+		}
+		plen = (uint8_t)w;
+		mask = plen ? (~0ULL << (64 - plen)) : 0ULL;
+		id = cell & mask;
+		w = 0;
+	}
+
+	/* The cosmos is permanent: deleting (0,0) would leave no ruler for
+	 * anything and brick every future claim (`planet` needs cosmos
+	 * ownership). Hand it over with `grant`, never delete it. */
+	if (plen == ST_PLEN_ROOT) {
+		nd_writef(player_ref, "The cosmos cannot be released (grant it instead).\n");
 		eng_nd_flush(player_ref);
 		return;
 	}
-	id = st_planet_id((unsigned)w);
-	plen = ST_PLEN_WORLD;
 
 	if (!st_can(player_ref, id, plen)) {
 		nd_writef(player_ref, "Permission denied\n");
@@ -2662,6 +2944,10 @@ do_release(int fd, int argc, char *argv[])
 	st_row_del(id, plen);
 	/* The region entry itself stays, inert: region entries are never
 	 * destroyed, and a later `planet` with the same number reuses it (§4.6). */
-	nd_writef(player_ref, "planet %lu released\n", w);
+	if (is_world)
+		nd_writef(player_ref, "planet %lu released\n", w);
+	else
+		nd_writef(player_ref, "released: region id=0x%016llx plen=%u\n",
+			(unsigned long long)id, plen);
 	eng_nd_flush(player_ref);
 }

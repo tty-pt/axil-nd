@@ -34,6 +34,15 @@ ENT eng_ent_get(unsigned ref) {
 	const void *__v = corm_get(ent_hd, &ref);
 	if (__v)
 		ent = *(const ENT *)__v;
+	else {
+		/* No row means no default target region, never the cosmos:
+		 * (0,0) is a real region with a real owner, and a fresh
+		 * player must fall back to position, not inherit cosmos
+		 * reach. ST_SEL_UNSET is the only value that cannot name a
+		 * region (legal plens are 0..64); st_target_get translates
+		 * it at the boundary. */
+		ent.target_plen = ST_SEL_UNSET;
+	}
 	return ent;
 }
 

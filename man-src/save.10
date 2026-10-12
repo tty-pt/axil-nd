@@ -1,0 +1,18 @@
+.TH SAVE 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+save \- Persist the world
+.SH SYNOPSIS
+.B save
+.SH DESCRIPTION
+.PP
+Write the world to disk: the map is synced first and the store is saved
+after, so a crash between the two cannot leave a saved store pointing at an
+unsaved map.
+.PP
+Only the root player may save. Anyone else is told that only root can.
+Ordinary play persists nothing on its own; a daemon that is never told to
+save loses everything since the last one.
+.SH SEE ALSO
+.BR status (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>
