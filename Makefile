@@ -106,7 +106,8 @@ install-data: man
 	for d in art man; do \
 		( cd $$d && find . -type d -exec mkdir -p "$$dst/$$d/{}" \; ) || exit 1; \
 		( cd $$d && find . -type f ! -name '.stamp' -exec install -m 644 {} "$$dst/$$d/{}" \; ) || exit 1; \
-	done
+	done; \
+	install -m 644 motd "$$dst/motd"
 .PHONY: install-data
 
 # nd-mod.mk used to be installed here, as the build contract a sibling module

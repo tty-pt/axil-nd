@@ -76,10 +76,13 @@ AXIL_ND_DB=./var/std.db axil -d -A -p 8080 -m ./lib/libaxil-nd.so
 
 ## The man pages
 
-The 71 in-game help pages (`help <topic>`) are tracked as `man-src/*.10` and
+The 72 in-game help pages (`help <topic>`) are tracked as `man-src/*.10` and
 copied into `man/` by the `man` target, which `all` depends on. `man/` is
 gitignored build output and is resolved relative to the working directory at
-runtime, exactly as `art/` and `htdocs/` are.
+runtime, exactly as `art/` and `htdocs/` are. A bare `help` (or `man`) lists
+every installed topic. The editable login notice is the `motd` file, read
+from the working directory at login and installed to the share directory by
+`install-data`.
 
 ## License
 

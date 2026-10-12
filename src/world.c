@@ -10,6 +10,7 @@
 
 #include "uapi/io.h"
 
+#include <dirent.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -621,11 +622,74 @@ do_sh(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unus
 		WARN("sh refused on %d\n", fd);
 }
 
+static int
+help_topic_cmp(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* List every installed help topic, one per line.  Read from man/ rather than a
+ * compiled-in list, so `help` can never advertise a page that was not built or
+ * hide one that was; man/ is generated from man-src/ by `make man`.  A bare
+ * `help`/`man` lands here. */
+static void
+nd_help_index(unsigned player_ref)
+{
+	DIR *dir = opendir("man");
+	struct dirent *de;
+	char **topics = NULL;
+	size_t n = 0, cap = 0;
+
+	if (dir) {
+		while ((de = readdir(dir)) != NULL) {
+			size_t len = strlen(de->d_name);
+
+			if (len <= 3 || strcmp(de->d_name + len - 3, ".10") != 0)
+				continue;
+			if (n == cap) {
+				char **grown;
+
+				cap = cap ? cap * 2 : 64;
+				grown = realloc(topics, cap * sizeof(*topics));
+				if (!grown)
+					break;
+				topics = grown;
+			}
+			topics[n] = strndup(de->d_name, len - 3);
+			if (topics[n])
+				n++;
+		}
+		closedir(dir);
+	}
+
+	if (n > 0) {
+		qsort(topics, n, sizeof(*topics), help_topic_cmp);
+		nd_writef(player_ref, "%zu help topics:\n", n);
+		for (size_t i = 0; i < n; i++) {
+			nd_writef(player_ref, "  %s\n", topics[i]);
+			free(topics[i]);
+		}
+		free(topics);
+	} else {
+		nd_writef(player_ref, "No help topics installed.\n");
+	}
+	nd_writef(player_ref, "Type `help <topic>` for a single topic.\n");
+	eng_nd_flush(player_ref);
+}
+
 void
 do_man(int fd, int argc, char *argv[])
 {
-	const char *topic = (argc > 1 && argv[1] && *argv[1]) ? argv[1] : "begin";
+	const char *topic;
 	char path[BUFSIZ];
+
+	/* No topic: the index of everything available. `help begin` still opens
+	 * the tutorial, and the browser client's help button sends exactly that. */
+	if (argc <= 1 || !argv[1] || !*argv[1]) {
+		nd_help_index(eng_fd_player(fd));
+		return;
+	}
+	topic = argv[1];
 
 	/* The topic reaches an execve argv below. A slash escapes "man/<topic>.10"
 	 * into an arbitrary-file read (man -l preprocesses through cat), and a
@@ -872,6 +936,44 @@ auth(unsigned fd)
 	return 0;
 }
 
+/* The editable login notice, shown on every login AFTER the room and map.
+ * Read from `motd` relative to cwd (like man/ and art/), so an operator can
+ * replace the default without a rebuild; the built-in fallback keeps a fresh
+ * checkout or stripped install working.  Shipped by install-data to
+ * share/axil-nd/motd. */
+static const char nd_motd_default[] =
+	"Welcome to Neverdark.\n"
+	"\n"
+	"Type `help` for the topic list, or `help begin` for a tour.\n"
+	"To shape the world, load a game module or write your own:\n"
+	"  help modules   installing and writing game modules\n"
+	"  help loadmod   load a module into a region you rule\n"
+	"  grant          hand a region to another player\n"
+	"  sh             open a shell to edit and build code\n";
+
+static void
+nd_motd_show(unsigned player_ref)
+{
+	char buf[BUFSIZ];
+	FILE *f = fopen("motd", "r");
+	const char *text = nd_motd_default;
+
+	if (f) {
+		size_t len = fread(buf, 1, sizeof(buf) - 2, f);
+
+		fclose(f);
+		if (len > 0) {
+			if (buf[len - 1] != '\n')
+				buf[len++] = '\n';
+			buf[len] = '\0';
+			text = buf;
+		}
+	}
+
+	nd_writef(player_ref, "%s", text);
+	eng_nd_flush(player_ref);
+}
+
 /* Re-anchor a player to a new socket on (re)login: writes must go to the
  * socket the player is logging in on, not to a descriptor that may already
  * be gone.  Traced with gdb: a raw guest re-running `connect <name>` for a
@@ -942,6 +1044,8 @@ nd_player_login(int fd, char *user)
 		mcp_tod(player_ref, 1);
 	else
 		mcp_tod(player_ref, 0);
+
+	nd_motd_show(player_ref);
 
 	nd_evt_auth(player_ref);
 	return player_ref;

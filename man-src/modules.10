@@ -1,0 +1,56 @@
+.TH MODULES 10 "October 2026" "1.1" "Neverdark Manual"
+.SH NAME
+modules \- Install and write game modules
+.SH DESCRIPTION
+.PP
+Neverdark is not one game. It is a boot engine plus a set of \fBmodules\fP,
+one shared library each, loaded into regions. A module can add commands,
+tables and event handlers that run only for the players of the region it is
+loaded into, so different corners of the world can be different games.
+.PP
+.SS Installing a module
+.PP
+A module is a shared library named \fIlibnd-name\fP\fB.so\fP, installed on
+the engine's library path \- the directory the engine itself lives in.
+.B loadmod
+loads it by bare stem, without the suffix:
+.PP
+.RS 4
+loadmod libnd-core
+.RE
+.PP
+A module attaches to one region, not to the whole world: you must rule the
+exact region you load into (see \fBloadmod\fP(10)). The set is remembered in
+the region's row and restored on every boot. \fBmodlist\fP(10) shows a
+region's modules and \fBunloadmod\fP(10) takes one out; \fBgrant\fP(10) hands
+a finished region to another player.
+.PP
+.SS Writing a module
+.PP
+A module is an ordinary shared object built against the engine headers. Its
+contract is small:
+.PP
+.RS 4
+.IP \(bu 2
+include \fB<nd/xy.h>\fP;
+.IP \(bu
+export \fBXY_MODULE_API void xy_install(void)\fP for setup;
+.IP \(bu
+implement event hooks with \fBXY_IMPL\fP (the hook list is in \fBnd/hooks.h\fP);
+.IP \(bu
+export services to other modules with \fBXY_DECL\fP plus \fBXY_IMPL\fP;
+.IP \(bu
+write to a player with \fBnd_printf\fP, and read and write persistent tables
+with \fBnd_get\fP and \fBnd_put\fP.
+.RE
+.PP
+Dependencies are declared at install time with \fBxy_load\fP, so a module
+names what it needs instead of assuming a load order. Build the result as
+\fIlibnd-name\fP\fB.so\fP and place it beside the engine.
+.PP
+The unix subsystem, reached with \fBsh\fP(10), is the workbench: edit sources,
+run the build, and reload in place.
+.SH SEE ALSO
+.BR loadmod,unloadmod,modlist,release,grant,target,sh,begin (10)
+.SH AUTHOR
+quirinpa <quirinpa@tty.pt>

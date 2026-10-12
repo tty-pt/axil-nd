@@ -9,7 +9,10 @@ help \- Similar to the man command, this triggers this help system
 .PP
 \fBhelp\fP Will open the man page about \fIsubject\fP. Optionally,
 match a specific \fIsection\fP.
+.PP
+With no subject, \fBhelp\fP lists every installed topic instead;
+\fBhelp begin\fP is the tutorial.
 .SH SEE ALSO
-.BR man,starting (10)
+.BR man,begin,modules (10)
 .SH AUTHOR
 quirinpa <quirinpa@tty.pt>

@@ -20,12 +20,15 @@ to do many different things.
 The objectinve of this game is so that it is useful for you personally!
 Not just something you waste time playing.
 So you have access to a unix subsystem in which you can program behaviors
-and edit contents. I also hope that it has some philosophical benefits.
+and edit contents. The world itself is built from modules; to install or
+write your own, run \fBhelp modules\fP.
+.PP
+To see everything available, run \fBhelp\fP with no subject.
 .PP
 Please, be nice with other players, and have fun!
 .PP
 With the terminal focused, press "q" to quit the help tool.
 .SH SEE ALSO
-.BR help,walk,get,equip,status,shop,create,reroll,look,say,sit,fight,cast,sh (10)
+.BR help,modules,walk,get,equip,status,shop,create,reroll,look,say,sit,fight,cast,sh (10)
 .SH AUTHOR
 quirinpa <quirinpa@tty.pt>

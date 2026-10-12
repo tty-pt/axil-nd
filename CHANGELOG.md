@@ -1,6 +1,13 @@
 ## Unreleased
 
 Added
+- **Login notice (`motd`) and a help-topic index.** Every login now ends with
+  an editable notice read from `motd` (cwd-relative, installed to the share
+  directory by `install-data`; a built-in fallback keeps a fresh checkout
+  working) whose default text points a new player at `help` and at
+  loading/writing game modules. A bare `help`/`man` lists every installed
+  help topic by reading `man/` at runtime, and the new `modules(10)` page
+  documents the module install and authoring contract.
 - **Man pages for the 17 engine commands that had none.** Every command in
   the engine's table (`src/world.c` `cmds[]`) is now documented:
   `connect`, `ban`/`unban`, `teleport`, `owned`, `view`, `man`, `save`,
@@ -22,6 +29,10 @@ Added
   new ruler's commands act on where they stand.
 
 Changed
+- **Bare `help`/`man` show the topic index, not `begin`.** `help begin` still
+  opens the tutorial (the browser client's help button sends exactly that),
+  but `help` with no subject now lists every topic, so the one command a
+  beginner is most likely to try answers usefully.
 - **No boot-time module list: region modding is the only module lifecycle.**
   `nd_mods_load()` and the `mods.load` file are gone, with them the
   `AXIL_ND_GLOBAL_MODS` override and `make mods`. Game modules load only via

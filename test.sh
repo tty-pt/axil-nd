@@ -519,6 +519,11 @@ stdbuf -i0 -o0 cat <&10 >"$mp_txt" &
 mp_cat=$!
 ndlogin 10 "$mp_guest" "$guestpass" "on_enter" "$mp_txt" \
 	|| { echo "FAIL: second-player login missing" >&2; exit 1; }
+# The login notice (MOTD.md §1): every login ends with the editable `motd`,
+# read from the cwd (the repo root in the suite). on_enter fires after it, so
+# waiting for the login marker already guarantees these bytes arrived.
+grep -qaF "help modules" "$mp_txt" \
+	|| { echo "FAIL: raw login did not show the motd" >&2; exit 1; }
 kill -9 $mp_cat 2>/dev/null || true
 wait $mp_cat 2>/dev/null || true
 exec 10<&-
@@ -918,6 +923,9 @@ while [ $tries -gt 0 ]; do
 done
 grep -qa "on_enter" "$ws_nd_out" \
 	|| { echo "FAIL: cookie /nd login missing on_enter" >&2; exit 1; }
+# The motd reaches a WS login too (MOTD.md §1), not only raw telnet.
+grep -qaF "help modules" "$ws_nd_out" \
+	|| { echo "FAIL: WS login did not show the motd" >&2; exit 1; }
 
 # help renders through a PTY for a proven identity.
 printf '\x82\x8b\x00\x00\x00\x00help begin\n' >&7
@@ -929,6 +937,20 @@ while [ $tries -gt 0 ]; do
 done
 grep -qa "BEGIN" "$ws_nd_out" \
 	|| { echo "FAIL: cookie 'help begin' man page not seen" >&2; exit 1; }
+
+# A bare `help` lists the topic index (MOTD.md §2). `help begin` above proved
+# help itself still works; this proves the no-subject path reaches the index.
+ndws 7 "help"
+tries=30
+while [ $tries -gt 0 ]; do
+	grep -qa "help topics" "$ws_nd_out" && break
+	sleep 0.05
+	tries=$((tries - 1))
+done
+grep -qa "help topics" "$ws_nd_out" \
+	|| { echo "FAIL: bare 'help' did not list the topics" >&2; exit 1; }
+grep -qaF "  modules" "$ws_nd_out" \
+	|| { echo "FAIL: topic index missing the modules page" >&2; exit 1; }
 
 # sh opens a shell: NAWS first for geometry, then the command.
 printf '\x82\x89\x00\x00\x00\x00\xff\xfa\x1f\x00\x50\x00\x18\xff\xf0' >&7
