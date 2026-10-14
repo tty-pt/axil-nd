@@ -17,3 +17,9 @@
 /docs
 /var
 /.pi
+
+# Runtime state
+*.db
+users/
+home/
+etc/

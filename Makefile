@@ -3,15 +3,12 @@ SONAME-libaxil-nd := axil-nd
 
 LDFLAGS-libaxil-nd-Darwin := -undefined dynamic_lookup
 
-share != find ./htdocs -type f
+share != find ./htdocs -maxdepth 1 -type f
 share-dir := axil-nd
 
-ENGINE-obj-y := \
-	src/entity.o src/item.o src/look.o src/map.o src/match.o \
-	src/mcp.o src/noise.o src/object.o src/spacetime.o src/speech.o \
-	src/view.o src/wiz.o src/world.o src/io.o src/mods.o
+ENGINE-obj-y :=
 
-libaxil-nd-obj-y := ${ENGINE-obj-y}
+libaxil-nd-obj-y := src/http.o src/law_io.o src/law_store.o src/law_cmd.o
 
 # Where the module-facing headers install. mk/include.mk:19-21 lists
 # `ls include/$(FOLDER)` and :104-108 installs each to
@@ -24,17 +21,10 @@ libaxil-nd-obj-y := ${ENGINE-obj-y}
 # it. Every module is an installed library now, so this is
 # the only include path a module needs beyond its own.
 FOLDER := nd
-# FOLDER no longer creates include/ttypt, so the engine's own header has to
-# name its own dir and its own install: install-dirs gets the directory,
-# install-extra the file (mk/include.mk:123-125). Both must be set BEFORE the
-# -include below: mk assigns install-dirs := ... with := immediately after its
-# own +=, so a later append would miss the $(DESTDIR)$(PREFIX)/ substitution.
-install-dirs += include/ttypt
-install-extra := include/ttypt/axil-nd.h
 
 -include ./../mk/include.mk
 
-LDLIBS-libaxil-nd := -laxil -lcorm -lxylem -lislet -lqsys -laxil-tty
+LDLIBS-libaxil-nd := -laxil -lcorm -lxylem
 
 man: man/.stamp
 man/.stamp: man-src/*.10
@@ -47,21 +37,11 @@ all: man
 
 smoke: man ${ENGINE-obj-y}
 
-CFLAGS-entity-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-item-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-look-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-map-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-match-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-mcp-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-noise-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-object-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-spacetime-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-speech-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-view-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-wiz-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-world-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-io-o := -fPIC -D_GNU_SOURCE -fcommon
-CFLAGS-mods-o := -fPIC -D_GNU_SOURCE -fcommon
+CFLAGS-install-o := -fPIC -D_GNU_SOURCE
+CFLAGS-http-o := -fPIC -D_GNU_SOURCE
+CFLAGS-law_io-o := -fPIC -D_GNU_SOURCE
+CFLAGS-law_store-o := -fPIC -D_GNU_SOURCE
+CFLAGS-law_cmd-o := -fPIC -D_GNU_SOURCE
 
 smoke: man ${ENGINE-obj-y}
 	@echo "engine TU smoke: ok"
@@ -93,8 +73,9 @@ demo: mods/demo/demo.so
 # while leaving a binary from the previous ABI in place. Listing them here is
 # what turns an ABI bump into an actual rebuild.
 XY_HDRS := /usr/include/ttypt/xy.h /usr/include/ttypt/xy-mod.h
-mods/demo/demo.so: mods/demo/demo.c include/nd/xy.h $(XY_HDRS)
-	cd mods && cc -shared -fPIC -I../include -I/usr/include -o demo/demo.so demo/demo.c
+ND_MOD_INCLUDES := $(patsubst %,-I%,$(wildcard $(CURDIR)/../nd-*/include))
+mods/demo/demo.so: mods/demo/demo.c ../nd-world/include/nd/xy.h $(XY_HDRS)
+	cd mods && cc -shared -fPIC -I../include $(ND_MOD_INCLUDES) -I/usr/include -o demo/demo.so demo/demo.c
 .PHONY: demo
 
 test: all

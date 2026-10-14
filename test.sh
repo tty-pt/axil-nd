@@ -51,6 +51,16 @@ make --no-print-directory -C ../axil-tty
 make --no-print-directory -C ../axil-auth
 make --no-print-directory -C ../nd-fight
 make --no-print-directory -C ../nd-spell
+make --no-print-directory -C ../nd-obj
+make --no-print-directory -C ../nd-region
+make --no-print-directory -C ../nd-world
+make --no-print-directory -C ../nd-speech
+make --no-print-directory -C ../nd-view
+make --no-print-directory -C ../nd-mcp
+make --no-print-directory -C ../nd-bus
+make --no-print-directory -C ../nd-session
+
+MODULE_SET="./lib/axil-nd:libnd-region:libnd-bus:libnd-obj:libnd-world:libnd-view:libnd-mcp:libnd-speech:libnd-session"
 
 port=$((20000 + RANDOM % 8000))
 tmpout=$(mktemp)
@@ -62,7 +72,7 @@ planet_pid_b=
 planet_pid_c=
 # The trap is installed BEFORE anything can fail and covers the temp dir,
 # all daemon pids, and the lib/ symlinks the suite adds below.
-trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
+trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libnd-obj.so lib/libnd-region.so lib/libnd-world.so lib/libnd-speech.so lib/libnd-view.so lib/libnd-mcp.so lib/libnd-bus.so lib/libnd-session.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # Out-of-tree module fixture.
@@ -89,7 +99,7 @@ cat > "$probe/Makefile" <<EOF
 # outside the engine tree, so it should be as close to hand-written as a real
 # one can get. Granted to the root region by soname in the warm-up below.
 testprobe.so: testprobe.c
-	\$(CC) -shared -fPIC -I$(pwd)/include -I${PREFIX:-/usr}/include \\
+	\$(CC) -shared -fPIC -I$(pwd)/include -I$(pwd)/../nd-region/include -I$(pwd)/../nd-world/include -I${PREFIX:-/usr}/include \\
 		-o \$@ \$<
 EOF
 # Deliberately minimal: the ONLY thing this TU knows is nd/xy.h and
@@ -192,6 +202,14 @@ ln -sf ../axil-auth/lib/libaxil-auth.so lib/libaxil-auth.so
 ln -sf ../mods/demo/demo.so lib/libnd-demo.so
 ln -sf ../../axil-nd-testprobe/testprobe.so lib/libaxil-testprobe.so
 ln -sf ../../axil-nd-authfix/authfix.so lib/libaxil-authfix.so
+ln -sf ../../nd-obj/lib/libnd-obj.so lib/libnd-obj.so
+ln -sf ../../nd-region/lib/libnd-region.so lib/libnd-region.so
+ln -sf ../../nd-world/lib/libnd-world.so lib/libnd-world.so
+ln -sf ../../nd-speech/lib/libnd-speech.so lib/libnd-speech.so
+ln -sf ../../nd-view/lib/libnd-view.so lib/libnd-view.so
+ln -sf ../../nd-mcp/lib/libnd-mcp.so lib/libnd-mcp.so
+ln -sf ../../nd-bus/lib/libnd-bus.so lib/libnd-bus.so
+ln -sf ../../nd-session/lib/libnd-session.so lib/libnd-session.so
 
 # Scratch account database for the fixture above. The login name is the same
 # real account the old suite required (connect used to need a passwd entry);
@@ -311,7 +329,7 @@ ndwarm() { # port log capfile stem...
 			grep -qaF "$_m loaded into" "$_cap" && break
 			_tries=$((_tries - 1)); sleep 0.05
 		done
-		[ $_tries -eq 0 ] && { echo "FAIL: warm-up loadmod $_m not confirmed on $_port" >&2; return 1; }
+		[ $_tries -eq 0 ] && { echo "LOG:"; cat "$_log"; echo "CAP:"; cat "$_cap"; echo "FAIL: warm-up loadmod $_m not confirmed on $_port" >&2; return 1; }
 	done
 	# The warm-up player was created before any module loaded, so vanilla's
 	# on_new_player never teleported them: they are still self-located, and
@@ -341,7 +359,7 @@ export AXIL_ND_DB="$tmpdb/std.db"
 # the host passwd file: `connect <name>` arms a password prompt and only the
 # fixture password completes the login.
 
-axil -d -A -p "$port" -m ./lib/axil-nd >/tmp/axil_test.log 2>&1 &
+axil -d -A -p "$port" -m "$MODULE_SET" >/tmp/axil_test.log 2>&1 &
 mux_pid=$!
 
 # WS key and expected accept
@@ -522,8 +540,12 @@ ndlogin 10 "$mp_guest" "$guestpass" "on_enter" "$mp_txt" \
 # The login notice (MOTD.md §1): every login ends with the editable `motd`,
 # read from the cwd (the repo root in the suite). on_enter fires after it, so
 # waiting for the login marker already guarantees these bytes arrived.
-grep -qaF "help modules" "$mp_txt" \
-	|| { echo "FAIL: raw login did not show the motd" >&2; exit 1; }
+_t=20
+while [ $_t -gt 0 ]; do
+	grep -qaF "help modules" "$mp_txt" && break
+	_t=$((_t - 1)); sleep 0.05
+done
+[ $_t -eq 0 ] && { echo "FAIL: raw login did not show the motd" >&2; exit 1; }
 kill -9 $mp_cat 2>/dev/null || true
 wait $mp_cat 2>/dev/null || true
 exec 10<&-
@@ -857,7 +879,7 @@ exec 7<&-
 # still get help/man/sh shells on /nd and an auto-shell on /tty.
 wsp=$((port + 9))
 ws_log="$tmpdb/wsauth.log"
-AXIL_ND_DB="$tmpdb/wsauth.db" axil -d -p "$wsp" -m ./lib/axil-nd >"$ws_log" 2>&1 &
+AXIL_ND_DB="$tmpdb/wsauth.db" axil -d -p "$wsp" -m "$MODULE_SET" >"$ws_log" 2>&1 &
 ws_pid=$!
 tries=60
 while [ $tries -gt 0 ]; do
@@ -1245,7 +1267,7 @@ s54_out="$tmpdb/s54.out"
 
 # No -A here, and a private store so this boot cannot collide with the fixtures
 # the rest of the suite shares.
-AXIL_ND_DB="$tmpdb/s54.db" axil -d -p "$s54_port" -m ./lib/axil-nd >"$s54_log" 2>&1 &
+AXIL_ND_DB="$tmpdb/s54.db" axil -d -p "$s54_port" -m "$MODULE_SET" >"$s54_log" 2>&1 &
 s54_pid=$!
 # Never leak this server: every FAIL below exits, and without this the port
 # stays held by an orphan that breaks later runs.
@@ -1256,7 +1278,7 @@ s54_pid=$!
 # axil holding $port. Measured while landing ST.md §27.6(1): a cold-start
 # FAIL here leaked `axil -d -A -p <port>`. The scope section below re-declares
 # the full trap for exactly this reason -- do the same here.
-trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
+trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libnd-obj.so lib/libnd-region.so lib/libnd-world.so lib/libnd-speech.so lib/libnd-view.so lib/libnd-mcp.so lib/libnd-bus.so lib/libnd-session.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} "$s54_pid" ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} 2>/dev/null || true' EXIT
 s54_settle=50
 while [ $s54_settle -gt 0 ]; do
 	grep -qF "Done." "$s54_log" 2>/dev/null && nc -z 127.0.0.1 "$s54_port" 2>/dev/null && break
@@ -1427,7 +1449,7 @@ port_b=$((port + 2))
 log_a="$tmpdb/persist-a.log"
 log_b="$tmpdb/persist-b.log"
 
-AXIL_ND_DB="$persist_db" axil -d -A -p "$port_a" -m ./lib/axil-nd >"$log_a" 2>&1 &
+AXIL_ND_DB="$persist_db" axil -d -A -p "$port_a" -m "$MODULE_SET" >"$log_a" 2>&1 &
 persist_pid_a=$!
 
 # bounded-poll: wait for nd_world_init's "Done." (world.c) and open port before connecting
@@ -1461,12 +1483,13 @@ while [ $tries -gt 0 ]; do
 done
 [ $tries -eq 0 ] && { echo "FAIL: boot A login not seen" >&2; exit 1; }
 
+save_before=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
+sleep 1
 printf 'save\n\n' >&5
 # Wait for the explicit save to land (store mtime advances past the boot)
 # before the SEGV: without this the crash-handler save races the world tick
 # on a store that may not even contain the player yet, and boot B flakes.
 # Bounded; a save that never lands fails here instead of confusing boot B.
-save_before=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
 tries=60
 while [ $tries -gt 0 ]; do
 	save_now=$(stat -c %Y "$persist_db" 2>/dev/null || echo 0)
@@ -1492,7 +1515,7 @@ sz=$(stat -c %s "$persist_db" 2>/dev/null || echo 0)
 grep -qF "eng_object_add" "$log_a" \
 	|| { echo "FAIL: boot A did not create the player" >&2; exit 1; }
 
-AXIL_ND_DB="$persist_db" axil -d -A -p "$port_b" -m ./lib/axil-nd >"$log_b" 2>&1 &
+AXIL_ND_DB="$persist_db" axil -d -A -p "$port_b" -m "$MODULE_SET" >"$log_b" 2>&1 &
 persist_pid_b=$!
 
 tries=50
@@ -1662,7 +1685,7 @@ killaxil() {
 	wait "$pid" 2>/dev/null || true
 }
 
-AXIL_ND_DB="$planet_db" axil -d -A -p "$pa" -m ./lib/axil-nd >"$la" 2>&1 &
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pa" -m "$MODULE_SET" >"$la" 2>&1 &
 planet_pid_a=$!
 wait_up "$la" "$pa" || { echo "FAIL: planet boot A did not init" >&2; exit 1; }
 
@@ -1756,7 +1779,7 @@ killaxil $planet_pid_a; planet_pid_a=
 sz=$(stat -c %s "$planet_db" 2>/dev/null || echo 0)
 [ "${sz:-0}" -gt 0 ] || { echo "FAIL: planet boot A store empty" >&2; exit 1; }
 
-AXIL_ND_DB="$planet_db" axil -d -A -p "$pb" -m ./lib/axil-nd >"$lb" 2>&1 &
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pb" -m "$MODULE_SET" >"$lb" 2>&1 &
 planet_pid_b=$!
 wait_up "$lb" "$pb" || { echo "FAIL: planet boot B did not init" >&2; exit 1; }
 
@@ -1812,7 +1835,7 @@ sleep 0.3
 exec 7<&-
 killaxil $planet_pid_b; planet_pid_b=
 
-AXIL_ND_DB="$planet_db" axil -d -A -p "$pc" -m ./lib/axil-nd >"$lc" 2>&1 &
+AXIL_ND_DB="$planet_db" axil -d -A -p "$pc" -m "$MODULE_SET" >"$lc" 2>&1 &
 planet_pid_c=$!
 wait_up "$lc" "$pc" || { echo "FAIL: planet boot C did not init" >&2; exit 1; }
 
@@ -1938,7 +1961,7 @@ EOF
 
 for tag in a b; do
 	${CC:-cc} -shared -fPIC -DND_SCOPE_TAG="\"$tag\"" \
-		-I"$(pwd)/include" -I"${PREFIX:-/usr}/include" \
+		-I"$(pwd)/include" -I"$(pwd)/../nd-region/include" -I"$(pwd)/../nd-world/include" -I"${PREFIX:-/usr}/include" \
 		-o "$scopeprobe_dir/libnd-scope-$tag.so" "$tmpdb/scopeprobe.c"
 done
 
@@ -1949,7 +1972,7 @@ ld="$tmpdb/scope-a.log"
 le="$tmpdb/scope-b.log"
 scope_pid_a=
 scope_pid_b=
-trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} ${g10_pid:+$g10_pid} 2>/dev/null || true' EXIT
+trap 'rm -f "$tmpout" lib/libaxil-auth.so lib/libnd-demo.so lib/libnd-obj.so lib/libnd-region.so lib/libnd-world.so lib/libnd-speech.so lib/libnd-view.so lib/libnd-mcp.so lib/libnd-bus.so lib/libnd-session.so lib/libaxil-testprobe.so lib/libaxil-authfix.so; rm -rf "$tmpdb"; rm -rf ../axil-nd-authfix; kill -9 ${ws_pid:+$ws_pid} ${mux_pid:+$mux_pid} ${tty_cat_pid:+$tty_cat_pid} ${persist_pid_a:+$persist_pid_a} ${persist_pid_b:+$persist_pid_b} ${planet_pid_a:+$planet_pid_a} ${planet_pid_b:+$planet_pid_b} ${planet_pid_c:+$planet_pid_c} ${scope_pid_a:+$scope_pid_a} ${scope_pid_b:+$scope_pid_b} ${g10_pid:+$g10_pid} 2>/dev/null || true' EXIT
 
 # Count a marker in a log. Used as a DELTA around one command, never as a
 # whole-file grep: "probe A did not fire" is only meaningful if the assertion
@@ -2004,7 +2027,7 @@ goto_world() {
 	ndsettle "$fd"
 }
 
-AXIL_ND_DB="$scope_db" axil -d -A -p "$pd" -m ./lib/axil-nd >"$ld" 2>&1 &
+AXIL_ND_DB="$scope_db" axil -d -A -p "$pd" -m "$MODULE_SET" >"$ld" 2>&1 &
 scope_pid_a=$!
 wait_up "$ld" "$pd" || { echo "FAIL: scope boot A did not init" >&2; exit 1; }
 
@@ -2072,7 +2095,7 @@ sleep 0.3
 exec 7<&-
 killaxil $scope_pid_a; scope_pid_a=
 
-AXIL_ND_DB="$scope_db" axil -d -A -p "$pe" -m ./lib/axil-nd >"$le" 2>&1 &
+AXIL_ND_DB="$scope_db" axil -d -A -p "$pe" -m "$MODULE_SET" >"$le" 2>&1 &
 scope_pid_b=$!
 wait_up "$le" "$pe" || { echo "FAIL: scope boot B did not init" >&2; exit 1; }
 grep -qaF "st_restore: loaded libnd-scope-a" "$le" \
@@ -2202,7 +2225,7 @@ mp_guest_txt="$mpdb/guest.txt"
 : > "$mp_owner_txt"
 : > "$mp_guest_txt"
 
-AXIL_ND_DB="$mpdb/w.db" axil -d -A -p "$mp" -m ./lib/axil-nd >"$mpla" 2>&1 &
+AXIL_ND_DB="$mpdb/w.db" axil -d -A -p "$mp" -m "$MODULE_SET" >"$mpla" 2>&1 &
 mp_pid=$!
 wait_up "$mpla" "$mp" || { echo "FAIL: S6 ematch boot did not init" >&2; exit 1; }
 
@@ -2375,7 +2398,7 @@ w7_guest_txt="$w7db/guest.txt"
 : > "$w7_owner_txt"
 : > "$w7_guest_txt"
 
-AXIL_ND_DB="$w7db/w.db" axil -d -A -p "$w7" -m ./lib/axil-nd >"$w7la" 2>&1 &
+AXIL_ND_DB="$w7db/w.db" axil -d -A -p "$w7" -m "$MODULE_SET" >"$w7la" 2>&1 &
 w7_pid=$!
 wait_up "$w7la" "$w7" || { echo "FAIL: S7 boot did not init" >&2; exit 1; }
 
@@ -2652,7 +2675,7 @@ b8_guest_txt="$b8db/guest.txt"
 : > "$b8_owner_txt"
 : > "$b8_guest_txt"
 
-AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
+AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m "$MODULE_SET" >"$b8la" 2>&1 &
 b8_pid=$!
 wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot did not init" >&2; exit 1; }
 
@@ -2769,7 +2792,7 @@ exec 8<&-
 killaxil $b8_pid
 b8sz=$(stat -c %s "$b8db/w.db" 2>/dev/null || echo 0)
 [ "${b8sz:-0}" -gt 0 ] || { echo "FAIL: S8 store empty before reboot" >&2; exit 1; }
-AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m ./lib/axil-nd >"$b8la" 2>&1 &
+AXIL_ND_DB="$b8db/w.db" axil -d -A -p "$b8" -m "$MODULE_SET" >"$b8la" 2>&1 &
 b8_pid=$!
 wait_up "$b8la" "$b8" || { echo "FAIL: S8 boot B did not init" >&2; exit 1; }
 # Fresh transcripts: a boot A "Password:" left in the file would satisfy the
@@ -2851,7 +2874,7 @@ b9_guest_txt="$b9db/guest.txt"
 : > "$b9_owner_txt"
 : > "$b9_guest_txt"
 
-AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m ./lib/axil-nd >"$b9la" 2>&1 &
+AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m "$MODULE_SET" >"$b9la" 2>&1 &
 b9_pid=$!
 wait_up "$b9la" "$b9" || { echo "FAIL: S9 boot did not init" >&2; exit 1; }
 
@@ -3211,7 +3234,7 @@ exec 8<&-
 killaxil $b9_pid
 b9sz=$(stat -c %s "$b9db/w.db" 2>/dev/null || echo 0)
 [ "${b9sz:-0}" -gt 0 ] || { echo "FAIL: S9 store empty before reboot" >&2; exit 1; }
-AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m ./lib/axil-nd >"$b9la" 2>&1 &
+AXIL_ND_DB="$b9db/w.db" axil -d -A -p "$b9" -m "$MODULE_SET" >"$b9la" 2>&1 &
 b9_pid=$!
 wait_up "$b9la" "$b9" || { echo "FAIL: S9 boot B did not init" >&2; exit 1; }
 exec 7<>/dev/tcp/127.0.0.1/$b9
@@ -3316,7 +3339,7 @@ g10_guest_txt="$g10db/guest.txt"
 : > "$g10_owner_txt"
 : > "$g10_guest_txt"
 
-AXIL_ND_DB="$g10db/w.db" axil -d -A -p "$g10" -m ./lib/axil-nd >"$g10la" 2>&1 &
+AXIL_ND_DB="$g10db/w.db" axil -d -A -p "$g10" -m "$MODULE_SET" >"$g10la" 2>&1 &
 g10_pid=$!
 wait_up "$g10la" "$g10" || { echo "FAIL: S10 boot did not init" >&2; exit 1; }
 
@@ -3475,7 +3498,7 @@ exec 8<&-
 killaxil $g10_pid; g10_pid=
 g10b=$((20000 + RANDOM % 8000))
 g10lb="$g10db/b.log"
-AXIL_ND_DB="$g10db/w.db" axil -d -A -p "$g10b" -m ./lib/axil-nd >"$g10lb" 2>&1 &
+AXIL_ND_DB="$g10db/w.db" axil -d -A -p "$g10b" -m "$MODULE_SET" >"$g10lb" 2>&1 &
 g10_pid=$!
 wait_up "$g10lb" "$g10b" || { echo "FAIL: S10 boot B did not init" >&2; exit 1; }
 grep -qaF "plen=16" "$g10lb" \
