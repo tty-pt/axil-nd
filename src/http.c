@@ -2,6 +2,54 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ttypt/axil.h>
+#include <ttypt/xy.h>
+
+int nd_is_unmodded(void);
+
+static const char nd_motd_default[] =
+	"Welcome to Neverdark.\n"
+	"\n"
+	"Type `help` for the topic list, or `help begin` for a tour.\n"
+	"To shape the world, load a game module or write your own:\n"
+	"  help modules   installing and writing game modules\n"
+	"  help loadmod   load a module\n"
+	"  grant          hand authority to another player\n"
+	"  sh             open a shell to edit and build code\n";
+
+void
+nd_bare_motd(socket_t fd)
+{
+	char buf[BUFSIZ];
+	FILE *f = fopen("motd", "r");
+	const char *text = nd_motd_default;
+
+	if (f) {
+		size_t len = fread(buf, 1, sizeof(buf) - 2, f);
+		fclose(f);
+		if (len > 0) {
+			if (buf[len - 1] != '\n')
+				buf[len++] = '\n';
+			buf[len] = '\0';
+			text = buf;
+		}
+	}
+	axil_write(fd, (void *)text, strlen(text));
+}
+
+int
+axil_accept(socket_t fd)
+{
+	if (nd_is_unmodded())
+		nd_bare_motd(fd);
+	return 0;
+}
+
+XY_IMPL(int, on_axil_connect, socket_t, fd)
+{
+	if (nd_is_unmodded())
+		nd_bare_motd(fd);
+	return 0;
+}
 
 #ifndef AXIL_HTDOCS
 #define AXIL_HTDOCS "/usr/share/axil-nd/htdocs"

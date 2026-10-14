@@ -36,8 +36,17 @@ static struct cmd_slot cmds[] = {
 	},
 };
 
+static int nd_tenant_cmds_registered;
+
+int
+nd_is_unmodded(void)
+{
+	return nd_tenant_cmds_registered == 0;
+}
+
 XY_IMPL(int, nd_register, char *, str, nd_cb_t *, cb, unsigned, flags)
 {
+	nd_tenant_cmds_registered++;
 	axil_register(str, (axil_cb_t *)cb, (int)flags);
 	return 0;
 }

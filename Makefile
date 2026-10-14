@@ -26,10 +26,11 @@ FOLDER := nd
 
 LDLIBS-libaxil-nd := -laxil -lcorm -lxylem
 
+MAN_SRCS := $(wildcard $(CURDIR)/../nd-*/man-src/*.10 $(CURDIR)/../axil-*/man-src/*.10)
 man: man/.stamp
-man/.stamp: man-src/*.10
+man/.stamp: $(MAN_SRCS)
 	@mkdir -p man
-	@install -m 644 man-src/*.10 man/
+	@if [ -n "$(MAN_SRCS)" ]; then install -m 644 $(MAN_SRCS) man/; fi
 	@touch $@
 .PHONY: man
 

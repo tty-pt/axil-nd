@@ -212,6 +212,19 @@ XY_IMPL(int, on_axil_flush, socket_t, fd)
 	return 0;
 }
 
+int nd_is_unmodded(void);
+void nd_bare_motd(socket_t fd);
+
+XY_IMPL(int, on_axil_parse, socket_t, fd, unsigned char *, input, int, nread)
+{
+	(void)input;
+	if (nd_is_unmodded()) {
+		nd_bare_motd(fd);
+		return -1;
+	}
+	return nread;
+}
+
 XY_IMPL(int, on_axil_exit, void)
 {
 	corm_save();
