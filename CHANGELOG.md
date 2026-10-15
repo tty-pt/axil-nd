@@ -1,4 +1,194 @@
-## 1.0.0
+## 1.2.0
+
+Added
+- **Login notice (`motd`) and a help-topic index.** Every login now ends with
+  an editable notice read from `motd` (cwd-relative, installed to the share
+  directory by `install-data`; a built-in fallback keeps a fresh checkout
+  working) whose default text points a new player at `help` and at
+  loading/writing game modules. A bare `help`/`man` lists every installed
+  help topic by reading `man/` at runtime, and the new `modules(10)` page
+  documents the module install and authoring contract.
+- **Man pages for the 17 engine commands that had none.** Every command in
+  the engine's table (`src/world.c` `cmds[]`) is now documented:
+  `connect`, `ban`/`unban`, `teleport`, `owned`, `view`, `man`, `save`,
+  `planet`/`planets`, `here`, `loadmod`/`unloadmod`/`modlist`, `release`,
+  `room`, `deny`. The pages document the real guards: region-ownership gates,
+  the shared `st_cmd_region` selector dialect (`cosmos` is not `world 0`),
+  exact ownership for module loading, the two-phase passworded `connect`,
+  dispatch-time permanent-until-reboot `deny`, and root-only `save`.
+- **General region attribution: `grant <player> [<width> [point]]`.**
+  `planet` claims whole worlds for the caller only; `grant` attributes any
+  region — a district inside a planet, a planet for someone else, a region
+  containing many planets, or the cosmos itself (explicit only) — to any
+  player, bounded by what the granter rules. Region gates
+  (`st_can_region`/`st_region_ruler`) now walk every ancestor width instead
+  of the fixed `{0,16,32,48,64}` set; `release` and `target` accept a
+  `<width> <point>` form (a lone number stays a world); the cosmos cannot be
+  released, only granted. Fresh entities no longer inherit an implicit cosmos
+  default target (`ST_SEL_UNSET` on creation and on missing-row reads), so a
+  new ruler's commands act on where they stand.
+
+Changed
+- **Bare `help`/`man` show the topic index, not `begin`.** `help begin` still
+  opens the tutorial (the browser client's help button sends exactly that),
+  but `help` with no subject now lists every topic, so the one command a
+  beginner is most likely to try answers usefully.
+- **No boot-time module list: region modding is the only module lifecycle.**
+  `nd_mods_load()` and the `mods.load` file are gone, with them the
+  `AXIL_ND_GLOBAL_MODS` override and `make mods`. Game modules load only via
+  the region system — in-game `loadmod`/`unloadmod`/`release`/`modlist` into
+  persisted `st` rows, restored every boot by `st_init()` from
+  `on_axil_post_chroot()`. The flat list caused double module installs in
+  production (the override never reached the daemon; the cwd-relative
+  fallback re-read the embedder's own list), and region rows already covered
+  the whole cosmos. `test.sh` grants its fixtures with a warm-up `loadmod`
+  pass instead of a fixture list.
+- **The sl_hd dlopen registry is gone.** `mod_load`/`_mod_load`/`mod_load_all`/
+  `mod_close`, the `module_id`/`mod` tables, and the `sic_call`/`sic_last`/
+  `sic_areg`/`sic_get`/`sic_iter`/`sic_next`/`sic_put` surface are deleted
+  with their `struct nd` slots: libxylem is the dispatch and regions are the
+  loader, and nothing called them. `sic_adapter_t` goes with them;
+  `sic_str_t` stays (it is the event string type, unrelated to the registry).
+- **OpenBSD `su -l` discards daemon environment.** `rc.subr` launches daemons
+  via `su -fl`, so `AXIL_ND_GLOBAL_MODS` (and likewise `AXIL_ND_DB` /
+  `AXIL_ND_HTDOCS`) exported in `/etc/rc.d/axil` never reached the process.
+  Only compiled defaults plus cwd apply there; do not rely on rc.d exports.
+
+## 1.1.0
+
+The terminal is gated, the region system is real, and the store survives
+shutdown. 11 commits since 1.0.0; the suite gained S5.4/S5.5, S6, S7, S8 and
+S9 and the site gained an e2e round-trip.
+
+Changed
+- **`connect` is passworded; a name alone never authenticates.** Two phases:
+  `connect <name>` arms a one-shot password prompt on that descriptor and the
+  next line is the password (consumed as a password, never as a command, and
+  never echoed back). The check goes through axil-auth's exported
+  `auth_password_matches`, unknown user / wrong password / unconfirmed account
+  answer one uniform `Invalid name or password.` so the prompt cannot be used
+  to enumerate accounts, and a failed guess costs a reconnect. The old
+  passwordless form is gone. Refusal of the terminal itself happens in
+  axil-tty: a non-zero `axil_tty_shell(fd)` is the gate bit, and no PTY is
+  born before it.
+- **Site login completes, and declined `/nd` upgrades are closed** (G4).
+  `nd_player_login` no longer reads `axil_auth()`'s advisory "no passwd entry"
+  return as an auth rejection — every axil-auth-registered account has no
+  passwd entry, so logins bailed before `mcp_auth_success`/actions/view; the
+  descriptor is already authenticated and `REMOTE_USER` is what established
+  the identity. A declined upgrade (no `REMOTE_USER`) now sends the close
+  frame and tears the descriptor down, where it used to sit open with nothing
+  on the wire after `AUTH_FAILURE` — one lingering fd per probe.
+- **One region selector dialect and a default target region** (CMD_REGION.md).
+  Seven commands can name a region: six now share `st_cmd_region()` and
+  `wall`, which had a private all/world dialect and bypassed the shared parser
+  with no argument, takes the same bare-world-number-or-`cosmos` token at a
+  fixed argv position. One default resolution everywhere — explicit selector
+  → default target → position — with the default stored in ENT as
+  `(target_id, target_plen)` by the new `target` command (ENT grows 16 → 24
+  bytes; `ST_SEL_UNSET` is the unset sentinel, never returned). `do_wall`
+  parses its own leading token so `wall 3` is still the message 3.
+- **`EF_WIZARD` is gone; region ownership replaces it** (ST.md §27.6(1)). The
+  flag was never set by any path in the port, so every `st_is_wiz()` gate was
+  dead — the commands existed and no player could reach them. The concept is
+  removed rather than granted, in two behaviour-proving steps: first
+  delete-and-replace to prove the reads were inert, then open the nine sites.
+- **The legacy `st_run`/`sl` dlopen path is retired.** `eng_st_run`,
+  `st_open`/`st_put`/`st_dlclose`, the `st_get`/`st_key` helpers, the `sl`
+  table, the `st_run` PAPI/XY slot and the `stchown`/`streload` commands are
+  deleted: symbol dispatch is hook dispatch (`nd_scope_dispatch` walk),
+  per-shift ownership is per-region ownership (`st_can` on id/plen rows) and
+  per-shift reload is `loadmod`/`unloadmod` over the persisted set.
+- **`npm install` is JS-only.** The root `postinstall: make` hook is gone, and
+  `@tty-pt/axil-tty` is bumped to 1.3.2, which drops its own: installing ran
+  `make` inside `node_modules/@tty-pt/axil-tty`, whose Makefile gets every
+  rule from `-include ./../mk/include.mk` — a path that only exists as a dev
+  sibling checkout, never under `node_modules` — so a plain `npm i` died with
+  `make: no target to make` (prod hit exactly that). The C side is the
+  system-installed axil stack and the checkout's own `make`, which is what
+  README "Build from source" documents anyway; nothing consumed the
+  node_modules build.
+
+Added
+- **Region primitives** (NO_WIZ.md §4): `st_region_covers()` (pure
+  prefix-containment identity, cosmos included — `plen == 0` masking yields 0,
+  so the root covers everything with no special case), `st_in_scope()` (the
+  default-scope engine: containment with an explicit selection, the union of
+  the actor's rows without one — deliberately not `st_can_region`, which would
+  let one planet claim the address space through the cosmos fallback),
+  `st_region_of_obj()` (walk containment up to the first `TYPE_ROOM`, depth-capped
+  at 8) and `st_can_region()` un-static'd as one loop over the candidate
+  ancestor widths `{0,16,32,48,64}`. An unmapped room resolves to the void,
+  `(0,0,0,0)`, which is *in* the cosmos — players log into unmapped rooms, so
+  "unresolvable" would put them under nobody's authority; `NOTFOUND` is
+  reserved for a genuinely dead-ending walk.
+- **Region-owned commands and a region ban table** (ST.md 27.6(1)). Every
+  refusal now names the region that refused it via `st_region_ruler` +
+  `st_refuse_region`, so a non-ruler learns who to ask instead of getting
+  silence. `eng_controls` is the four-case rule — possession stays
+  authoritative with one exception (a region ruler may move a player standing
+  in their region), rulership is the authority over unowned things — and
+  `eng_look_at` lets a ruler inspect entities in their region. Bans are a
+  separate corm table keyed `(player, region id, plen)`, enforced only in
+  `eng_enter`, the one chokepoint every arrival passes through: the refused
+  mover stays put, is told which region refused them, and cannot route around
+  it. Login is deliberately not refused.
+- **Room persistence**: carved rooms are permanent (`RF_TEMP` cleared) so
+  `eng_room_clean` does not collect an empty room (§27.3), and the room is
+  reported back (`room %u at %d %d %d %d (existing)`).
+
+Fixed
+- **`teleport #<ref> here` moved a bystander — or killed the daemon.**
+  `eng_obj_exists()` returned `corm_get(...) == NULL`, so it was true for an
+  *absent* row: `eng_ematch_absolute()` therefore discarded every real ref and
+  accepted every fabricated one, `teleport #<valid> here` fell through to the
+  contents scan and moved the last object iterated in the room (measured: the
+  dolphin), and an absent ref reached `corm_get_copy` → SIGABRT from heap
+  corruption — any ref a player can type. `eng_ematch_at()` additionally
+  returned `tmp_ref` unconditionally ("no match" surfaced as "some bystander"),
+  reassigned `where_ref` (the range key) mid-iteration, and leaked the
+  iterator. Separately `do_teleport()` never called `eng_nd_flush()`, so every
+  refusal and the victim's confirmation sat in the per-fd buffer until the
+  player typed again — the whole reason the command "wrote nothing". All six
+  return paths flush now, and `argv[1]` is guarded on the string rather than
+  `argc` (axil delivers a bare verb as `argc == 2` with an empty `argv[1]`).
+- **The shutdown store truncation that read as a persist flake.** libcorm
+  saves every file-backed map from a destructor at process exit, so
+  `close_all()` closing the maps first made the shutdown save recompute the
+  store's size from what was left in corm's file cache and rewrite the file at
+  that size — 16 bytes with nothing left. The damage varied per run
+  (16/1184/1600/2000/2400/3200 bytes), which is why it read as the old
+  nondeterministic flake, and it became destructive the moment one map was
+  left open — which is why it looked like a ban-table bug. Measured chain: a
+  correct 8461-byte image, the next SIGTERM rewrote it as 3200 bytes of seeds,
+  the following boot restored nothing. Every path into `close_all()` exits
+  anyway, so it no longer closes anything.
+- **Stale contents pairs no longer delete the player.**
+  `eng_object_move(old, NOTHING)` deleted every row its `contents_hd` listed
+  without checking, so a stale pair aborted a boot by deleting the player out
+  from under the session (`corm_get_copy: no record`). Collect-then-delete:
+  gone rows, rows filed elsewhere and self-pairs drop the pair, not the object.
+- **Two memory bugs ASan found**: `noise.c spread()` ran `p <= nx * CHUNK_M`
+  while each iteration writes two `CHUNK_SIZE` lines, so the last `memcpy`
+  started 2432 bytes past `chunks_bio` and overwrote the bio pointer on every
+  player login; `view.c biome_bg()` copied 16 bytes out of 6-byte `ansi_bg`
+  literals and indexed them with an unvalidated `biome_skel->bg` from a row a
+  missing skel leaves uninitialized.
+- **`eng_ent_get()` zero-initializes an ENT for a missing row**, so an
+  authorization path no longer reads fields left uninitialized (this is what
+  made `EF_WIZARD` read as reliably-false only by luck), and `do_owned`,
+  `do_clone`, `do_create`, `do_chown`, `do_ban` and `do_teleport` validate
+  `argc` — the short-circuit in the deleted gates was what kept the NULL deref
+  from being live.
+- **HTTP request bytes are no longer telnet-scanned** (S5.5). Chunks opening
+  with an HTTP request line pass through `on_axil_parse` untouched: no IAC
+  scan, no slide, no RAW classification — a `0xFF` body byte used to delete the
+  request head and answer the POST with the telnet banner.
+- Room-cleanup and login-path guards, plus `test.sh` binding `PATH` and
+  `LD_LIBRARY_PATH` to the in-tree build so it tests this checkout instead of
+  stale installed copies.
+
+## [1.0.0]
 
 First playable release. The engine port from TinyMUCK/FuzzBall is complete and
 the release is self-contained: it builds, tests and runs from a fresh clone

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="axil-nd logo" width="220" />
+</p>
+
 # axil-nd
 
 [![C99](https://img.shields.io/badge/C-C99-555?logo=c)](#)
@@ -11,7 +15,10 @@ A port of the [NeverDark](https://github.com/tty-pt/neverdark) MUCK (a
 rewrite of TinyMUCK/FuzzBall) built on the axil HTTP/server stack and the
 corm database:
 
-- Game engine + `mod_load` content-module loading in-process
+- Game engine + region-modded content modules in-process (`loadmod`/
+  `unloadmod` into persisted `st` rows, restored every boot; `grant`
+  attributes any region — districts, planets, super-planet regions — to any
+  player)
 - WebSocket + telnet protocol served by axil (`GET:/nd` upgrade)
 - Store ported from the legacy `qdb`/`qmap` API to `libcorm`
 - Browser client (xterm 6) plus `art/` and the in-game `man/` help pages,
@@ -45,9 +52,15 @@ are required; the CI dependency list must match `LDLIBS` in the `Makefile`.
 
 ## Quick start
 
-The module resolves `art/`, `htdocs/`, `man/` and `game/` **relative to the
-working directory**, so run it from the checkout root (or the installed
-`share/axil-nd`):
+The module resolves `art/`, `htdocs/`, `man/` and `motd` through `nd_asset_dir()`,
+checking in order:
+1. Per-class env `AXIL_ND_<CLASS>` (`AXIL_ND_HTDOCS`, `AXIL_ND_ART`, `AXIL_ND_MAN`, `AXIL_ND_MOTD`);
+2. Base directory `AXIL_ND_DATADIR/<dir>`;
+3. Compiled `$(PREFIX)/share/axil-nd/<dir>`;
+4. Submodule relative path `external/axil-nd/<dir>`;
+5. Working directory `<dir>`.
+
+Run it from the checkout root, parent site checkout, or installed `share/axil-nd`:
 
 ```sh
 axil -d -A -p 8080 -m ./lib/libaxil-nd.so
@@ -73,10 +86,13 @@ AXIL_ND_DB=./var/std.db axil -d -A -p 8080 -m ./lib/libaxil-nd.so
 
 ## The man pages
 
-The 52 in-game help pages (`help <topic>`) are tracked as `man-src/*.10` and
+The 72 in-game help pages (`help <topic>`) are tracked as `man-src/*.10` and
 copied into `man/` by the `man` target, which `all` depends on. `man/` is
 gitignored build output and is resolved relative to the working directory at
-runtime, exactly as `art/` and `htdocs/` are.
+runtime, exactly as `art/` and `htdocs/` are. A bare `help` (or `man`) lists
+every installed topic. The editable login notice is the `motd` file, read
+from the working directory at login and installed to the share directory by
+`install-data`.
 
 ## License
 

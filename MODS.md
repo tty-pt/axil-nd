@@ -7,6 +7,15 @@ from a measured dependency graph (§7). Two engine bugs were found and fixed on
 the way (§6), and `on_icon` composition is settled as a single owner plus a
 decorator table (§7). Committed 2026-09-30; nothing pushed (§9).
 
+**Module lifecycle, current:** there is no boot list. `nd_mods_load()` and the
+`mods.load` file were removed (with the `AXIL_ND_GLOBAL_MODS` override and
+`make mods`): game modules load only via region modding — in-game
+`loadmod`/`unloadmod`/`release`/`modlist` into persisted `st` rows, restored
+every boot by `st_init()`. The sl_hd dlopen registry
+(`mod_load*`/`mod_close`, `sic_call`/`sic_last`/`sic_areg`/`sic_get`) is gone
+with it. Sections below that describe the list, the override, or `make mods`
+are history, kept as the record of how the port got here.
+
 **The suite is not yet a trustworthy gate**: its persistence regression fails
 in roughly one run of three (§12.1). That is the only known failure.
 

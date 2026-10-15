@@ -1,0 +1,8 @@
+Welcome to Neverdark.
+
+Type `help` for the topic list, or `help begin` for a tour.
+To shape the world, load a game module or write your own:
+  help modules   installing and writing game modules
+  help loadmod   load a module into a region you rule
+  grant          hand a region to another player
+  sh             open a shell to edit and build code
