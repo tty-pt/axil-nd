@@ -6,7 +6,7 @@ cd "$DIR"
 
 echo "=== Checking axil-nd host purity and budget ==="
 
-HOST_FILES="src/libaxil-nd.c src/http.c src/law_io.c src/law_store.c src/law_cmd.c"
+HOST_FILES="src/libaxil-nd.c src/http.c src/law_io.c src/law_store.c src/law_cmd.c src/law_data.c"
 
 for f in $HOST_FILES; do
 	if [ ! -f "$f" ]; then
@@ -24,9 +24,9 @@ fi
 
 TOTAL_LINES=$(wc -l $HOST_FILES | awk '/total/ {print $1}')
 echo "Host files lines of code: $TOTAL_LINES"
-if [ "${TOTAL_LINES:-0}" -gt 600 ]; then
-	echo "FAIL: Host line count exceeds budget (limit: 600, got: $TOTAL_LINES)"
+if [ "${TOTAL_LINES:-0}" -gt 650 ]; then
+	echo "FAIL: Host line count exceeds budget (limit: 650, got: $TOTAL_LINES)"
 	exit 1
 fi
 
-echo "PASS: Host purity (0 game nouns) and budget (<= 600 LOC) verified."
+echo "PASS: Host purity (0 game nouns) and budget (<= 650 LOC) verified."

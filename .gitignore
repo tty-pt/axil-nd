@@ -3,6 +3,7 @@
 *.so
 /test
 /man
+/art
 /htdocs
 /types
 /cjs

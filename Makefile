@@ -8,7 +8,7 @@ share-dir := axil-nd
 
 ENGINE-obj-y :=
 
-libaxil-nd-obj-y := src/http.o src/law_io.o src/law_store.o src/law_cmd.o
+libaxil-nd-obj-y := src/http.o src/law_io.o src/law_store.o src/law_cmd.o src/law_data.o
 
 # Where the module-facing headers install. mk/include.mk:19-21 lists
 # `ls include/$(FOLDER)` and :104-108 installs each to
@@ -34,7 +34,16 @@ man/.stamp: $(MAN_SRCS)
 	@touch $@
 .PHONY: man
 
-all: man
+art: art/.stamp
+art/.stamp: $(wildcard $(CURDIR)/../nd-*/art/*)
+	@mkdir -p art
+	@for d in $(wildcard $(CURDIR)/../nd-*/art); do \
+		[ -d "$$d" ] && cp -R "$$d/." art/; \
+	done
+	@touch $@
+.PHONY: art
+
+all: man art
 
 smoke: man ${ENGINE-obj-y}
 
@@ -43,6 +52,7 @@ CFLAGS-http-o := -fPIC -D_GNU_SOURCE
 CFLAGS-law_io-o := -fPIC -D_GNU_SOURCE
 CFLAGS-law_store-o := -fPIC -D_GNU_SOURCE
 CFLAGS-law_cmd-o := -fPIC -D_GNU_SOURCE
+CFLAGS-law_data-o := -fPIC -D_GNU_SOURCE
 
 smoke: man ${ENGINE-obj-y}
 	@echo "engine TU smoke: ok"
@@ -83,7 +93,7 @@ test: all
 	@./test.sh
 .PHONY: test
 
-install-data: man
+install-data: man art
 	@dst=$(abspath $(DESTDIR)$(PREFIX))/share/axil-nd; \
 	for d in art man; do \
 		( cd $$d && find . -type d -exec mkdir -p "$$dst/$$d/{}" \; ) || exit 1; \
