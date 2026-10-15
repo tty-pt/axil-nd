@@ -1,4 +1,4 @@
-## Unreleased
+## 1.2.0
 
 Added
 - **Login notice (`motd`) and a help-topic index.** Every login now ends with

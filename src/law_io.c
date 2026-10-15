@@ -215,9 +215,26 @@ XY_IMPL(int, on_axil_flush, socket_t, fd)
 int nd_is_unmodded(void);
 void nd_bare_motd(socket_t fd);
 
+static int
+is_http_method(const char *s)
+{
+	static const char *const methods[] = {
+		"GET", "POST", "HEAD", "PUT", "OPTIONS", "DELETE", "PATCH", "PRI"
+	};
+	while (*s == ' ')
+		s++;
+	for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++) {
+		size_t n = strlen(methods[i]);
+		if (strncmp(s, methods[i], n) == 0 && s[n] == ' ')
+			return 1;
+	}
+	return 0;
+}
+
 XY_IMPL(int, on_axil_parse, socket_t, fd, unsigned char *, input, int, nread)
 {
-	(void)input;
+	if (is_http_method((const char *)input))
+		return nread;
 	if (nd_is_unmodded()) {
 		nd_bare_motd(fd);
 		return -1;

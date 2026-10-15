@@ -30,10 +30,10 @@ case "$(uname -s)" in
 esac
 export PATH
 
-# man/ is generated from the tracked man-src/*.10 (see Makefile). Always refresh
-# rather than only when absent: a stale or partial man/ would otherwise let the
-# `help` assertions below pass without the pages being there.
-make --no-print-directory man
+# man/ and art/ are generated from tenant modules (see Makefile). Always refresh
+# rather than only when absent: a stale or partial directory would otherwise let
+# assertions below pass without the assets being there.
+make --no-print-directory man art
 
 # Build the ENGINE too, not just the data. The suite boots whatever
 # lib/libaxil-nd.so is on disk, so an engine edit that was never compiled was

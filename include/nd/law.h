@@ -220,4 +220,7 @@ XY_DECL(int, nd_assoc, unsigned, hd, unsigned, link, nd_assoc_cb_p, assoc);
 typedef void nd_cb_t(int fd, int argc, char *argv[]);
 XY_DECL(int, nd_register, char *, str, nd_cb_t *, cb, unsigned, flags);
 
+/* asset directory resolver */
+XY_DECL(int, nd_asset_dir, unsigned, kind, char *, out, size_t, cap);
+
 #endif /* ND_LAW_H */

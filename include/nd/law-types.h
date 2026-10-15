@@ -40,6 +40,15 @@ typedef nd_assoc_cb_t *nd_assoc_cb_p;
 #define ND_PGET   4
 #define ND_SEC    8
 
+/* --- asset kinds for generic resolver ----------------------------------- */
+
+enum nd_asset_kind {
+	ND_ASSET_HTDOCS = 0,
+	ND_ASSET_ART,
+	ND_ASSET_MAN,
+	ND_ASSET_MOTD
+};
+
 /* --- command callback signature ----------------------------------------- */
 
 typedef void nd_cb_t(int fd, int argc, char *argv[]);

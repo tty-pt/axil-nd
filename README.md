@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="axil-nd logo" width="220" />
+</p>
+
 # axil-nd
 
 [![C99](https://img.shields.io/badge/C-C99-555?logo=c)](#)
@@ -48,9 +52,15 @@ are required; the CI dependency list must match `LDLIBS` in the `Makefile`.
 
 ## Quick start
 
-The module resolves `art/`, `htdocs/`, `man/` and `game/` **relative to the
-working directory**, so run it from the checkout root (or the installed
-`share/axil-nd`):
+The module resolves `art/`, `htdocs/`, `man/` and `motd` through `nd_asset_dir()`,
+checking in order:
+1. Per-class env `AXIL_ND_<CLASS>` (`AXIL_ND_HTDOCS`, `AXIL_ND_ART`, `AXIL_ND_MAN`, `AXIL_ND_MOTD`);
+2. Base directory `AXIL_ND_DATADIR/<dir>`;
+3. Compiled `$(PREFIX)/share/axil-nd/<dir>`;
+4. Submodule relative path `external/axil-nd/<dir>`;
+5. Working directory `<dir>`.
+
+Run it from the checkout root, parent site checkout, or installed `share/axil-nd`:
 
 ```sh
 axil -d -A -p 8080 -m ./lib/libaxil-nd.so

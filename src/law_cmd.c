@@ -7,34 +7,7 @@
 #include <ttypt/xy.h>
 #include <nd/law-types.h>
 
-void do_GET(socket_t fd, int argc, char *argv[]);
-void do_POST(socket_t fd, int argc, char *argv[]);
 void nd_io_reset(unsigned fd);
-
-struct cmd_slot {
-	char *name;
-	axil_cb_t *cb;
-	int flags;
-};
-
-static struct cmd_slot cmds[] = {
-	{
-		.name = "GET",
-		.cb = do_GET,
-		.flags = CF_NOAUTH | CF_NOTRIM,
-	}, {
-		.name = "POST",
-		.cb = do_POST,
-		.flags = CF_NOAUTH | CF_NOTRIM,
-	}, {
-		.name = "PRI",
-		.cb = do_GET,
-		.flags = CF_NOAUTH | CF_NOTRIM,
-	}, {
-		.name = NULL,
-		.cb = NULL,
-	},
-};
 
 static int nd_tenant_cmds_registered;
 
