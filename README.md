@@ -44,21 +44,60 @@ corm database:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The game world is extended through independent libxylem modules:
-- Core systems: `nd-core`, `nd-attr`, `nd-class`, `nd-race`, `nd-level`, `nd-mortal`
-- World simulation: `nd-biome`, `nd-plant`, `nd-stone`, `nd-seat`, `nd-wts`
-- Gameplay & economy: `nd-fight`, `nd-spell`, `nd-equip`, `nd-shop`, `nd-drink`
+The game world is extended through independent, hot-reloadable libxylem modules:
+- **Core Character Systems**:
+  - [`nd-core`](https://github.com/tty-pt/nd-core) — Foundational object tree, containers, locations, and property lists.
+  - [`nd-attr`](https://github.com/tty-pt/nd-attr) — Core physical and mental statistics (Strength, Dexterity, Intellect, Willpower).
+  - [`nd-class`](https://github.com/tty-pt/nd-class) — Character classes, archetypes, and specialized skill progression trees.
+  - [`nd-race`](https://github.com/tty-pt/nd-race) — Species traits, racial abilities, and physical characteristics.
+  - [`nd-level`](https://github.com/tty-pt/nd-level) — Experience gain, leveling curves, and stat scaling.
+  - [`nd-mortal`](https://github.com/tty-pt/nd-mortal) — Mortality, damage tracking, death states, and resurrection shrines.
+- **World Simulation & Environment**:
+  - [`nd-biome`](https://github.com/tty-pt/nd-biome) — Dynamic climate systems, ambient weather, and terrain types.
+  - [`nd-plant`](https://github.com/tty-pt/nd-plant) — Botanical ecosystems, forageable herbs, and plant growth cycles.
+  - [`nd-stone`](https://github.com/tty-pt/nd-stone) — Mining veins, minerals, gems, and geological structures.
+  - [`nd-seat`](https://github.com/tty-pt/nd-seat) — Interactive chairs, benches, and resting mechanics.
+  - [`nd-wts`](https://github.com/tty-pt/nd-wts) — World Temporal State: synchronized astronomical clocks and day/night cycles.
+- **Gameplay, Combat & Economy**:
+  - [`nd-fight`](https://github.com/tty-pt/nd-fight) — Turn-based and real-time tactical combat engine.
+  - [`nd-spell`](https://github.com/tty-pt/nd-spell) — Spellbook management, casting incantations, and elemental effects.
+  - [`nd-equip`](https://github.com/tty-pt/nd-equip) — Equipment slots, encumbrance, and weapon stat modifiers.
+  - [`nd-shop`](https://github.com/tty-pt/nd-shop) — In-game merchants, currency transactions, and bartering.
+  - [`nd-drink`](https://github.com/tty-pt/nd-drink) — Tavern drinks, potions, and thirst simulation.
+  - [`nd-mob`](https://github.com/tty-pt/nd-mob) — Non-player characters, monster AI, and roaming behaviors.
+  - [`nd-vanilla`](https://github.com/tty-pt/nd-vanilla) — Standard classic MUCK building and utility commands.
 
 ## In-Game Command Cheat Sheet
 
-| Category | Command | Description |
-| :--- | :--- | :--- |
-| **Exploration** | `look` (`l`), `examine <obj>` | Inspect your current room or target object |
-| **Movement** | `north`, `south`, `east`, `west`, `up`, `down` | Traverse room exits |
-| **Communication** | `say <msg>` (`"`), `pose <act>` (`:`), `page <who>=<msg>` | Local conversation and direct whispers |
-| **World State** | `who`, `score`, `inventory` (`i`), `help [topic]` | Check active players, attributes, and help |
-| **Building** | `@dig <room>`, `@open <exit>=<target>`, `@create <obj>` | Expand rooms and craft items |
-| **Modules** | `loadmod <name>`, `unloadmod <name>`, `grant <player>` | Dynamically load game plugins into regions |
+NeverDark uses clean, natural command verbs without legacy `@` prefixes:
+
+| Category | Command | Syntax & Example | What It Does |
+| :--- | :--- | :--- | :--- |
+| **World Shaping** | `create` | `create sword` / `create table` | Spawns a new in-game item or object |
+| | `door` | `door north to room_12` | Carves a navigable exit passage between rooms |
+| | `undoor` | `undoor north` | Removes an exit passage |
+| | `wall` | `wall north` | Erects a structural barrier blocking passage |
+| | `unwall` | `unwall north` | Demolishes a barrier, opening the space |
+| | `claim` / `unclaim` | `claim` | Claims/releases stewardship of the current district |
+| | `chown` | `chown sword=alice` | Transfers ownership of an object to another player |
+| | `clone` | `clone chair` | Creates an exact replica of an existing object |
+| | `recycle` | `recycle debris` | Destroys an object and returns database quota |
+| **Exploration** | `look` (`l`) | `look` / `look statue` | Describes the current room or an item in it |
+| | `examine` (`x`) | `examine chest` | Inspects detailed attributes and internal properties |
+| | `walk` | `walk north` (or `n`, `s`, `e`, `w`, `u`, `d`) | Navigates through room exits and terrain |
+| | `sit` / `stand` | `sit chair` / `stand` | Interacts with furniture objects (`nd-seat`) |
+| **Communication** | `say` (`"`) | `say Greetings, traveler!` | Speaks aloud to everyone present in the room |
+| | `pose` (`:`) | `:nods thoughtfully` | Emotes a physical action in third person |
+| | `page` | `page alice=Are you ready?` | Sends a private whisper directly to a player |
+| **RPG & Combat** | `status` / `score` | `status` / `score` | Displays health, mana, stamina, and attributes |
+| | `inventory` (`i`) | `inventory` | Lists items currently carried in your inventory |
+| | `equip` / `unequip` | `equip iron_sword` | Wields weapons or wears armor (`nd-equip`) |
+| | `fight` | `fight goblin` | Initiates combat encounter (`nd-fight`) |
+| | `cast` | `cast spark on goblin` | Casts an incantation from your spellbook (`nd-spell`) |
+| | `shop` / `buy` / `sell` | `shop` / `buy potion` | Trades with merchant NPCs (`nd-shop`) |
+| **Administration** | `loadmod` | `loadmod nd-spell` | Dynamically loads a C module into a region (`xy_load`) |
+| | `unloadmod` | `unloadmod nd-spell` | Safely unloads a C module from a region |
+| | `streload` | `streload` | Hot-reloads in-memory Corm database state |
 
 ## Status
 
