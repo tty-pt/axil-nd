@@ -24,6 +24,42 @@ corm database:
 - Browser client (xterm 6) plus `art/` and the in-game `man/` help pages,
   all installed under `share/axil-nd`
 
+## Architecture & Subsystems
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                          Axil Daemon                            │
+│    WebSocket Upgrade (GET /nd)            Raw Telnet Port       │
+└────────────────────────────────┬────────────────────────────────┘
+                                 │
+┌────────────────────────────────▼────────────────────────────────┐
+│                        axil-nd Core                             │
+│  ┌──────────────────────┐             ┌──────────────────────┐  │
+│  │     libcorm Maps     │             │ libislet (3D Space)  │  │
+│  │   Objects & Props    │             │  Morton Coordinates  │  │
+│  └──────────────────────┘             └──────────────────────┘  │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ Content Plugins (libxylem): nd-fight, nd-spell, nd-biome  │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The game world is extended through independent libxylem modules:
+- Core systems: `nd-core`, `nd-attr`, `nd-class`, `nd-race`, `nd-level`, `nd-mortal`
+- World simulation: `nd-biome`, `nd-plant`, `nd-stone`, `nd-seat`, `nd-wts`
+- Gameplay & economy: `nd-fight`, `nd-spell`, `nd-equip`, `nd-shop`, `nd-drink`
+
+## In-Game Command Cheat Sheet
+
+| Category | Command | Description |
+| :--- | :--- | :--- |
+| **Exploration** | `look` (`l`), `examine <obj>` | Inspect your current room or target object |
+| **Movement** | `north`, `south`, `east`, `west`, `up`, `down` | Traverse room exits |
+| **Communication** | `say <msg>` (`"`), `pose <act>` (`:`), `page <who>=<msg>` | Local conversation and direct whispers |
+| **World State** | `who`, `score`, `inventory` (`i`), `help [topic]` | Check active players, attributes, and help |
+| **Building** | `@dig <room>`, `@open <exit>=<target>`, `@create <obj>` | Expand rooms and craft items |
+| **Modules** | `loadmod <name>`, `unloadmod <name>`, `grant <player>` | Dynamically load game plugins into regions |
+
 ## Status
 
 Playable. The engine port is complete and the tree is self-contained: it
