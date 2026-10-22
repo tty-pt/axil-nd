@@ -26,7 +26,7 @@ CLEAN_EXTRA := art art/.stamp man man/.stamp
 
 -include ./../mk/include.mk
 
-LDLIBS-libaxil-nd := -laxil -lcorm -lxylem
+LDLIBS-libaxil-nd := -laxil -lcorm -lxylem -lbud
 
 MAN_SRCS := $(wildcard $(CURDIR)/../nd-*/man-src/*.10 $(CURDIR)/../axil-*/man-src/*.10)
 man: man/.stamp
@@ -62,6 +62,7 @@ smoke: man ${ENGINE-obj-y}
 
 CFLAGS += -g \
 	-I../axil-tty/include \
+	-I../libbud/include \
 	-DAXIL_PREFIX='"$(PREFIX)"' \
 	-DAXIL_HTDOCS='"$(PREFIX)/share/axil-nd/htdocs"'
 

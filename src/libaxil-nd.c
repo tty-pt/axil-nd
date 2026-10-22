@@ -9,5 +9,7 @@ XY_MODULE_API void
 xy_install(void)
 {
 	axil_register_handler("GET:/nd", handle_nd);
+	axil_register_handler("GET:/nd/*", handle_nd);
 	axil_register_handler("GET:/nd/art/*", handle_nd_art);
+	axil_register_handler("GET:/nd.wasm", handle_nd);
 }
