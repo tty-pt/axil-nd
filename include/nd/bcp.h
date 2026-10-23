@@ -57,13 +57,51 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 				break;
 			}
 		}
-		if (slot >= ND_MAX_ENTITIES)
-			return 0;
+		if (slot >= ND_MAX_ENTITIES) {
+			/* Eviction: Evict first entity that is NOT the player and NOT in current room */
+			size_t evict = 0;
+			int found = 0;
+			for (size_t i = 0; i < st->entity_count; i++) {
+				if (st->entities[i].ref != st->me && st->room.ref && st->entities[i].location != st->room.ref) {
+					evict = i;
+					found = 1;
+					break;
+				}
+			}
+			if (!found) {
+				for (size_t i = 0; i < st->entity_count; i++) {
+					if (st->entities[i].ref != st->me) {
+						evict = i;
+						break;
+					}
+				}
+			}
+			for (size_t i = evict; i + 1 < st->entity_count; i++)
+				st->entities[i] = st->entities[i + 1];
+			st->entity_count--;
+			slot = st->entity_count;
+		}
 
 		st->entities[slot] = item;
 		if (slot == st->entity_count)
 			st->entity_count++;
 		return 1;
+	}
+
+	case ND_BCP_OUT: {
+		uint32_t out_ref = 0;
+		if (nd_bcp_unpack_u32_frame(buf, len, &out_ref) == 1) {
+			for (size_t i = 0; i < st->entity_count; i++) {
+				if (st->entities[i].ref == out_ref) {
+					for (size_t j = i; j + 1 < st->entity_count; j++)
+						st->entities[j] = st->entities[j + 1];
+					st->entity_count--;
+					break;
+				}
+			}
+			return 1;
+		}
+		break;
 	}
 
 	case ND_BCP_AUTH_SUCCESS:
