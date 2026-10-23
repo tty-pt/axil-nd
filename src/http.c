@@ -70,6 +70,7 @@ nd_dynamic_fallback_ssr(socket_t fd)
 	bud_node *term = bud_element("div");
 	bud_set_attr(term, "id", "term");
 	bud_set_attr(term, "data-bud-terminal", "1");
+	bud_set_attr(term, "data-line-mode", "true");
 	bud_set_attr(term, "class", "w-full h-full font-mono bg-[#0a0a0c] text-neutral-200 p-2 rounded border border-neutral-800 overflow-hidden");
 
 	bud_node *vport = bud_element("div");

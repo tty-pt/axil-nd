@@ -100,7 +100,9 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		}
 		st->stats.dodge = nd_bcp_read_u32_c(&r);
 		st->stats.dmg   = nd_bcp_read_u32_c(&r);
+		st->stats.mdmg  = nd_bcp_read_u32_c(&r);
 		st->stats.def   = nd_bcp_read_u32_c(&r);
+		st->stats.mdef  = nd_bcp_read_u32_c(&r);
 		if (nd_bcp_reader_ok(&r))
 			return 1;
 		break;

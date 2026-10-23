@@ -69,7 +69,9 @@ typedef struct {
 	uint16_t attr[ND_ATTR_MAX];
 	uint32_t dodge;
 	uint32_t dmg;
+	uint32_t mdmg;
 	uint32_t def;
+	uint32_t mdef;
 } nd_stats_state_t;
 
 typedef struct {
