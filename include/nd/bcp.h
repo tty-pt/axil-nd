@@ -86,6 +86,13 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 	case ND_BCP_HP:
 		return nd_bcp_unpack_gauge(buf, len, &st->hp.val, &st->hp.max);
 
+	case ND_BCP_VIEW_BUFFER: {
+		size_t copylen = (rem < sizeof(st->map_buf) - 1) ? rem : (sizeof(st->map_buf) - 1);
+		memcpy(st->map_buf, p, copylen);
+		st->map_buf[copylen] = '\0';
+		return 1;
+	}
+
 	case ND_BCP_MP:
 		return nd_bcp_unpack_gauge(buf, len, &st->mp.val, &st->mp.max);
 

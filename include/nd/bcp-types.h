@@ -108,6 +108,8 @@ typedef struct {
 	nd_action_desc_t actions[ND_MAX_ACTIONS];
 	size_t action_count;
 	char active_modal[32]; /* active modal identifier, e.g. "stats", "equip", or "" */
+	char user[64];
+	char map_buf[1024];
 	nd_room_desc_t room;
 	nd_entity_desc_t entities[ND_MAX_ENTITIES];
 	size_t entity_count;
