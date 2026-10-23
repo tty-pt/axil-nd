@@ -55,7 +55,7 @@ xy_install(void)
 	/* nd_open returns a TAGGED handle, and the same handle reads back
 	 * through nd_put/nd_get -- so a module's own table is usable and
 	 * cannot collide with an enum hd. "u"/"u" is a CM_U32 key/value table;
-	 * nd-class and friends open "p"/"p" because they store pointers, which
+	 * modules open "p"/"p" when they store pointers, which
 	 * is not what this probe round-trips. */
 	{
 		unsigned h = nd_open("demo_probe", "u", "u", 0);

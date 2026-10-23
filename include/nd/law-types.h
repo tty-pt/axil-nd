@@ -53,4 +53,7 @@ enum nd_asset_kind {
 
 typedef void nd_cb_t(int fd, int argc, char *argv[]);
 
+/* Row callback for nd_table_load (see law.h). */
+typedef int (*nd_table_row_fn)(const char *const *fields, size_t n, void *user);
+
 #endif /* ND_LAW_TYPES_H */

@@ -91,36 +91,13 @@ nd_dynamic_fallback_ssr(socket_t fd)
 	bud_node *bj = bud_element("button"); bud_set_attr(bj, "type", "button"); bud_set_attr(bj, "class", "btn btn-sm btn-ghost border border-neutral-700 hover:bg-neutral-800 text-neutral-200"); bud_set_attr(bj, "title", "South (j)"); bud_append(bj, bud_text("↓")); bud_append(grid, bj);
 	bud_node *bJ = bud_element("button"); bud_set_attr(bJ, "type", "button"); bud_set_attr(bJ, "class", "btn btn-sm btn-ghost border border-neutral-700 hover:bg-neutral-800 text-neutral-200"); bud_set_attr(bJ, "title", "Southeast (J)"); bud_append(bJ, bud_text("↘")); bud_append(grid, bJ);
 
-	/* Status gauges */
-	bud_node *gauges = bud_tpl(
-		"<div class='flex flex-col gap-2 w-full max-w-[180px]'>"
-		"  <div class='flex flex-col gap-0.5'>"
-		"    <div class='flex justify-between text-xs text-neutral-400'><span>HP</span><span id='hp-val'>100 / 100</span></div>"
-		"    <div class='w-full bg-neutral-800 rounded h-2 overflow-hidden'><div id='hp-bar' class='bg-red-500 h-full rounded transition-all' style='width: 100%;'></div></div>"
-		"  </div>"
-		"  <div class='flex flex-col gap-0.5'>"
-		"    <div class='flex justify-between text-xs text-neutral-400'><span>MP</span><span id='mp-val'>50 / 50</span></div>"
-		"    <div class='w-full bg-neutral-800 rounded h-2 overflow-hidden'><div id='mp-bar' class='bg-blue-500 h-full rounded transition-all' style='width: 100%;'></div></div>"
-		"  </div>"
-		"</div>"
-	);
-
-	/* Actions dock */
-	bud_node *actions = bud_element("div");
-	bud_set_attr(actions, "id", "g-actions");
-	bud_set_attr(actions, "class", "flex flex-wrap gap-1 items-center");
-	bud_node *bi = bud_element("button"); bud_set_attr(bi, "type", "button"); bud_set_attr(bi, "class", "btn btn-sm btn-ghost border border-neutral-700 hover:bg-neutral-800 text-neutral-200"); bud_set_attr(bi, "title", "Inventory"); bud_append(bi, bud_text("📦")); bud_append(actions, bi);
-	bud_node *bv = bud_element("button"); bud_set_attr(bv, "type", "button"); bud_set_attr(bv, "class", "btn btn-sm btn-ghost border border-neutral-700 hover:bg-neutral-800 text-neutral-200"); bud_set_attr(bv, "title", "Look"); bud_append(bv, bud_text("👁")); bud_append(actions, bv);
-
 	/* Right panel */
 	bud_node *top_group = bud_element("div");
 	bud_set_attr(top_group, "class", "flex flex-col gap-4 items-center w-full");
 	bud_append(top_group, grid);
-	bud_append(top_group, gauges);
 
 	bud_node *bot_group = bud_element("div");
 	bud_set_attr(bot_group, "class", "w-full border-t border-neutral-800/60 pt-3");
-	bud_append(bot_group, actions);
 
 	bud_node *rpanel = bud_element("div");
 	bud_set_attr(rpanel, "id", "right-panel");
@@ -151,9 +128,7 @@ nd_dynamic_fallback_ssr(socket_t fd)
 		"  <title>NeverDark</title>\n"
 		"  <link rel=\"stylesheet\" href=\"/styles.css\">\n"
 		"  <script type=\"application/json\" id=\"bud-state\">"
-		"{\"me\":0,\"hp\":{\"val\":100,\"max\":100},\"mp\":{\"val\":50,\"max\":50},"
-		"\"room\":{\"ref\":1001,\"name\":\"The Citadel Common Hall\","
-		"\"desc\":\"A grand hall with towering stone arches and banners.\",\"exits\":15},"
+		"{\"me\":0,\"gauges\":[],\"room\":{\"ref\":0,\"name\":\"\",\"desc\":\"\",\"exits\":0},"
 		"\"entities\":[]}"
 		"</script>\n"
 		"</head>\n"

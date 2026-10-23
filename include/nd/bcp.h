@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 /*
- * Hook for extension BCP channels (e.g. equipment, spells).
+ * Hook for extension BCP channels (tenant-module defined).
  * Returns 1 if handled, -1 if malformed, 0 to propagate.
  */
 XY_DECL(int, on_bcp_channel, uint8_t, opcode, const uint8_t *, payload, size_t, len, void *, state);
@@ -121,9 +121,6 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		break;
 	}
 
-	case ND_BCP_HP:
-		return nd_bcp_unpack_gauge(buf, len, &st->hp.val, &st->hp.max);
-
 	case ND_BCP_VIEW_BUFFER: {
 		size_t copylen = (rem < sizeof(st->map_buf) - 1) ? rem : (sizeof(st->map_buf) - 1);
 		memcpy(st->map_buf, p, copylen);
@@ -131,27 +128,8 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		return 1;
 	}
 
-	case ND_BCP_MP:
-		return nd_bcp_unpack_gauge(buf, len, &st->mp.val, &st->mp.max);
-
 	case ND_BCP_TOD:
 		return nd_bcp_unpack_u32_frame(buf, len, &st->tod);
-
-	case ND_BCP_STATS: {
-		nd_bcp_reader_t r;
-		nd_bcp_reader_init(&r, p, rem);
-		for (int i = 0; i < ND_ATTR_MAX; i++) {
-			st->stats.attr[i] = nd_bcp_read_u16_c(&r);
-		}
-		st->stats.dodge = nd_bcp_read_u32_c(&r);
-		st->stats.dmg   = nd_bcp_read_u32_c(&r);
-		st->stats.mdmg  = nd_bcp_read_u32_c(&r);
-		st->stats.def   = nd_bcp_read_u32_c(&r);
-		st->stats.mdef  = nd_bcp_read_u32_c(&r);
-		if (nd_bcp_reader_ok(&r))
-			return 1;
-		break;
-	}
 
 	case ND_BCP_ACTION: {
 		nd_bcp_reader_t r;

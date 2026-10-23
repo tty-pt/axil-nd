@@ -234,6 +234,18 @@ static inline int nd_bcp_unpack_gauge(const uint8_t *buf, size_t len, uint16_t *
 	return 1;
 }
 
+/* Decode a "bar" frame (val,max) into the named gauge. Tenant modules call
+ * this from their on_bcp_channel listener for the channel they own. */
+static inline int
+nd_bcp_decode_gauge(nd_client_state_t *st, const char *name, const uint8_t *buf, size_t len)
+{
+	uint16_t val = 0, max = 0;
+	int rc = nd_bcp_unpack_gauge(buf, len, &val, &max);
+	if (rc != 1)
+		return rc;
+	return nd_client_gauge_set(st, name, val, max) == 0 ? 1 : -1;
+}
+
 static inline int nd_bcp_pack_gauge(uint8_t *buf, size_t cap, uint8_t opcode, uint16_t cur, uint16_t max)
 {
 	if (!buf || cap < sizeof(nd_bcp_gauge_wire_t))
@@ -380,13 +392,6 @@ static inline int nd_bcp_unpack_msg_##name(const uint8_t *buf, size_t len, nd_bc
 	FSTR(desc, 512)
 
 ND_BCP_DEFINE_SCHEMA(room_wire, ND_BCP_ROOM, ND_BCP_MSG_ROOM_FIELDS)
-
-#define ND_BCP_MSG_EQUIP_SLOT_FIELDS(F8, F16, F32, FSTR) \
-	F8(slot_id) \
-	F32(item_ref) \
-	FSTR(name, 48)
-
-ND_BCP_DEFINE_SCHEMA(equip_slot, 0x12, ND_BCP_MSG_EQUIP_SLOT_FIELDS)
 
 #ifdef __cplusplus
 }
