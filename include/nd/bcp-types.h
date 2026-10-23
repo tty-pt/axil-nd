@@ -101,6 +101,7 @@ typedef struct {
 	int auth_reason;
 	uint32_t current_room;
 	uint32_t target_ref;
+	uint32_t selected_item_ref;
 	uint32_t tod;
 	nd_bar_state_t hp;
 	nd_bar_state_t mp;
