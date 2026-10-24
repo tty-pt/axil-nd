@@ -1,4 +1,24 @@
-## 1.2.0
+## [1.3.0]
+
+- **Pure-C Dynamic Fallback SSR & Canonical BCP Protocol**:
+  - Added declarative Binary Client Protocol framework (`<nd/bcp.h>`, `<nd/bcp-meta.h>`, `<nd/bcp-types.h>`) for bi-directional binary communication (`#b` magic frames).
+  - Standardized core packet schemas: `ND_BCP_ROOM`, `ND_BCP_ITEM`, `ND_BCP_GAUGE`, `ND_BCP_ACTION`, `ND_BCP_AUTH`, `ND_BCP_EQUIPMENT`, `ND_BCP_SPELL_LIST`, `ND_BCP_SPELL_CAST`.
+- **Pluggable Viewports & Renderers (`<nd/viewport.h>`)**:
+  - Multi-viewport architecture supporting simultaneous TTY, Bud DOM, Lamina 2D Canvas, and WebGL isometric 3D scenes.
+- **Extensible UI Slots & Client Extension Registry (`<nd/ui-slot.h>`, `<nd/ui-slot-types.h>`)**:
+  - Generic per-session extension slots (`nd_client_ext`, `nd_client_gauge_set`, `nd_client_gauge_get`) eliminating hardcoded tenant structs.
+  - Harmonized `nd_ui_slot` with universal `bud_slot` and `bud_state`, adopting `bud_slot_t` and `BUD_SLOT_*` definitions.
+- **Generic DSV Table Engine (`nd_table_load`)**:
+  - Implemented `nd_table_load(module, table, fn, user)` in `law_data.c` enabling tenant modules to load domain DSV tables without engine coupling.
+- **XY Bus Encapsulation & Table Handle Isolation**:
+  - Encapsulated `nd_hds[]` behind `XY_DECL(unsigned, nd_table_handle, unsigned hd_idx)` and `XY_DECL(int, nd_table_handle_set, unsigned hd_idx, unsigned val)`.
+  - Inlined formatted output helpers `nd_writef`, `nd_owritef`, `nd_twritef` in `<nd/law.h>`, eliminating global `nd_dwritef`.
+- **Typed Game Event Bus (`<nd/event.h>`)**:
+  - First-class typed XY hooks for sound/noise, room transitions, entity spawn/destroy/update, icon changes, and viewport flags.
+- **Portability & Linker Purity**:
+  - Purged all hardcoded `/home/` paths and `-Wl,-rpath` flags, linking cleanly against system authority (`/usr/lib`).
+
+## [1.2.0]
 
 Added
 - **Login notice (`motd`) and a help-topic index.** Every login now ends with
@@ -54,7 +74,7 @@ Changed
   `AXIL_ND_HTDOCS`) exported in `/etc/rc.d/axil` never reached the process.
   Only compiled defaults plus cwd apply there; do not rely on rc.d exports.
 
-## 1.1.0
+## [1.1.0]
 
 The terminal is gated, the region system is real, and the store survives
 shutdown. 11 commits since 1.0.0; the suite gained S5.4/S5.5, S6, S7, S8 and
@@ -248,7 +268,7 @@ Removed
 - Absolute `/home/quirinpa/nd` and `/home/quirinpa/axil-tty` paths from the
   build and the test suite.
 
-## 0.1.0
+## [0.1.0]
 
 - Initial scaffold for axil-nd (P0): module build skeleton modeled on
   axil-tty, `include/ttypt/axil-nd.h`, stub `src/libaxil-nd.c` with xy hooks,

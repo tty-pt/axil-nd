@@ -21,7 +21,7 @@ libaxil-nd-obj-y := src/http.o src/law_io.o src/law_store.o src/law_cmd.o src/la
 # it. Every module is an installed library now, so this is
 # the only include path a module needs beyond its own.
 FOLDER := nd
-add-prefix-glob := ../nd-*
+add-prefix := ../axil-tty
 CLEAN_EXTRA := art art/.stamp man man/.stamp
 
 -include ./../mk/include.mk

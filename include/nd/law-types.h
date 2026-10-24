@@ -18,8 +18,6 @@
 #define ND_HD_TABLE_MAX 64
 #define ND_HD_FD 0
 
-extern unsigned nd_hds[];
-
 static inline unsigned nd_hd_mod(unsigned idx) { return ND_HD_MOD | idx; }
 static inline int nd_hd_is_mod(unsigned hd) { return (hd & ND_HD_MOD) != 0; }
 static inline unsigned nd_hd_mod_idx(unsigned hd) { return hd & ~ND_HD_MOD; }
@@ -52,5 +50,8 @@ enum nd_asset_kind {
 /* --- command callback signature ----------------------------------------- */
 
 typedef void nd_cb_t(int fd, int argc, char *argv[]);
+
+/* Row callback for nd_table_load (see law.h). */
+typedef int (*nd_table_row_fn)(const char *const *fields, size_t n, void *user);
 
 #endif /* ND_LAW_TYPES_H */

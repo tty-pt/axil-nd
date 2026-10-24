@@ -17,7 +17,7 @@ static struct {
 
 static unsigned dplayer_hd, fds_hd;
 
-extern unsigned nd_hds[];
+void nd_store_set_hd(unsigned idx, unsigned val);
 
 void
 nd_io_init(void)
@@ -26,7 +26,7 @@ nd_io_init(void)
 		return;
 	dplayer_hd = corm_open(NULL, "dplayer", CM_U32, CM_U32, 0xFF, 0);
 	fds_hd     = corm_open(NULL, "fds",     CM_U32, CM_U32, 0xFF, 0);
-	nd_hds[ND_HD_FD] = fds_hd;
+	nd_store_set_hd(ND_HD_FD, fds_hd);
 }
 
 void

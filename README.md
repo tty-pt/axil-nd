@@ -19,8 +19,10 @@ corm database:
   `unloadmod` into persisted `st` rows, restored every boot; `grant`
   attributes any region — districts, planets, super-planet regions — to any
   player)
-- WebSocket + telnet protocol served by axil (`GET:/nd` upgrade)
+- Binary Client Protocol (BCP `#b` magic frames) and WebSocket channel multiplexing
+- Multi-viewport rendering: 3D WebGL isometric scenes, 2D Lamina canvas, pure-C Bud DOM, and ANSI TTY
 - Store ported from the legacy `qdb`/`qmap` API to `libcorm`
+- Extensible UI slots and declarative tenant DSV tables (`nd_table_load`)
 - Browser client (xterm 6) plus `art/` and the in-game `man/` help pages,
   all installed under `share/axil-nd`
 
