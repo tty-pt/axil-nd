@@ -131,6 +131,19 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 	case ND_BCP_TOD:
 		return nd_bcp_unpack_u32_frame(buf, len, &st->tod);
 
+	case ND_BCP_REGION: {
+		nd_bcp_reader_t r;
+		nd_bcp_reader_init(&r, p, rem);
+		char driver[16] = {0};
+		nd_bcp_read_str_c(&r, driver, sizeof(driver));
+		if (nd_bcp_reader_ok(&r)) {
+			strncpy(st->preferred_driver, driver, sizeof(st->preferred_driver) - 1);
+			st->preferred_driver[sizeof(st->preferred_driver) - 1] = '\0';
+			return 1;
+		}
+		break;
+	}
+
 	case ND_BCP_ACTION: {
 		nd_bcp_reader_t r;
 		nd_bcp_reader_init(&r, p, rem);

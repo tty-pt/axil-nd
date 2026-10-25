@@ -30,8 +30,9 @@ enum nd_bcp_opcode {
 	ND_BCP_OUT          = 7,
 	ND_BCP_TOD          = 8,
 	ND_BCP_ACTION       = 9,
+	ND_BCP_REGION       = 10,
 
-	/* Dynamic channels on HD_BCP: numbers >= 10 are owned by the tenant
+	/* Dynamic channels on HD_BCP: numbers >= 14 are owned by the tenant
 	 * module that registers them and decoded via on_bcp_channel. */
 	ND_BCP_CHANNEL_DEF  = 14,
 	ND_BCP_EXT_MSG      = 15,
@@ -117,6 +118,7 @@ typedef struct {
 	char active_modal[32]; /* active modal identifier, module-defined, or "" */
 	char user[64];
 	char map_buf[1024];
+	char preferred_driver[16];
 	nd_room_desc_t room;
 	nd_entity_desc_t entities[ND_MAX_ENTITIES];
 	size_t entity_count;
