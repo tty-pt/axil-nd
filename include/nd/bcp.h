@@ -121,6 +121,14 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		break;
 	}
 
+	case ND_BCP_VIEW: {
+		if (rem >= sizeof(nd_map_data_t)) {
+			memcpy(&st->map_data, p, sizeof(nd_map_data_t));
+			return 1;
+		}
+		break;
+	}
+
 	case ND_BCP_VIEW_BUFFER: {
 		size_t copylen = (rem < sizeof(st->map_buf) - 1) ? rem : (sizeof(st->map_buf) - 1);
 		memcpy(st->map_buf, p, copylen);
@@ -134,11 +142,31 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 	case ND_BCP_REGION: {
 		nd_bcp_reader_t r;
 		nd_bcp_reader_init(&r, p, rem);
-		char driver[16] = {0};
-		nd_bcp_read_str_c(&r, driver, sizeof(driver));
+		char stage_drv[16] = {0};
+		char map_drv[16] = "ascii-bud";
+		uint8_t layout = ND_LAYOUT_STANDARD_HYBRID;
+		uint8_t flags = ND_REGION_ALLOW_CHOICE;
+
+		nd_bcp_read_str_c(&r, stage_drv, sizeof(stage_drv));
 		if (nd_bcp_reader_ok(&r)) {
-			strncpy(st->preferred_driver, driver, sizeof(st->preferred_driver) - 1);
+			strncpy(st->preferred_driver, stage_drv, sizeof(st->preferred_driver) - 1);
 			st->preferred_driver[sizeof(st->preferred_driver) - 1] = '\0';
+
+			if (nd_bcp_reader_rem(&r) > 0) {
+				char m[16] = {0};
+				nd_bcp_read_str_c(&r, m, sizeof(m));
+				if (m[0])
+					strncpy(map_drv, m, sizeof(map_drv) - 1);
+			}
+			if (nd_bcp_reader_rem(&r) > 0)
+				layout = nd_bcp_read_u8(&r);
+			if (nd_bcp_reader_rem(&r) > 0)
+				flags = nd_bcp_read_u8(&r);
+
+			strncpy(st->preferred_map_driver, map_drv, sizeof(st->preferred_map_driver) - 1);
+			st->preferred_map_driver[sizeof(st->preferred_map_driver) - 1] = '\0';
+			st->layout_mode = layout;
+			st->pres_flags = flags;
 			return 1;
 		}
 		break;

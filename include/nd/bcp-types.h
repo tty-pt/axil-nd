@@ -42,6 +42,54 @@ enum nd_bcp_opcode {
 #define ND_MAX_ENTITIES 64
 #define ND_MAX_LINE     1024
 
+#define ND_REGION_DRIVER_INHERIT    0x00
+#define ND_REGION_ALLOW_CHOICE      0x01
+#define ND_REGION_LOCKED            0x02
+
+#define ND_LAYOUT_STANDARD_HYBRID   0
+#define ND_LAYOUT_STAGE_EXPANDED    1
+#define ND_LAYOUT_STAGE_FULLSCREEN  2
+
+typedef struct {
+	char    stage_driver[16];
+	char    map_driver[16];
+	uint8_t layout_mode;
+	uint8_t pres_flags;
+} nd_bcp_region_layout_t;
+
+#define ND_MAP_FLAG_ROOM     0x01
+#define ND_MAP_FLAG_PLAYER   0x02
+#define ND_MAP_FLAG_ENTITY   0x04
+#define ND_MAP_FLAG_EXPLORED 0x08
+#define ND_MAP_FLAG_WALL     0x10
+
+#define ND_MAP_GRID_WIDTH    7
+#define ND_MAP_GRID_HEIGHT   7
+#define ND_MAP_TILES_COUNT   49
+
+typedef struct {
+	uint8_t bio_idx;   /* Biome enum (0..255) */
+	uint8_t exits;     /* Bitmask of exits: W(1), N(2), U(4), E(8), S(16), D(32) */
+	uint8_t doors;     /* Bitmask of doors / obstacles */
+	uint8_t flags;     /* Tile flags (ND_MAP_FLAG_*) */
+	uint8_t symbol;    /* ASCII character representation (e.g. '.', '#', '@', '+', '~') */
+	uint8_t fg;        /* Foreground color (0..15 or ANSI index) */
+	uint8_t bg;        /* Background color (0..15 or ANSI index) */
+	uint8_t reserved;  /* Future attributes / alignment pad */
+} nd_map_tile_t;
+
+typedef struct {
+	uint8_t width;                       /* Grid width (7) */
+	uint8_t height;                      /* Grid height (7) */
+	uint8_t player_x;                    /* Player position x in grid (3) */
+	uint8_t player_y;                    /* Player position y in grid (3) */
+	uint32_t room_ref;                   /* Current room reference */
+	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 8 bytes = 392 bytes */
+} nd_map_data_t;
+
+_Static_assert(sizeof(nd_map_tile_t) == 8, "nd_map_tile_t size must be 8 bytes");
+_Static_assert(sizeof(nd_map_data_t) == 400, "nd_map_data_t size must be 400 bytes");
+
 /*
  * Generic per-module client-state extension slots.
  *
@@ -118,7 +166,14 @@ typedef struct {
 	char active_modal[32]; /* active modal identifier, module-defined, or "" */
 	char user[64];
 	char map_buf[1024];
-	char preferred_driver[16];
+	union {
+		char preferred_driver[16];
+		char preferred_stage_driver[16];
+	};
+	char preferred_map_driver[16];
+	uint8_t layout_mode;
+	uint8_t pres_flags;
+	nd_map_data_t map_data;
 	nd_room_desc_t room;
 	nd_entity_desc_t entities[ND_MAX_ENTITIES];
 	size_t entity_count;
