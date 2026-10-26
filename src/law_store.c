@@ -6,7 +6,7 @@
 #include <ttypt/xy.h>
 #include <nd/law-types.h>
 
-const char *
+static const char *
 world_db(void)
 {
 	const char *db = getenv("AXIL_ND_DB");
@@ -50,7 +50,34 @@ shared_kind(const char *t)
 #define HD_MOD_MAX 64
 static unsigned hd_mod[HD_MOD_MAX];
 static unsigned hd_mod_n;
-unsigned nd_hds[ND_HD_TABLE_MAX];
+static unsigned nd_hds[ND_HD_TABLE_MAX];
+
+void
+nd_store_set_hd(unsigned idx, unsigned val)
+{
+	if (idx < ND_HD_TABLE_MAX)
+		nd_hds[idx] = val;
+}
+
+unsigned
+nd_store_get_hd(unsigned idx)
+{
+	return (idx < ND_HD_TABLE_MAX) ? nd_hds[idx] : 0;
+}
+
+XY_IMPL(unsigned, nd_table_handle, unsigned, hd_idx)
+{
+	return nd_store_get_hd(hd_idx);
+}
+
+XY_IMPL(int, nd_table_handle_set, unsigned, hd_idx, unsigned, val)
+{
+	if (hd_idx < ND_HD_TABLE_MAX) {
+		nd_store_set_hd(hd_idx, val);
+		return 0;
+	}
+	return -1;
+}
 
 unsigned
 hd_mod_open(const char *type, const char *iden, const char *anon, unsigned flags)

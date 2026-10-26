@@ -72,6 +72,12 @@
 
 #include "law-types.h"
 
+/* ------------------------------------------------------------------ storage */
+
+/* Corm table handle lookup and registration */
+XY_DECL(unsigned, nd_table_handle, unsigned, hd_idx);
+XY_DECL(int, nd_table_handle_set, unsigned, hd_idx, unsigned, val);
+
 /* ------------------------------------------------------------------ io */
 
 /* fd → player, used to route I/O for a connected socket; NOTHING on miss */
@@ -139,37 +145,43 @@ static inline void eng_nd_close(unsigned player_ref) { nd_close(player_ref); }
 static inline void eng_nd_write(unsigned player_ref, char *str, size_t len) { nd_write(player_ref, str, len); }
 static inline void eng_nd_wwrite(unsigned player_ref, void *msg, size_t len) { nd_wwrite(player_ref, msg, len); }
 
-typedef void nd_dwritef_t(unsigned player_ref, const char *fmt, va_list args);
-nd_dwritef_t nd_dwritef;
-
 static inline void
-nd_writef(unsigned player_ref, const char *fmt, ...) {
-	va_list va;
-	va_start(va, fmt);
-	nd_dwritef(player_ref, fmt, va);
-	va_end(va);
-}
-
-typedef void nd_dowritef_t(unsigned player_ref, const char *format, va_list args);
-nd_dowritef_t nd_dowritef;
-
-static inline void
-nd_owritef(unsigned player_ref, char *format, ...)
+nd_writef(unsigned player_ref, const char *fmt, ...)
 {
-	va_list args;
-	va_start(args, format);
-	nd_dowritef(player_ref, format, args);
-	va_end(args);
+	char buf[1024];
+	va_list va;
+	int n;
+	va_start(va, fmt);
+	n = vsnprintf(buf, sizeof(buf), fmt, va);
+	va_end(va);
+	if (n > 0)
+		nd_write(player_ref, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
 }
 
-typedef void nd_tdwritef_t(unsigned player_ref, const char *fmt, va_list args);
-nd_tdwritef_t nd_tdwritef;
+static inline void
+nd_owritef(unsigned player_ref, const char *format, ...)
+{
+	char buf[1024];
+	va_list args;
+	int n;
+	va_start(args, format);
+	n = vsnprintf(buf, sizeof(buf), format, args);
+	va_end(args);
+	if (n > 0)
+		nd_write(player_ref, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
+}
 
-static inline void nd_twritef(unsigned player_ref, const char *fmt, ...) {
+static inline void
+nd_twritef(unsigned player_ref, const char *fmt, ...)
+{
+	char buf[1024];
 	va_list va;
+	int n;
 	va_start(va, fmt);
-	nd_tdwritef(player_ref, fmt, va);
+	n = vsnprintf(buf, sizeof(buf), fmt, va);
 	va_end(va);
+	if (n > 0)
+		nd_twrites(player_ref, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
 }
 
 void nd_io_init(void);
@@ -181,8 +193,8 @@ void nd_io_flush_fd(unsigned fd);
 /* nd_last(ret) — the sic_last() port (MODS.md §0.3).
  *
  * sic_last() handed a module the return value of the module that ran before
- * it in the current dispatch, which is how nd-attr chains its listener
- * families (stat, modifier, effect, hp_max, mp_max): each one reads what the
+ * it in the current dispatch, which is how a tenant module chains its listener
+ * families (reading predecessor return values and folding adjustments in). libxylem has the same
  * previous one decided and folds its own adjustment in. libxylem has the same
  * primitive, xy_last() (xy.h:349); this is just the name the ported modules
  * read.
@@ -208,11 +220,11 @@ XY_DECL(int, nd_len_reg, char *, iden, size_t, len);
 /* corm secondary index: keeps `link` (a primary table) indexed by the keys
  * `assoc` derives from each row. Both handles are module-facing (nd_open
  * tags or enum hd); the engine resolves them. Hook-ified from the engine's
- * raw nd_assoc (uapi/io.h:101) for nd-race, which is the only caller.
+ * raw nd_assoc (uapi/io.h:101).
  *
  * Returns int, not the engine's void: XY_IMPL cannot express a void return
  * (it does `sizeof(ftype)` and `ftype result = ...`, both ill-formed for
- * void), and nd-race ignores the result. The engine body eng_nd_assoc keeps
+ * void), and callers ignore the result. The engine body eng_nd_assoc keeps
  * the void signature. */
 XY_DECL(int, nd_assoc, unsigned, hd, unsigned, link, nd_assoc_cb_p, assoc);
 
@@ -222,5 +234,20 @@ XY_DECL(int, nd_register, char *, str, nd_cb_t *, cb, unsigned, flags);
 
 /* asset directory resolver */
 XY_DECL(int, nd_asset_dir, unsigned, kind, char *, out, size_t, cap);
+
+/*
+ * Declarative game data. A tenant module owns a pipe-delimited table
+ * (`<table>.dsv`, one row per line, `#` comments, blank lines ignored) and
+ * asks the engine to feed it row by row, instead of compiling the rows into C.
+ * The engine knows nothing about what a row means. Lookup order:
+ *   $AXIL_ND_DATA, dirname($AXIL_ND_DB), external/<module>/data,
+ *   ../<module>/data, data/<module>, <prefix>/share/axil-nd/<module>.
+ * `row` receives the split fields (in-place, valid for the call only) and
+ * returns 0 to continue or <0 to abort. This is a plain exported function,
+ * not an XY hook: xy_install() of a tenant module cannot dispatch hooks yet. Returns rows consumed, or -1 when
+ * no table file was found.
+ */
+int nd_table_load(const char *module, const char *table,
+		nd_table_row_fn row, void *user);
 
 #endif /* ND_LAW_H */

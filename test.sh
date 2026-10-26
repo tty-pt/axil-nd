@@ -49,8 +49,6 @@ make --no-print-directory
 make --no-print-directory -C ../axil
 make --no-print-directory -C ../axil-tty
 make --no-print-directory -C ../axil-auth
-make --no-print-directory -C ../nd-fight
-make --no-print-directory -C ../nd-spell
 make --no-print-directory -C ../nd-obj
 make --no-print-directory -C ../nd-region
 make --no-print-directory -C ../nd-world
