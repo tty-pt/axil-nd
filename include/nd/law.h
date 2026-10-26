@@ -158,18 +158,9 @@ nd_writef(unsigned player_ref, const char *fmt, ...)
 		nd_write(player_ref, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
 }
 
-static inline void
-nd_owritef(unsigned player_ref, const char *format, ...)
-{
-	char buf[1024];
-	va_list args;
-	int n;
-	va_start(args, format);
-	n = vsnprintf(buf, sizeof(buf), format, args);
-	va_end(args);
-	if (n > 0)
-		nd_write(player_ref, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
-}
+/* There is deliberately no nd_owritef: it was a copy of nd_writef and so
+ * echoed "<me> goes north." to the actor. To tell a room's OTHER occupants,
+ * format and call nd_rwrite(room_ref, actor_ref, str, len). */
 
 static inline void
 nd_twritef(unsigned player_ref, const char *fmt, ...)
