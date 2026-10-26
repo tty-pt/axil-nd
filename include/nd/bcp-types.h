@@ -131,6 +131,24 @@ typedef struct {
 } nd_action_desc_t;
 
 typedef struct {
+	uint32_t ref;        /* 4 bytes (offset 0) */
+	uint32_t location;   /* 4 bytes (offset 4) */
+	uint32_t type;       /* 4 bytes (offset 8) */
+	uint32_t actions;    /* 4 bytes (offset 12) */
+	uint16_t fg;         /* 2 bytes (offset 16) */
+	uint16_t flags;      /* 2 bytes (offset 18) */
+	uint8_t  dynflags;   /* 1 byte  (offset 20) */
+	char     ch;         /* 1 byte  (offset 21) */
+	uint16_t pad;        /* 2 bytes (offset 22) */
+	char     name[32];   /* 32 bytes (offset 24..55) */
+	char     unparse[32];/* 32 bytes (offset 56..87) */
+	char     art[32];    /* 32 bytes (offset 88..119) */
+	uint8_t  reserved[8];/* 8 bytes  (offset 120..127) */
+} nd_entity_packet_t;
+
+_Static_assert(sizeof(nd_entity_packet_t) == 128, "nd_entity_packet_t size must be 128 bytes");
+
+typedef struct {
 	uint32_t ref;
 	uint32_t location;
 	uint8_t  dynflags;

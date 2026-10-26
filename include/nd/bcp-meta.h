@@ -313,6 +313,26 @@ static inline int nd_bcp_unpack_entity_msg(const uint8_t *buf, size_t len, nd_en
 	if (buf[0] != ND_BCP_MAGIC_0 || buf[1] != ND_BCP_MAGIC_1 || buf[2] != ND_BCP_ITEM)
 		return 0;
 
+	/* Fast path: packed 128-byte binary contract */
+	if (len - 3 == sizeof(nd_entity_packet_t)) {
+		const nd_entity_packet_t *pkt = (const nd_entity_packet_t *)(buf + 3);
+		out->ref = pkt->ref;
+		out->location = pkt->location;
+		out->type = pkt->type;
+		out->actions = pkt->actions;
+		out->fg = pkt->fg;
+		out->flags = pkt->flags;
+		out->dynflags = pkt->dynflags;
+		out->ch = pkt->ch;
+		memcpy(out->name, pkt->name, sizeof(pkt->name));
+		out->name[sizeof(out->name) - 1] = '\0';
+		memcpy(out->unparse, pkt->unparse, sizeof(pkt->unparse));
+		out->unparse[sizeof(out->unparse) - 1] = '\0';
+		memcpy(out->art, pkt->art, sizeof(pkt->art));
+		out->art[sizeof(pkt->art)] = '\0';
+		return 1;
+	}
+
 	nd_bcp_reader_t r;
 	nd_bcp_reader_init(&r, buf + 3, len - 3);
 
