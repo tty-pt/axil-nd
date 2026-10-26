@@ -30,12 +30,12 @@ enum nd_bcp_opcode {
 	ND_BCP_OUT          = 7,
 	ND_BCP_TOD          = 8,
 	ND_BCP_ACTION       = 9,
-	ND_BCP_REGION       = 10,
 
 	/* Dynamic channels on HD_BCP: numbers >= 14 are owned by the tenant
 	 * module that registers them and decoded via on_bcp_channel. */
 	ND_BCP_CHANNEL_DEF  = 14,
 	ND_BCP_EXT_MSG      = 15,
+	ND_BCP_REGION       = 19,
 };
 
 #define ND_MAX_ACTIONS  32
