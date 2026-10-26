@@ -140,8 +140,12 @@ checking in order:
 Run it from the checkout root, parent site checkout, or installed `share/axil-nd`:
 
 ```sh
-axil -d -A -p 8080 -m ./lib/libaxil-nd.so
+axil -d -A -p 8080 -m ./lib/libaxil-nd:libnd-region:libnd-bus:libnd-obj:libnd-world:libnd-view:libnd-mcp:libnd-speech:libnd-session
 ```
+
+libaxil-nd does not `xy_load` or link any `nd-*` module: the kernel libraries
+above come from the `-m` list, and every content module is loaded in game with
+`loadmod` and persisted in region rows.
 
 Then play at <http://localhost:8080/nd>, or over telnet:
 
@@ -158,7 +162,7 @@ On a development host, point the store somewhere writable:
 
 ```sh
 mkdir -p var
-AXIL_ND_DB=./var/std.db axil -d -A -p 8080 -m ./lib/libaxil-nd.so
+AXIL_ND_DB=./var/std.db axil -d -A -p 8080 -m ./lib/libaxil-nd:libnd-region:libnd-bus:libnd-obj:libnd-world:libnd-view:libnd-mcp:libnd-speech:libnd-session
 ```
 
 ## The man pages

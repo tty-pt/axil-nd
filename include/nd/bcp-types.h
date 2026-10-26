@@ -183,7 +183,9 @@ typedef struct {
 	size_t action_count;
 	char active_modal[32]; /* active modal identifier, module-defined, or "" */
 	char user[64];
-	char map_buf[1024];
+	/* A 7x7 view buffer is ~2.2 KB of ANSI (about 390 escapes); 1 KB cut it
+	 * to the first tile row, so the browser drew a single coloured tile. */
+	char map_buf[8192];
 	union {
 		char preferred_driver[16];
 		char preferred_stage_driver[16];

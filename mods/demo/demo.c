@@ -12,8 +12,8 @@
  *   cc -shared -fPIC -I../include -I/usr/include -o demo.so demo.c \
  *        -Wl,--no-execute-only
  *
- * The engine xy_load()s this .so from mods/ via the mods.load list file in
- * its xy_install().
+ * The engine never xy_load()s this .so. It is granted to a region at runtime
+ * with `loadmod libnd-demo` and persisted in that region's row.
  */
 
 #include <stdio.h>
