@@ -1,5 +1,11 @@
 ## [1.3.0]
 
+- **Packed 128-Byte Binary Entity Wire Contract (`nd_entity_packet_t`)**:
+  - Defined `nd_entity_packet_t` (exactly 128 bytes packed, static asserted) for high-performance zero-copy BCP entity transmission.
+  - Added $O(1)$ fast-path unmarshaling directly into `nd_entity_desc_t`.
+- **Packed Binary Map Grid (`nd_map_data_t`) & Regional Layout**:
+  - Implemented 400-byte binary map grid `nd_map_data_t` with symmetrical pure-C rendering across SSR and WASM.
+  - Added `ND_BCP_REGION` opcode for dynamic driver negotiation.
 - **Pure-C Dynamic Fallback SSR & Canonical BCP Protocol**:
   - Added declarative Binary Client Protocol framework (`<nd/bcp.h>`, `<nd/bcp-meta.h>`, `<nd/bcp-types.h>`) for bi-directional binary communication (`#b` magic frames).
   - Standardized core packet schemas: `ND_BCP_ROOM`, `ND_BCP_ITEM`, `ND_BCP_GAUGE`, `ND_BCP_ACTION`, `ND_BCP_AUTH`, `ND_BCP_EQUIPMENT`, `ND_BCP_SPELL_LIST`, `ND_BCP_SPELL_CAST`.
