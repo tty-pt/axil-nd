@@ -7,6 +7,8 @@
  */
 
 #include <ttypt/xy.h>
+#include <stdio.h>
+#include <string.h>
 #include <nd/bcp-types.h>
 #include <nd/bcp-meta.h>
 
@@ -49,6 +51,30 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		int rc = nd_bcp_unpack_entity_msg(buf, len, &item);
 		if (rc != 1)
 			return rc;
+
+		if (item.dynflags == 1) {
+			if (item.type == 0) { /* TYPE_ROOM */
+				if (st->room.ref != item.ref) {
+					/* Entering a new room: clear entities from old rooms (keep player & inventory) */
+					size_t keep = 0;
+					for (size_t i = 0; i < st->entity_count; i++) {
+						if (st->entities[i].ref == st->me ||
+						    (st->me && st->entities[i].location == st->me) ||
+						    st->entities[i].location == item.ref) {
+							st->entities[keep++] = st->entities[i];
+						}
+					}
+					st->entity_count = keep;
+				}
+				st->room.ref = item.ref;
+				snprintf(st->room.name, sizeof(st->room.name), "%s", item.name);
+				st->current_room = item.ref;
+				st->target_ref = 0;
+				return 1;
+			} else {
+				st->target_ref = item.ref;
+			}
+		}
 
 		size_t slot = st->entity_count;
 		for (size_t i = 0; i < st->entity_count; i++) {
