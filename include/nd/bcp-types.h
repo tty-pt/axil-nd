@@ -67,15 +67,27 @@ typedef struct {
 #define ND_MAP_GRID_HEIGHT   7
 #define ND_MAP_TILES_COUNT   49
 
+/*
+ * One map tile carries what the ASCII drawer shows for it, so a graphical map
+ * can show the same information. The ASCII drawer paints each tile as three
+ * character cells (left, centre, right) on the biome's background colour, with
+ * walls drawn in a "wall paint" colour; every colour here is an ANSI index
+ * (0..15, bold already folded into 8..15) because that is what the browser's
+ * cfN / cN palette classes are keyed by.
+ */
 typedef struct {
 	uint8_t bio_idx;   /* Biome enum (0..255) */
 	uint8_t exits;     /* Bitmask of exits: W(1), N(2), U(4), E(8), S(16), D(32) */
 	uint8_t doors;     /* Bitmask of doors / obstacles */
 	uint8_t flags;     /* Tile flags (ND_MAP_FLAG_*) */
-	uint8_t symbol;    /* ASCII character representation (e.g. '.', '#', '@', '+', '~') */
-	uint8_t fg;        /* Foreground color (0..15 or ANSI index) */
-	uint8_t bg;        /* Background color (0..15 or ANSI index) */
-	uint8_t reserved;  /* Future attributes / alignment pad */
+	uint8_t symbol;    /* Centre cell glyph exactly as the ASCII map shows it (0 = blank) */
+	uint8_t fg;        /* Centre cell colour, ANSI 0..15 */
+	uint8_t bg;        /* Biome background colour, ANSI 0..7 */
+	uint8_t wall_fg;   /* Wall paint colour, ANSI 0..7 */
+	uint8_t side_l;    /* Left cell glyph (stairs down '<', or a plant), 0 = blank */
+	uint8_t fg_l;      /* Left cell colour, ANSI 0..15 */
+	uint8_t side_r;    /* Right cell glyph (stairs up '>', or a plant), 0 = blank */
+	uint8_t fg_r;      /* Right cell colour, ANSI 0..15 */
 } nd_map_tile_t;
 
 typedef struct {
@@ -84,11 +96,14 @@ typedef struct {
 	uint8_t player_x;                    /* Player position x in grid (3) */
 	uint8_t player_y;                    /* Player position y in grid (3) */
 	uint32_t room_ref;                   /* Current room reference */
-	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 8 bytes = 392 bytes */
+	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 12 bytes = 588 bytes */
 } nd_map_data_t;
 
-_Static_assert(sizeof(nd_map_tile_t) == 8, "nd_map_tile_t size must be 8 bytes");
-_Static_assert(sizeof(nd_map_data_t) == 400, "nd_map_data_t size must be 400 bytes");
+_Static_assert(sizeof(nd_map_tile_t) == 12, "nd_map_tile_t size must be 12 bytes");
+_Static_assert(sizeof(nd_map_data_t) == 596, "nd_map_data_t size must be 596 bytes");
+
+/* Hex-encoded nd_map_data_t for the SSR bud-state JSON, plus the NUL. */
+#define ND_MAP_HEX_CAP (sizeof(nd_map_data_t) * 2 + 1)
 
 /*
  * Generic per-module client-state extension slots.
