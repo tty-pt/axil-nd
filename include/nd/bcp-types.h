@@ -49,6 +49,7 @@ enum nd_bcp_opcode {
 #define ND_LAYOUT_STANDARD_HYBRID   0
 #define ND_LAYOUT_STAGE_EXPANDED    1
 #define ND_LAYOUT_STAGE_FULLSCREEN  2
+#define ND_LAYOUT_GAME_2D           3
 
 typedef struct {
 	char    stage_driver[16];
@@ -96,11 +97,12 @@ typedef struct {
 	uint8_t player_x;                    /* Player position x in grid (3) */
 	uint8_t player_y;                    /* Player position y in grid (3) */
 	uint32_t room_ref;                   /* Current room reference */
+	int16_t  pos[4];                     /* World coordinates (x, y, z, world) of the room: stable seed for procedural stages */
 	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 12 bytes = 588 bytes */
 } nd_map_data_t;
 
 _Static_assert(sizeof(nd_map_tile_t) == 12, "nd_map_tile_t size must be 12 bytes");
-_Static_assert(sizeof(nd_map_data_t) == 596, "nd_map_data_t size must be 596 bytes");
+_Static_assert(sizeof(nd_map_data_t) == 604, "nd_map_data_t size must be 604 bytes");
 
 /* Hex-encoded nd_map_data_t for the SSR bud-state JSON, plus the NUL. */
 #define ND_MAP_HEX_CAP (sizeof(nd_map_data_t) * 2 + 1)
@@ -157,8 +159,7 @@ typedef struct {
 	uint16_t pad;        /* 2 bytes (offset 22) */
 	char     name[32];   /* 32 bytes (offset 24..55) */
 	char     unparse[32];/* 32 bytes (offset 56..87) */
-	char     art[32];    /* 32 bytes (offset 88..119) */
-	uint8_t  reserved[8];/* 8 bytes  (offset 120..127) */
+	char     art[40];    /* 40 bytes (offset 88..127): fits "biome/tropical seasonal forest/NN.jpeg" */
 } nd_entity_packet_t;
 
 _Static_assert(sizeof(nd_entity_packet_t) == 128, "nd_entity_packet_t size must be 128 bytes");
@@ -182,6 +183,7 @@ typedef struct {
 	char     name[64];
 	char     desc[256];
 	uint32_t exits;
+	char     art[48];   /* biome backdrop path under /nd/art, from the room ITEM */
 } nd_room_desc_t;
 
 typedef struct {

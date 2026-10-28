@@ -329,7 +329,7 @@ static inline int nd_bcp_unpack_entity_msg(const uint8_t *buf, size_t len, nd_en
 		memcpy(out->unparse, pkt->unparse, sizeof(pkt->unparse));
 		out->unparse[sizeof(out->unparse) - 1] = '\0';
 		memcpy(out->art, pkt->art, sizeof(pkt->art));
-		out->art[sizeof(pkt->art)] = '\0';
+		out->art[sizeof(pkt->art)] = '\0'; /* out->art is 64 */
 		return 1;
 	}
 

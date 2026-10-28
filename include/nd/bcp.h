@@ -68,6 +68,7 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 				}
 				st->room.ref = item.ref;
 				snprintf(st->room.name, sizeof(st->room.name), "%s", item.name);
+				snprintf(st->room.art, sizeof(st->room.art), "%s", item.art);
 				st->current_room = item.ref;
 				st->target_ref = 0;
 				return 1;

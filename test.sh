@@ -35,6 +35,23 @@ export PATH
 # assertions below pass without the assets being there.
 make --no-print-directory man art
 
+# Room backdrop regression: every biome in biomes.dsv must resolve (the way
+# nd-obj formats room art: trailing digits stripped, "permanent ice" ->
+# tundra) to a shipped art dir, and the longest path must fit the 40-byte
+# art field of the 128-byte entity packet (39 chars + NUL).
+biomes_dsv="$(dirname "$0")/../nd-biome/data/biomes.dsv"
+if [ -f "$biomes_dsv" ]; then
+	grep -v '^#' "$biomes_dsv" | cut -d'|' -f1 | while IFS= read -r b; do
+		[ -n "$b" ] || continue
+		base=$(printf '%s' "$b" | sed 's/[0-9]*$//')
+		[ "$base" = "permanent ice" ] && base=tundra
+		[ -f "art/biome/$base/1.jpeg" ] \
+			|| { echo "FAIL: biome '$b' has no art/biome/$base/1.jpeg" >&2; exit 1; }
+		[ ${#base} -le 25 ] \
+			|| { echo "FAIL: biome art path for '$b' exceeds 39 chars" >&2; exit 1; }
+	done || exit 1
+fi
+
 # Build the ENGINE too, not just the data. The suite boots whatever
 # lib/libaxil-nd.so is on disk, so an engine edit that was never compiled was
 # silently untested -- which is the same class of bug as the stale-object link
