@@ -156,7 +156,8 @@ typedef struct {
 	uint16_t flags;      /* 2 bytes (offset 18) */
 	uint8_t  dynflags;   /* 1 byte  (offset 20) */
 	char     ch;         /* 1 byte  (offset 21) */
-	uint16_t pad;        /* 2 bytes (offset 22) */
+	uint8_t  side;       /* 1 byte  (offset 22) */
+	uint8_t  pad;        /* 1 byte  (offset 23) */
 	char     name[32];   /* 32 bytes (offset 24..55) */
 	char     unparse[32];/* 32 bytes (offset 56..87) */
 	char     art[40];    /* 40 bytes (offset 88..127): fits "biome/tropical seasonal forest/NN.jpeg" */
@@ -168,6 +169,7 @@ typedef struct {
 	uint32_t ref;
 	uint32_t location;
 	uint8_t  dynflags;
+	uint8_t  side;
 	uint32_t type;
 	uint32_t actions;
 	char     name[32];
