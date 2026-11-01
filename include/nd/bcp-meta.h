@@ -324,12 +324,13 @@ static inline int nd_bcp_unpack_entity_msg(const uint8_t *buf, size_t len, nd_en
 		out->flags = pkt->flags;
 		out->dynflags = pkt->dynflags;
 		out->ch = pkt->ch;
+		out->side = pkt->side;
 		memcpy(out->name, pkt->name, sizeof(pkt->name));
 		out->name[sizeof(out->name) - 1] = '\0';
 		memcpy(out->unparse, pkt->unparse, sizeof(pkt->unparse));
 		out->unparse[sizeof(out->unparse) - 1] = '\0';
 		memcpy(out->art, pkt->art, sizeof(pkt->art));
-		out->art[sizeof(pkt->art)] = '\0';
+		out->art[sizeof(pkt->art)] = '\0'; /* out->art is 64 */
 		return 1;
 	}
 
@@ -339,6 +340,7 @@ static inline int nd_bcp_unpack_entity_msg(const uint8_t *buf, size_t len, nd_en
 	out->ref = nd_bcp_read_u32_c(&r);
 	out->location = nd_bcp_read_u32_c(&r);
 	out->dynflags = nd_bcp_read_u8(&r);
+	out->side = 0;
 	out->type = nd_bcp_read_u32_c(&r);
 	out->actions = nd_bcp_read_u32_c(&r);
 	nd_bcp_read_str_c(&r, out->name, sizeof(out->name));

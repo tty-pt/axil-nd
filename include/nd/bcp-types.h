@@ -30,12 +30,12 @@ enum nd_bcp_opcode {
 	ND_BCP_OUT          = 7,
 	ND_BCP_TOD          = 8,
 	ND_BCP_ACTION       = 9,
-	ND_BCP_REGION       = 10,
 
 	/* Dynamic channels on HD_BCP: numbers >= 14 are owned by the tenant
 	 * module that registers them and decoded via on_bcp_channel. */
 	ND_BCP_CHANNEL_DEF  = 14,
 	ND_BCP_EXT_MSG      = 15,
+	ND_BCP_REGION       = 19,
 };
 
 #define ND_MAX_ACTIONS  32
@@ -49,6 +49,7 @@ enum nd_bcp_opcode {
 #define ND_LAYOUT_STANDARD_HYBRID   0
 #define ND_LAYOUT_STAGE_EXPANDED    1
 #define ND_LAYOUT_STAGE_FULLSCREEN  2
+#define ND_LAYOUT_GAME_2D           3
 
 typedef struct {
 	char    stage_driver[16];
@@ -67,15 +68,27 @@ typedef struct {
 #define ND_MAP_GRID_HEIGHT   7
 #define ND_MAP_TILES_COUNT   49
 
+/*
+ * One map tile carries what the ASCII drawer shows for it, so a graphical map
+ * can show the same information. The ASCII drawer paints each tile as three
+ * character cells (left, centre, right) on the biome's background colour, with
+ * walls drawn in a "wall paint" colour; every colour here is an ANSI index
+ * (0..15, bold already folded into 8..15) because that is what the browser's
+ * cfN / cN palette classes are keyed by.
+ */
 typedef struct {
 	uint8_t bio_idx;   /* Biome enum (0..255) */
 	uint8_t exits;     /* Bitmask of exits: W(1), N(2), U(4), E(8), S(16), D(32) */
 	uint8_t doors;     /* Bitmask of doors / obstacles */
 	uint8_t flags;     /* Tile flags (ND_MAP_FLAG_*) */
-	uint8_t symbol;    /* ASCII character representation (e.g. '.', '#', '@', '+', '~') */
-	uint8_t fg;        /* Foreground color (0..15 or ANSI index) */
-	uint8_t bg;        /* Background color (0..15 or ANSI index) */
-	uint8_t reserved;  /* Future attributes / alignment pad */
+	uint8_t symbol;    /* Centre cell glyph exactly as the ASCII map shows it (0 = blank) */
+	uint8_t fg;        /* Centre cell colour, ANSI 0..15 */
+	uint8_t bg;        /* Biome background colour, ANSI 0..7 */
+	uint8_t wall_fg;   /* Wall paint colour, ANSI 0..7 */
+	uint8_t side_l;    /* Left cell glyph (stairs down '<', or a plant), 0 = blank */
+	uint8_t fg_l;      /* Left cell colour, ANSI 0..15 */
+	uint8_t side_r;    /* Right cell glyph (stairs up '>', or a plant), 0 = blank */
+	uint8_t fg_r;      /* Right cell colour, ANSI 0..15 */
 } nd_map_tile_t;
 
 typedef struct {
@@ -84,11 +97,15 @@ typedef struct {
 	uint8_t player_x;                    /* Player position x in grid (3) */
 	uint8_t player_y;                    /* Player position y in grid (3) */
 	uint32_t room_ref;                   /* Current room reference */
-	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 8 bytes = 392 bytes */
+	int16_t  pos[4];                     /* World coordinates (x, y, z, world) of the room: stable seed for procedural stages */
+	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 12 bytes = 588 bytes */
 } nd_map_data_t;
 
-_Static_assert(sizeof(nd_map_tile_t) == 8, "nd_map_tile_t size must be 8 bytes");
-_Static_assert(sizeof(nd_map_data_t) == 400, "nd_map_data_t size must be 400 bytes");
+_Static_assert(sizeof(nd_map_tile_t) == 12, "nd_map_tile_t size must be 12 bytes");
+_Static_assert(sizeof(nd_map_data_t) == 604, "nd_map_data_t size must be 604 bytes");
+
+/* Hex-encoded nd_map_data_t for the SSR bud-state JSON, plus the NUL. */
+#define ND_MAP_HEX_CAP (sizeof(nd_map_data_t) * 2 + 1)
 
 /*
  * Generic per-module client-state extension slots.
@@ -130,6 +147,19 @@ typedef struct {
 	char icon[8];
 } nd_action_desc_t;
 
+/*
+ * Entity classification and semantic flags (shared isomorphic wire contract).
+ * Populated by server in pkt.flags / nd_entity_desc_t.flags.
+ */
+enum nd_entity_flags {
+	ND_EF_PLAYER    = (1 << 0), /* Local or remote player */
+	ND_EF_CREATURE  = (1 << 1), /* Mob, NPC, or creature */
+	ND_EF_ITEM      = (1 << 2), /* Dropped loot, weapon, gear */
+	ND_EF_SCENERY   = (1 << 3), /* AOT world scenery object */
+	ND_EF_MINERAL   = (1 << 4), /* Mineral / stone / rock deposit */
+	ND_EF_FLORA     = (1 << 5), /* Tree, plant, crop, cactus */
+};
+
 typedef struct {
 	uint32_t ref;        /* 4 bytes (offset 0) */
 	uint32_t location;   /* 4 bytes (offset 4) */
@@ -139,11 +169,11 @@ typedef struct {
 	uint16_t flags;      /* 2 bytes (offset 18) */
 	uint8_t  dynflags;   /* 1 byte  (offset 20) */
 	char     ch;         /* 1 byte  (offset 21) */
-	uint16_t pad;        /* 2 bytes (offset 22) */
+	uint8_t  side;       /* 1 byte  (offset 22) */
+	uint8_t  pad;        /* 1 byte  (offset 23) */
 	char     name[32];   /* 32 bytes (offset 24..55) */
 	char     unparse[32];/* 32 bytes (offset 56..87) */
-	char     art[32];    /* 32 bytes (offset 88..119) */
-	uint8_t  reserved[8];/* 8 bytes  (offset 120..127) */
+	char     art[40];    /* 40 bytes (offset 88..127): fits "biome/tropical seasonal forest/NN.jpeg" */
 } nd_entity_packet_t;
 
 _Static_assert(sizeof(nd_entity_packet_t) == 128, "nd_entity_packet_t size must be 128 bytes");
@@ -152,6 +182,7 @@ typedef struct {
 	uint32_t ref;
 	uint32_t location;
 	uint8_t  dynflags;
+	uint8_t  side;
 	uint32_t type;
 	uint32_t actions;
 	char     name[32];
@@ -167,6 +198,7 @@ typedef struct {
 	char     name[64];
 	char     desc[256];
 	uint32_t exits;
+	char     art[48];   /* biome backdrop path under /nd/art, from the room ITEM */
 } nd_room_desc_t;
 
 typedef struct {
@@ -183,7 +215,9 @@ typedef struct {
 	size_t action_count;
 	char active_modal[32]; /* active modal identifier, module-defined, or "" */
 	char user[64];
-	char map_buf[1024];
+	/* A 7x7 view buffer is ~2.2 KB of ANSI (about 390 escapes); 1 KB cut it
+	 * to the first tile row, so the browser drew a single coloured tile. */
+	char map_buf[8192];
 	union {
 		char preferred_driver[16];
 		char preferred_stage_driver[16];
