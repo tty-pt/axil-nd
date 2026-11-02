@@ -165,7 +165,7 @@ cat > "$authfix/Makefile" <<EOF
 # Same self-contained shape as the testprobe above: built on its own, granted
 # to the root region by its installed soname in the warm-up below.
 authfix.so: authfix.c
-	\$(CC) -shared -fPIC -I$(pwd)/../axil-auth/include -I$(pwd)/../libxylem/include -I$(pwd)/../axil/include -I$(pwd)/../libcorm/include -I$(pwd)/../libqsys/include \\
+	\$(CC) -shared -fPIC -I$(pwd)/../axil-auth/include -I$(pwd)/../libxylem/include -I$(pwd)/../axil/include -I$(pwd)/../libcorm/include -I$(pwd)/../libstele/include \\
 		-o \$@ \$< \\
 		-L$(pwd)/../axil-auth/lib -Wl,-rpath,$(pwd)/../axil-auth/lib -laxil-auth
 EOF
@@ -1456,7 +1456,7 @@ fi
 # `connect $user` -> `save` -> `kill -SEGV`.  Boot B on the SAME store:
 # `connect $user` again must log the real player ref (not the new-player
 # sentinel /4294967295) and must NOT run eng_object_add (no recreation).
-# WARN and eng_object_add both go to stderr (libqsys + object.c), so each
+# WARN and eng_object_add both go to stderr (libstele + object.c), so each
 # boot's axil stderr is captured to its own log file for the greps.
 persist_db="$tmpdb/persist.db"
 port_a=$((port + 1))

@@ -185,7 +185,7 @@ two justifications. One does not survive scrutiny, one does — and it is now
   83,840 = exactly 20 × 4192; 20 plain prototypes = `.data` 0.
 
   **Decision: keep the wrappers.** Secondary reasons that also survive: the
-  engine TUs stay free of `<ttypt/xy.h>` (which drags in `xy-pp.h`, `qsys.h`),
+  engine TUs stay free of `<ttypt/xy.h>` (which drags in `xy-pp.h`, `stele.h`),
   there is one definition site, and no `static inline on_add` is stamped into
   every engine TU.
 
