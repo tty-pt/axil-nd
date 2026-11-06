@@ -63,6 +63,7 @@ typedef struct {
 #define ND_MAP_FLAG_ENTITY   0x04
 #define ND_MAP_FLAG_EXPLORED 0x08
 #define ND_MAP_FLAG_WALL     0x10
+#define ND_MAP_FLAG_WATER    0x20
 
 #define ND_MAP_GRID_WIDTH    7
 #define ND_MAP_GRID_HEIGHT   7
