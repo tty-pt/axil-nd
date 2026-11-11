@@ -229,6 +229,16 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		return 1;
 	}
 
+	case ND_BCP_SPARSITY: {
+		nd_bcp_sparsity_t sp;
+		return nd_bcp_unpack_sparsity(buf, len, &sp);
+	}
+
+	case ND_BCP_MACRO_VIEW: {
+		nd_bcp_macro_view_t mv;
+		return nd_bcp_unpack_macro_view(buf, len, &mv);
+	}
+
 	default: {
 		int rc = on_bcp_channel(iden, p, rem, st);
 		if (rc != 0)

@@ -36,6 +36,8 @@ enum nd_bcp_opcode {
 	ND_BCP_CHANNEL_DEF  = 14,
 	ND_BCP_EXT_MSG      = 15,
 	ND_BCP_REGION       = 19,
+	ND_BCP_SPARSITY     = 20, /* 64-bit sector occupancy mask */
+	ND_BCP_MACRO_VIEW   = 21, /* Sparse landmark vectors */
 };
 
 #define ND_MAX_ACTIONS  32
@@ -63,6 +65,7 @@ typedef struct {
 #define ND_MAP_FLAG_ENTITY   0x04
 #define ND_MAP_FLAG_EXPLORED 0x08
 #define ND_MAP_FLAG_WALL     0x10
+#define ND_MAP_FLAG_WATER    0x20
 
 #define ND_MAP_GRID_WIDTH    7
 #define ND_MAP_GRID_HEIGHT   7
@@ -200,6 +203,27 @@ typedef struct {
 	uint32_t exits;
 	char     art[48];   /* biome backdrop path under /nd/art, from the room ITEM */
 } nd_room_desc_t;
+
+/* Macro region occupancy sparsity mask (64-bit bitmask for 256x256 room sectors) */
+typedef struct {
+	int16_t  sector_x;       /* Sector origin X (in 256-room units) */
+	int16_t  sector_y;       /* Sector origin Y */
+	uint16_t world;          /* World identifier */
+	uint64_t occupancy_mask; /* 64-bit mask: each bit represents a 32x32 room block (1=has data, 0=wilderness) */
+} nd_bcp_sparsity_t;
+
+/* Sparse macro landmark representation for distant stratospheric zoom */
+typedef struct {
+	int16_t  rx, ry;         /* Room coordinates in world units */
+	uint16_t world;          /* World identifier */
+	uint8_t  icon;           /* Landmark icon index (castle, city, dungeon, tower) */
+	uint16_t name_id;        /* String table reference */
+} nd_macro_landmark_t;
+
+typedef struct {
+	uint16_t            count;
+	nd_macro_landmark_t landmarks[16];
+} nd_bcp_macro_view_t;
 
 typedef struct {
 	uint32_t me;
