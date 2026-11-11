@@ -88,10 +88,12 @@ typedef struct {
 	uint8_t fg;        /* Centre cell colour, ANSI 0..15 */
 	uint8_t bg;        /* Biome background colour, ANSI 0..7 */
 	uint8_t wall_fg;   /* Wall paint colour, ANSI 0..7 */
-	uint8_t side_l;    /* Left cell glyph (stairs down '<', or a plant), 0 = blank */
-	uint8_t fg_l;      /* Left cell colour, ANSI 0..15 */
-	uint8_t side_r;    /* Right cell glyph (stairs up '>', or a plant), 0 = blank */
-	uint8_t fg_r;      /* Right cell colour, ANSI 0..15 */
+	uint8_t side_l;      /* Left cell glyph (stairs down '<', or a plant), 0 = blank */
+	uint8_t fg_l;        /* Left cell colour, ANSI 0..15 */
+	uint8_t side_r;      /* Right cell glyph (stairs up '>', or a plant), 0 = blank */
+	uint8_t fg_r;        /* Right cell colour, ANSI 0..15 */
+	uint8_t plant_id[3]; /* Per-slot packed flora descriptor (ND_PLANT_PACK_ID: species 1..16, big bit, variant bit) */
+	uint8_t col_mask[3]; /* Per-slot ground-plane collision footprint (0=walkable, 1=standard trunk, 2=wide trunk) */
 } nd_map_tile_t;
 
 typedef struct {
@@ -101,11 +103,11 @@ typedef struct {
 	uint8_t player_y;                    /* Player position y in grid (3) */
 	uint32_t room_ref;                   /* Current room reference */
 	int16_t  pos[4];                     /* World coordinates (x, y, z, world) of the room: stable seed for procedural stages */
-	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 12 bytes = 588 bytes */
+	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 18 bytes = 882 bytes (+2 align pad = 900 bytes total) */
 } nd_map_data_t;
 
-_Static_assert(sizeof(nd_map_tile_t) == 12, "nd_map_tile_t size must be 12 bytes");
-_Static_assert(sizeof(nd_map_data_t) == 604, "nd_map_data_t size must be 604 bytes");
+_Static_assert(sizeof(nd_map_tile_t) == 18, "nd_map_tile_t size must be 18 bytes");
+_Static_assert(sizeof(nd_map_data_t) == 900, "nd_map_data_t size must be 900 bytes");
 
 /* Hex-encoded nd_map_data_t for the SSR bud-state JSON, plus the NUL. */
 #define ND_MAP_HEX_CAP (sizeof(nd_map_data_t) * 2 + 1)
@@ -175,8 +177,8 @@ typedef struct {
 	uint8_t  side;       /* 1 byte  (offset 22) */
 	uint8_t  pad;        /* 1 byte  (offset 23) */
 	char     name[32];   /* 32 bytes (offset 24..55) */
-	char     unparse[32];/* 32 bytes (offset 56..87) */
-	char     art[40];    /* 40 bytes (offset 88..127): fits "biome/tropical seasonal forest/NN.jpeg" */
+	char     unparse[24];/* 24 bytes (offset 56..79) */
+	char     art[48];    /* 48 bytes (offset 80..127): fits "plant/arthrocereus_rondonianus/small/2.png" */
 } nd_entity_packet_t;
 
 _Static_assert(sizeof(nd_entity_packet_t) == 128, "nd_entity_packet_t size must be 128 bytes");
