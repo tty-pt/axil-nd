@@ -47,6 +47,7 @@ enum nd_bcp_opcode {
 #define ND_REGION_DRIVER_INHERIT    0x00
 #define ND_REGION_ALLOW_CHOICE      0x01
 #define ND_REGION_LOCKED            0x02
+#define ND_REGION_UNIVERSE_OWNER    0x04
 
 #define ND_LAYOUT_STANDARD_HYBRID   0
 #define ND_LAYOUT_STAGE_EXPANDED    1
@@ -157,12 +158,13 @@ typedef struct {
  * Populated by server in pkt.flags / nd_entity_desc_t.flags.
  */
 enum nd_entity_flags {
-	ND_EF_PLAYER    = (1 << 0), /* Local or remote player */
-	ND_EF_CREATURE  = (1 << 1), /* Mob, NPC, or creature */
-	ND_EF_ITEM      = (1 << 2), /* Dropped loot, weapon, gear */
-	ND_EF_SCENERY   = (1 << 3), /* AOT world scenery object */
-	ND_EF_MINERAL   = (1 << 4), /* Mineral / stone / rock deposit */
-	ND_EF_FLORA     = (1 << 5), /* Tree, plant, crop, cactus */
+	ND_EF_PLAYER         = (1 << 0), /* Local or remote player */
+	ND_EF_CREATURE       = (1 << 1), /* Mob, NPC, or creature */
+	ND_EF_ITEM           = (1 << 2), /* Dropped loot, weapon, gear */
+	ND_EF_SCENERY        = (1 << 3), /* AOT world scenery object */
+	ND_EF_MINERAL        = (1 << 4), /* Mineral / stone / rock deposit */
+	ND_EF_FLORA          = (1 << 5), /* Tree, plant, crop, cactus */
+	ND_EF_UNIVERSE_OWNER = (1 << 6), /* Universe / cosmos owner permission */
 };
 
 typedef struct {
