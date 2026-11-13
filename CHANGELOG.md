@@ -1,3 +1,14 @@
+## [Unreleased] (target: v1.4.0)
+
+### Added
+- **BCP Macro View & Sparsity Protocol (`include/nd/bcp-meta.h`, `include/nd/bcp-types.h`)**:
+  - Implemented `nd_bcp_pack_macro_view` and `nd_bcp_unpack_macro_view` wire serialization.
+  - Defined `ND_BCP_SPARSITY` and `ND_BCP_MACRO_VIEW` opcode packets.
+  - Defined `ND_MAP_FLAG_WATER` (0x20) flag for submerged tile protocol in `include/nd/bcp.h`.
+
+### Fixed
+- Updated fallback page HTML scripts and stylesheets in `src/http.c`.
+
 ## [1.3.0]
 
 - **Packed 128-Byte Binary Entity Wire Contract (`nd_entity_packet_t`)**:

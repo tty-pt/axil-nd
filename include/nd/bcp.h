@@ -152,6 +152,12 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		if (rem >= sizeof(nd_map_data_t)) {
 			memcpy(&st->map_data, p, sizeof(nd_map_data_t));
 			return 1;
+		} else if (rem == 16 + ND_MAP_TILES_COUNT * 12) {
+			memset(&st->map_data, 0, sizeof(nd_map_data_t));
+			memcpy(&st->map_data, p, 16);
+			for (size_t i = 0; i < ND_MAP_TILES_COUNT; i++)
+				memcpy(&st->map_data.tiles[i], p + 16 + i * 12, 12);
+			return 1;
 		}
 		break;
 	}
@@ -227,6 +233,16 @@ nd_bcp_decode(const uint8_t *buf, size_t len, nd_client_state_t *st)
 		if (slot == st->action_count)
 			st->action_count++;
 		return 1;
+	}
+
+	case ND_BCP_SPARSITY: {
+		nd_bcp_sparsity_t sp;
+		return nd_bcp_unpack_sparsity(buf, len, &sp);
+	}
+
+	case ND_BCP_MACRO_VIEW: {
+		nd_bcp_macro_view_t mv;
+		return nd_bcp_unpack_macro_view(buf, len, &mv);
 	}
 
 	default: {

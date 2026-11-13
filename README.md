@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="axil-nd logo" width="220" />
+  <img src="assets/logo.png" alt="axil-nd logo" width="220" />
 </p>
 
 # axil-nd
@@ -8,7 +8,7 @@
 [![BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue)](#)
 [![MUCK](https://img.shields.io/badge/game-MUCK-4B8BBE)](#)
 
-> NeverDark MUCK engine as a dynamic [axil](https://github.com/tty-pt/axil) module — real-time multiplayer virtual world running in-process over WebSocket and Telnet.
+> NeverDark MUCK engine as a dynamic [axil](https://github.com/tty-pt/axil) module — real-time multiplayer virtual world running in-process over WebSocket and Telnet. Canonical header is `<ttypt/nd.h>`.
 
 ---
 
@@ -87,8 +87,12 @@ The game world is extended through independent, hot-reloadable [libxylem](https:
 
 ---
 
-## 4. Build from Source
+## 4. Installation & Build
 
+### Prebuilt Packages
+Prebuilt packages for Linux (APT / Alpine / Arch / Fedora-RHEL), macOS (Homebrew), Windows (winget / MSYS2), and OpenBSD are distributed via [tty.pt packages](https://github.com/tty-pt/ci/blob/main/docs/install.md). Use **axil-nd** as the package name.
+
+### Build from Source
 ```bash
 # Build browser client assets
 npm install && npm run build
@@ -97,6 +101,8 @@ npm install && npm run build
 make
 sudo make install
 ```
+
+---
 
 ## License
 

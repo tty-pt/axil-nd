@@ -36,6 +36,8 @@ enum nd_bcp_opcode {
 	ND_BCP_CHANNEL_DEF  = 14,
 	ND_BCP_EXT_MSG      = 15,
 	ND_BCP_REGION       = 19,
+	ND_BCP_SPARSITY     = 20, /* 64-bit sector occupancy mask */
+	ND_BCP_MACRO_VIEW   = 21, /* Sparse landmark vectors */
 };
 
 #define ND_MAX_ACTIONS  32
@@ -45,6 +47,7 @@ enum nd_bcp_opcode {
 #define ND_REGION_DRIVER_INHERIT    0x00
 #define ND_REGION_ALLOW_CHOICE      0x01
 #define ND_REGION_LOCKED            0x02
+#define ND_REGION_UNIVERSE_OWNER    0x04
 
 #define ND_LAYOUT_STANDARD_HYBRID   0
 #define ND_LAYOUT_STAGE_EXPANDED    1
@@ -63,6 +66,7 @@ typedef struct {
 #define ND_MAP_FLAG_ENTITY   0x04
 #define ND_MAP_FLAG_EXPLORED 0x08
 #define ND_MAP_FLAG_WALL     0x10
+#define ND_MAP_FLAG_WATER    0x20
 
 #define ND_MAP_GRID_WIDTH    7
 #define ND_MAP_GRID_HEIGHT   7
@@ -85,10 +89,12 @@ typedef struct {
 	uint8_t fg;        /* Centre cell colour, ANSI 0..15 */
 	uint8_t bg;        /* Biome background colour, ANSI 0..7 */
 	uint8_t wall_fg;   /* Wall paint colour, ANSI 0..7 */
-	uint8_t side_l;    /* Left cell glyph (stairs down '<', or a plant), 0 = blank */
-	uint8_t fg_l;      /* Left cell colour, ANSI 0..15 */
-	uint8_t side_r;    /* Right cell glyph (stairs up '>', or a plant), 0 = blank */
-	uint8_t fg_r;      /* Right cell colour, ANSI 0..15 */
+	uint8_t side_l;      /* Left cell glyph (stairs down '<', or a plant), 0 = blank */
+	uint8_t fg_l;        /* Left cell colour, ANSI 0..15 */
+	uint8_t side_r;      /* Right cell glyph (stairs up '>', or a plant), 0 = blank */
+	uint8_t fg_r;        /* Right cell colour, ANSI 0..15 */
+	uint8_t plant_id[3]; /* Per-slot packed flora descriptor (ND_PLANT_PACK_ID: species 1..16, big bit, variant bit) */
+	uint8_t col_mask[3]; /* Per-slot ground-plane collision footprint (0=walkable, 1=standard trunk, 2=wide trunk) */
 } nd_map_tile_t;
 
 typedef struct {
@@ -98,11 +104,11 @@ typedef struct {
 	uint8_t player_y;                    /* Player position y in grid (3) */
 	uint32_t room_ref;                   /* Current room reference */
 	int16_t  pos[4];                     /* World coordinates (x, y, z, world) of the room: stable seed for procedural stages */
-	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 12 bytes = 588 bytes */
+	nd_map_tile_t tiles[ND_MAP_TILES_COUNT]; /* 7x7 grid = 49 tiles * 18 bytes = 882 bytes (+2 align pad = 900 bytes total) */
 } nd_map_data_t;
 
-_Static_assert(sizeof(nd_map_tile_t) == 12, "nd_map_tile_t size must be 12 bytes");
-_Static_assert(sizeof(nd_map_data_t) == 604, "nd_map_data_t size must be 604 bytes");
+_Static_assert(sizeof(nd_map_tile_t) == 18, "nd_map_tile_t size must be 18 bytes");
+_Static_assert(sizeof(nd_map_data_t) == 900, "nd_map_data_t size must be 900 bytes");
 
 /* Hex-encoded nd_map_data_t for the SSR bud-state JSON, plus the NUL. */
 #define ND_MAP_HEX_CAP (sizeof(nd_map_data_t) * 2 + 1)
@@ -152,12 +158,13 @@ typedef struct {
  * Populated by server in pkt.flags / nd_entity_desc_t.flags.
  */
 enum nd_entity_flags {
-	ND_EF_PLAYER    = (1 << 0), /* Local or remote player */
-	ND_EF_CREATURE  = (1 << 1), /* Mob, NPC, or creature */
-	ND_EF_ITEM      = (1 << 2), /* Dropped loot, weapon, gear */
-	ND_EF_SCENERY   = (1 << 3), /* AOT world scenery object */
-	ND_EF_MINERAL   = (1 << 4), /* Mineral / stone / rock deposit */
-	ND_EF_FLORA     = (1 << 5), /* Tree, plant, crop, cactus */
+	ND_EF_PLAYER         = (1 << 0), /* Local or remote player */
+	ND_EF_CREATURE       = (1 << 1), /* Mob, NPC, or creature */
+	ND_EF_ITEM           = (1 << 2), /* Dropped loot, weapon, gear */
+	ND_EF_SCENERY        = (1 << 3), /* AOT world scenery object */
+	ND_EF_MINERAL        = (1 << 4), /* Mineral / stone / rock deposit */
+	ND_EF_FLORA          = (1 << 5), /* Tree, plant, crop, cactus */
+	ND_EF_UNIVERSE_OWNER = (1 << 6), /* Universe / cosmos owner permission */
 };
 
 typedef struct {
@@ -172,8 +179,8 @@ typedef struct {
 	uint8_t  side;       /* 1 byte  (offset 22) */
 	uint8_t  pad;        /* 1 byte  (offset 23) */
 	char     name[32];   /* 32 bytes (offset 24..55) */
-	char     unparse[32];/* 32 bytes (offset 56..87) */
-	char     art[40];    /* 40 bytes (offset 88..127): fits "biome/tropical seasonal forest/NN.jpeg" */
+	char     unparse[24];/* 24 bytes (offset 56..79) */
+	char     art[48];    /* 48 bytes (offset 80..127): fits "plant/arthrocereus_rondonianus/small/2.png" */
 } nd_entity_packet_t;
 
 _Static_assert(sizeof(nd_entity_packet_t) == 128, "nd_entity_packet_t size must be 128 bytes");
@@ -200,6 +207,27 @@ typedef struct {
 	uint32_t exits;
 	char     art[48];   /* biome backdrop path under /nd/art, from the room ITEM */
 } nd_room_desc_t;
+
+/* Macro region occupancy sparsity mask (64-bit bitmask for 256x256 room sectors) */
+typedef struct {
+	int16_t  sector_x;       /* Sector origin X (in 256-room units) */
+	int16_t  sector_y;       /* Sector origin Y */
+	uint16_t world;          /* World identifier */
+	uint64_t occupancy_mask; /* 64-bit mask: each bit represents a 32x32 room block (1=has data, 0=wilderness) */
+} nd_bcp_sparsity_t;
+
+/* Sparse macro landmark representation for distant stratospheric zoom */
+typedef struct {
+	int16_t  rx, ry;         /* Room coordinates in world units */
+	uint16_t world;          /* World identifier */
+	uint8_t  icon;           /* Landmark icon index (castle, city, dungeon, tower) */
+	uint16_t name_id;        /* String table reference */
+} nd_macro_landmark_t;
+
+typedef struct {
+	uint16_t            count;
+	nd_macro_landmark_t landmarks[16];
+} nd_bcp_macro_view_t;
 
 typedef struct {
 	uint32_t me;

@@ -415,6 +415,74 @@ static inline int nd_bcp_unpack_msg_##name(const uint8_t *buf, size_t len, nd_bc
 
 ND_BCP_DEFINE_SCHEMA(room_wire, ND_BCP_ROOM, ND_BCP_MSG_ROOM_FIELDS)
 
+static inline int nd_bcp_pack_sparsity(uint8_t *buf, size_t cap, const nd_bcp_sparsity_t *sp)
+{
+	if (!buf || !sp) return -1;
+	nd_bcp_writer_t w;
+	nd_bcp_writer_init(&w, buf, cap);
+	nd_bcp_write_hdr(&w, ND_BCP_SPARSITY);
+	nd_bcp_write_u16(&w, (uint16_t)sp->sector_x);
+	nd_bcp_write_u16(&w, (uint16_t)sp->sector_y);
+	nd_bcp_write_u16(&w, sp->world);
+	nd_bcp_write_u32(&w, (uint32_t)(sp->occupancy_mask & 0xFFFFFFFFu));
+	nd_bcp_write_u32(&w, (uint32_t)(sp->occupancy_mask >> 32));
+	return nd_bcp_writer_ok(&w) ? (int)nd_bcp_writer_len(&w, buf) : -1;
+}
+
+static inline int nd_bcp_unpack_sparsity(const uint8_t *buf, size_t len, nd_bcp_sparsity_t *out)
+{
+	if (!buf || len < 3 || !out) return -1;
+	if (buf[0] != ND_BCP_MAGIC_0 || buf[1] != ND_BCP_MAGIC_1 || buf[2] != ND_BCP_SPARSITY)
+		return 0;
+	nd_bcp_reader_t r;
+	nd_bcp_reader_init(&r, buf + 3, len - 3);
+	out->sector_x = (int16_t)nd_bcp_read_u16_c(&r);
+	out->sector_y = (int16_t)nd_bcp_read_u16_c(&r);
+	out->world = nd_bcp_read_u16_c(&r);
+	uint32_t lo = nd_bcp_read_u32_c(&r);
+	uint32_t hi = nd_bcp_read_u32_c(&r);
+	out->occupancy_mask = ((uint64_t)hi << 32) | (uint64_t)lo;
+	return nd_bcp_reader_ok(&r) ? 1 : -1;
+}
+
+static inline int nd_bcp_pack_macro_view(uint8_t *buf, size_t cap, const nd_bcp_macro_view_t *mv)
+{
+	if (!buf || !mv) return -1;
+	nd_bcp_writer_t w;
+	nd_bcp_writer_init(&w, buf, cap);
+	nd_bcp_write_hdr(&w, ND_BCP_MACRO_VIEW);
+	uint16_t count = mv->count > 16 ? 16 : mv->count;
+	nd_bcp_write_u16(&w, count);
+	for (uint16_t i = 0; i < count; i++) {
+		nd_bcp_write_u16(&w, (uint16_t)mv->landmarks[i].rx);
+		nd_bcp_write_u16(&w, (uint16_t)mv->landmarks[i].ry);
+		nd_bcp_write_u16(&w, mv->landmarks[i].world);
+		nd_bcp_write_u8(&w, mv->landmarks[i].icon);
+		nd_bcp_write_u16(&w, mv->landmarks[i].name_id);
+	}
+	return nd_bcp_writer_ok(&w) ? (int)nd_bcp_writer_len(&w, buf) : -1;
+}
+
+static inline int nd_bcp_unpack_macro_view(const uint8_t *buf, size_t len, nd_bcp_macro_view_t *out)
+{
+	if (!buf || len < 5 || !out) return -1;
+	if (buf[0] != ND_BCP_MAGIC_0 || buf[1] != ND_BCP_MAGIC_1 || buf[2] != ND_BCP_MACRO_VIEW)
+		return 0;
+	nd_bcp_reader_t r;
+	nd_bcp_reader_init(&r, buf + 3, len - 3);
+	uint16_t count = nd_bcp_read_u16_c(&r);
+	if (count > 16) count = 16;
+	out->count = count;
+	for (uint16_t i = 0; i < count; i++) {
+		out->landmarks[i].rx = (int16_t)nd_bcp_read_u16_c(&r);
+		out->landmarks[i].ry = (int16_t)nd_bcp_read_u16_c(&r);
+		out->landmarks[i].world = nd_bcp_read_u16_c(&r);
+		out->landmarks[i].icon = nd_bcp_read_u8(&r);
+		out->landmarks[i].name_id = nd_bcp_read_u16_c(&r);
+	}
+	return nd_bcp_reader_ok(&r) ? 1 : -1;
+}
+
 #ifdef __cplusplus
 }
 #endif
