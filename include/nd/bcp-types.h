@@ -180,10 +180,10 @@ typedef struct {
 	uint8_t  pad;        /* 1 byte  (offset 23) */
 	char     name[32];   /* 32 bytes (offset 24..55) */
 	char     unparse[24];/* 24 bytes (offset 56..79) */
-	char     art[48];    /* 48 bytes (offset 80..127): fits "plant/arthrocereus_rondonianus/small/2.png" */
+	char     art[64];    /* 64 bytes (offset 80..143): fits "mineral/temperate_rainforest/ClusterSeixosMolhados_albedo.png" (61 chars) */
 } nd_entity_packet_t;
 
-_Static_assert(sizeof(nd_entity_packet_t) == 128, "nd_entity_packet_t size must be 128 bytes");
+_Static_assert(sizeof(nd_entity_packet_t) == 144, "nd_entity_packet_t size must be 144 bytes");
 
 typedef struct {
 	uint32_t ref;
@@ -205,7 +205,7 @@ typedef struct {
 	char     name[64];
 	char     desc[256];
 	uint32_t exits;
-	char     art[48];   /* biome backdrop path under /nd/art, from the room ITEM */
+	char     art[64];   /* biome backdrop path under /nd/art, from the room ITEM */
 } nd_room_desc_t;
 
 /* Macro region occupancy sparsity mask (64-bit bitmask for 256x256 room sectors) */

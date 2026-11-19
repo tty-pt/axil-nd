@@ -23,7 +23,7 @@ static const char nd_motd_default[] =
 void
 nd_bare_motd(socket_t fd)
 {
-	char dir[ENV_VALUE_LEN], path[ENV_VALUE_LEN], buf[BUFSIZ];
+	char dir[ENV_VALUE_LEN], path[ENV_VALUE_LEN + 16], buf[BUFSIZ];
 	const char *text = nd_motd_default;
 	FILE *f = NULL;
 
@@ -138,7 +138,7 @@ handle_nd(socket_t fd, char *body)
 			axil_respond(fd, 403, "Forbidden\n");
 			return 1;
 		}
-		char dir[ENV_VALUE_LEN], path[ENV_VALUE_LEN];
+		char dir[ENV_VALUE_LEN], path[ENV_VALUE_LEN * 2 + 2];
 		if (!nd_asset_dir(ND_ASSET_HTDOCS, dir, sizeof(dir)))
 			snprintf(dir, sizeof(dir), "%s", AXIL_HTDOCS);
 		snprintf(path, sizeof(path), "%s/%s", dir, file);
@@ -163,9 +163,9 @@ handle_nd(socket_t fd, char *body)
 static void
 nd_serve_art(socket_t fd, const char *rel)
 {
-	char dir[ENV_VALUE_LEN], path[ENV_VALUE_LEN];
+	char dir[ENV_VALUE_LEN], path[ENV_VALUE_LEN * 2 + 2];
 	if (nd_asset_dir(ND_ASSET_ART, dir, sizeof(dir))) {
-		snprintf(path, sizeof(path), "%s/%s", dir, rel);
+		snprintf(path, sizeof(path), "%s/%.*s", dir, (int)ENV_VALUE_LEN, rel);
 		if (access(path, R_OK) == 0) {
 			axil_sendfile(fd, path);
 			return;

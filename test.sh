@@ -37,8 +37,8 @@ make --no-print-directory man art
 
 # Room backdrop regression: every biome in biomes.dsv must resolve (the way
 # nd-obj formats room art: trailing digits stripped, "permanent ice" ->
-# tundra) to a shipped art dir, and the longest path must fit the 40-byte
-# art field of the 128-byte entity packet (39 chars + NUL).
+# tundra) to a shipped art dir, and the longest path must fit the 64-byte
+# art field of the 144-byte entity packet (63 chars + NUL).
 biomes_dsv="$(dirname "$0")/../nd-biome/data/biomes.dsv"
 if [ -f "$biomes_dsv" ]; then
 	grep -v '^#' "$biomes_dsv" | cut -d'|' -f1 | while IFS= read -r b; do

@@ -11,8 +11,9 @@
 
 ## [1.3.0]
 
-- **Packed 128-Byte Binary Entity Wire Contract (`nd_entity_packet_t`)**:
-  - Defined `nd_entity_packet_t` (exactly 128 bytes packed, static asserted) for high-performance zero-copy BCP entity transmission.
+- **Packed 144-Byte Binary Entity Wire Contract (`nd_entity_packet_t`)**:
+  - Defined `nd_entity_packet_t` (exactly 144 bytes packed, static asserted) for high-performance zero-copy BCP entity transmission.
+  - Expanded `art` field from 48 to 64 bytes to accommodate mineral paths like `mineral/temperate_rainforest/ClusterSeixosMolhados_albedo.png` (61 chars).
   - Added $O(1)$ fast-path unmarshaling directly into `nd_entity_desc_t`.
 - **Packed Binary Map Grid (`nd_map_data_t`) & Regional Layout**:
   - Implemented 400-byte binary map grid `nd_map_data_t` with symmetrical pure-C rendering across SSR and WASM.
