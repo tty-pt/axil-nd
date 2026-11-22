@@ -313,7 +313,7 @@ static inline int nd_bcp_unpack_entity_msg(const uint8_t *buf, size_t len, nd_en
 	if (buf[0] != ND_BCP_MAGIC_0 || buf[1] != ND_BCP_MAGIC_1 || buf[2] != ND_BCP_ITEM)
 		return 0;
 
-	/* Fast path: packed 128-byte binary contract */
+	/* Fast path: packed 144-byte binary contract */
 	if (len - 3 == sizeof(nd_entity_packet_t)) {
 		const nd_entity_packet_t *pkt = (const nd_entity_packet_t *)(buf + 3);
 		out->ref = pkt->ref;
@@ -330,7 +330,7 @@ static inline int nd_bcp_unpack_entity_msg(const uint8_t *buf, size_t len, nd_en
 		memcpy(out->unparse, pkt->unparse, sizeof(pkt->unparse));
 		out->unparse[sizeof(out->unparse) - 1] = '\0';
 		memcpy(out->art, pkt->art, sizeof(pkt->art));
-		out->art[sizeof(pkt->art)] = '\0'; /* out->art is 64 */
+		out->art[sizeof(out->art) - 1] = '\0';
 		return 1;
 	}
 
