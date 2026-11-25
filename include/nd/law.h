@@ -91,6 +91,9 @@ XY_DECL(int, nd_write, unsigned, player_ref, char *, str, size_t, len);
 XY_DECL(int, nd_wwrite, unsigned, player_ref, void *, msg, size_t, len);
 XY_DECL(int, nd_twrites, unsigned, player_ref, char *, str, size_t, len);
 
+/* O(1) RAM check: 1 if player_ref is attached to a DF_WEBSOCKET fd, else 0 */
+XY_DECL(int, nd_player_is_ws, unsigned, player_ref);
+
 /* close / flush all fds of a player */
 XY_DECL(int, nd_close, unsigned, player_ref);
 XY_DECL(int, nd_flush, unsigned, player_ref);

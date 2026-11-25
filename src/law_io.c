@@ -15,9 +15,83 @@ static struct {
 	unsigned n;
 } ioc[FD_SETSIZE];
 
+#define ND_IO_PFD_CAP  2048u
+#define ND_IO_PFD_MASK (ND_IO_PFD_CAP - 1u)
+
+typedef struct {
+	unsigned player_ref;
+	unsigned fd;
+	uint8_t  used;
+} nd_io_pfd_slot_t;
+
+static nd_io_pfd_slot_t pfd_map[ND_IO_PFD_CAP];
+static unsigned fd_to_player[FD_SETSIZE];
+static uint8_t  fd_attached[FD_SETSIZE];
+
 static unsigned dplayer_hd, fds_hd;
 
 void nd_store_set_hd(unsigned idx, unsigned val);
+
+static inline uint32_t
+pfd_hash(unsigned key)
+{
+	return (key * 2654435761u) & ND_IO_PFD_MASK;
+}
+
+static int
+pfd_map_get(unsigned player_ref)
+{
+	uint32_t i = pfd_hash(player_ref);
+	for (uint32_t probe = 0; probe < ND_IO_PFD_CAP; probe++) {
+		uint32_t idx = (i + probe) & ND_IO_PFD_MASK;
+		if (!pfd_map[idx].used)
+			return -1;
+		if (pfd_map[idx].player_ref == player_ref)
+			return (int)pfd_map[idx].fd;
+	}
+	return -1;
+}
+
+static void
+pfd_map_put(unsigned player_ref, unsigned fd)
+{
+	uint32_t i = pfd_hash(player_ref);
+	for (uint32_t probe = 0; probe < ND_IO_PFD_CAP; probe++) {
+		uint32_t idx = (i + probe) & ND_IO_PFD_MASK;
+		if (!pfd_map[idx].used || pfd_map[idx].player_ref == player_ref) {
+			pfd_map[idx].player_ref = player_ref;
+			pfd_map[idx].fd = fd;
+			pfd_map[idx].used = 1;
+			return;
+		}
+	}
+}
+
+static void
+pfd_map_del(unsigned player_ref)
+{
+	uint32_t i = pfd_hash(player_ref);
+	for (uint32_t probe = 0; probe < ND_IO_PFD_CAP; probe++) {
+		uint32_t idx = (i + probe) & ND_IO_PFD_MASK;
+		if (!pfd_map[idx].used)
+			return;
+		if (pfd_map[idx].player_ref == player_ref) {
+			/* Backward-shift deletion: zero tombstones ever accumulate */
+			uint32_t hole = idx;
+			uint32_t cur = (hole + 1u) & ND_IO_PFD_MASK;
+			while (pfd_map[cur].used) {
+				uint32_t home = pfd_hash(pfd_map[cur].player_ref);
+				if (((cur - home) & ND_IO_PFD_MASK) >= ((cur - hole) & ND_IO_PFD_MASK)) {
+					pfd_map[hole] = pfd_map[cur];
+					hole = cur;
+				}
+				cur = (cur + 1u) & ND_IO_PFD_MASK;
+			}
+			pfd_map[hole].used = 0;
+			return;
+		}
+	}
+}
 
 void
 nd_io_init(void)
@@ -33,13 +107,28 @@ void
 nd_io_attach(unsigned fd, unsigned player_ref)
 {
 	nd_io_init();
-	const void *old = corm_get(fds_hd, &player_ref);
-
-	if (old) {
-		unsigned ofd = *(const unsigned *)old;
-		if (ofd != fd)
-			corm_del(dplayer_hd, &ofd);
+	int old_fd = pfd_map_get(player_ref);
+	if (old_fd >= 0 && (unsigned)old_fd != fd) {
+		unsigned ofd = (unsigned)old_fd;
+		if (ofd < FD_SETSIZE) {
+			fd_attached[ofd] = 0;
+			fd_to_player[ofd] = 0;
+		}
+		corm_del(dplayer_hd, &ofd);
 	}
+	if (fd < FD_SETSIZE && fd_attached[fd] && fd_to_player[fd] != player_ref) {
+		unsigned old_p = fd_to_player[fd];
+		if (pfd_map_get(old_p) == (int)fd) {
+			pfd_map_del(old_p);
+			corm_del(fds_hd, &old_p);
+		}
+	}
+
+	if (fd < FD_SETSIZE) {
+		fd_to_player[fd] = player_ref;
+		fd_attached[fd] = 1;
+	}
+	pfd_map_put(player_ref, fd);
 	corm_put(dplayer_hd, &fd, &player_ref);
 	corm_put(fds_hd, &player_ref, &fd);
 }
@@ -47,27 +136,37 @@ nd_io_attach(unsigned fd, unsigned player_ref)
 void
 nd_io_detach(unsigned fd)
 {
-	const void *v = corm_get(dplayer_hd, &fd);
-	if (!v)
+	unsigned player_ref = 0;
+	int found = 0;
+
+	if (fd < FD_SETSIZE) {
+		if (fd_attached[fd]) {
+			player_ref = fd_to_player[fd];
+			fd_attached[fd] = 0;
+			fd_to_player[fd] = 0;
+			found = 1;
+		}
+	} else if (dplayer_hd) {
+		const void *v = corm_get(dplayer_hd, &fd);
+		if (v) {
+			player_ref = *(const unsigned *)v;
+			found = 1;
+		}
+	}
+	if (!found)
 		return;
 
-	unsigned player_ref = *(const unsigned *)v;
 	corm_del(dplayer_hd, &fd);
-
-	const void *cur = corm_get(fds_hd, &player_ref);
-	if (cur && *(const unsigned *)cur == fd)
+	if (pfd_map_get(player_ref) == (int)fd) {
+		pfd_map_del(player_ref);
 		corm_del(fds_hd, &player_ref);
+	}
 }
 
-static int
+static inline int
 nd_player_fd(unsigned player_ref)
 {
-	if (!fds_hd)
-		return -1;
-	const void *v = corm_get(fds_hd, &player_ref);
-	if (!v)
-		return -1;
-	return (int)*(const unsigned *)v;
+	return pfd_map_get(player_ref);
 }
 
 void
@@ -117,6 +216,8 @@ nd_io_flush_fd(unsigned fd)
 
 XY_IMPL(unsigned, fd_player, unsigned, fd)
 {
+	if (fd < FD_SETSIZE)
+		return fd_attached[fd] ? fd_to_player[fd] : 0;
 	if (!dplayer_hd)
 		return 0;
 	const void *v = corm_get(dplayer_hd, &fd);
@@ -178,6 +279,12 @@ XY_IMPL(int, nd_twrites, unsigned, player_ref, char *, str, size_t, len)
 		return 1;
 	}
 	return 0;
+}
+
+XY_IMPL(int, nd_player_is_ws, unsigned, player_ref)
+{
+	int fd = nd_player_fd(player_ref);
+	return (fd >= 0 && (axil_flags(fd) & DF_WEBSOCKET)) ? 1 : 0;
 }
 
 void
