@@ -82,8 +82,12 @@ NeverDark uses clean, natural command verbs without legacy `@` prefixes:
 
 The game world is extended through independent, hot-reloadable [libxylem](https://github.com/tty-pt/libxylem) modules:
 - **Core Entities**: `nd-core` (object trees), `nd-attr` (statistics), `nd-class` (character classes), `nd-race` (species traits).
-- **Environment**: `nd-biome` (climates & weather), `nd-plant` (flora & growth), `nd-wts` (world temporal state & day/night).
+- **Environment**: `nd-biome` (climates & weather), `nd-plant` (flora & growth), `nd-stone` (minerals & geology), `nd-wts` (world temporal state & day/night).
 - **Gameplay**: `nd-fight` (tactical combat), `nd-spell` (magic incantations), `nd-shop` (in-game merchants), `nd-seat` (resting).
+
+Core wire & I/O headers under `include/nd/`:
+- **Binary Client Protocol (`<nd/bcp.h>`, `<nd/bcp-types.h>`, `<nd/bcp-meta.h>`)**: Packed 144-byte `nd_entity_packet_t` and `nd_room_desc_t` contracts with 64-byte `art` paths, plus binary map grid and macro-view packets.
+- **Session I/O (`<nd/law.h>`)**: O(1) in-RAM `player_ref -> fd` hash map, `fd_player()` fast path, and `nd_player_is_ws()` WebSocket transport detection.
 
 ---
 

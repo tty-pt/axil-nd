@@ -1,13 +1,23 @@
 ## [Unreleased] (target: v1.4.0)
 
 ### Added
+- **In-RAM `player_ref -> fd` Hash Map & `nd_player_is_ws` (`src/law_io.c`, `include/nd/law.h`)**:
+  - Added an in-RAM `player_ref -> fd` hash map (`pfd_map_*`) and O(1) `fd_to_player[]` lookup fast path in `fd_player()`, avoiding per-call `corm_get` lookups on hot I/O paths.
+  - Exported `XY_DECL(int, nd_player_is_ws, unsigned, player_ref)` for O(1) RAM checks of whether a player is attached to a `DF_WEBSOCKET` file descriptor.
 - **BCP Macro View & Sparsity Protocol (`include/nd/bcp-meta.h`, `include/nd/bcp-types.h`)**:
   - Implemented `nd_bcp_pack_macro_view` and `nd_bcp_unpack_macro_view` wire serialization.
   - Defined `ND_BCP_SPARSITY` and `ND_BCP_MACRO_VIEW` opcode packets.
   - Defined `ND_MAP_FLAG_WATER` (0x20) flag for submerged tile protocol in `include/nd/bcp.h`.
 
+### Changed
+- **Expanded Entity & Room Art Fields (`include/nd/bcp-types.h`, `test.sh`)**:
+  - Expanded `nd_entity_packet_t` from 128 to 144 bytes (`art[48]` → `art[64]`, static-asserted at 144 bytes) and `nd_room_desc_t.art` from 48 to 64 bytes to accommodate longer biome-qualified art paths (e.g. 61-char mineral sprites).
+
 ### Fixed
-- Updated fallback page HTML scripts and stylesheets in `src/http.c`.
+- **Entity Art Path Off-by-One NUL Write (`include/nd/bcp-meta.h`)**:
+  - Fixed an off-by-one NUL terminator write on `out->art` (`out->art[sizeof(out->art) - 1] = '\0'`) in `nd_bcp_unpack_entity_msg()`.
+- **HTTP Asset Path Buffer Hardening (`src/http.c`)**:
+  - Expanded path buffers in `nd_bare_motd()` (`ENV_VALUE_LEN + 16`), `handle_nd()`, and `nd_serve_art()` (`ENV_VALUE_LEN * 2 + 2`, with `%.*s` length bound) and updated fallback page HTML scripts and stylesheets.
 
 ## [1.3.0]
 
